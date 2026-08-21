@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import re
 
 from llama_index.core import Document
 from llama_index.core.node_parser import SentenceWindowNodeParser
@@ -20,6 +21,7 @@ CHUNKS_ROOT = KNOWLEDGE_ROOT / "chunks"
 DEFAULT_WINDOW_SIZE = 5
 NODE_OUTPUT_NAME = "sentence_window_nodes.jsonl"
 MARKDOWN_EXTENSIONS = {".md", ".markdown", ".mdown"}
+MARKDOWN_HEADING_PATTERN = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")
 
 
 def load_markdown_documents(
@@ -50,12 +52,56 @@ def load_markdown_documents(
         document_id = (document_ids_by_source or {}).get(path.name)
         if document_id:
             metadata["document_id"] = document_id
-        documents.append(
-            Document(
-                text=path.read_text(encoding="utf-8"),
-                metadata=metadata,
+        documents.extend(
+            _split_markdown_sections(
+                path.read_text(encoding="utf-8"),
+                metadata,
+                default_title=path.stem,
             )
         )
+    return documents
+
+
+def _split_markdown_sections(
+    markdown: str,
+    base_metadata: dict[str, str],
+    *,
+    default_title: str,
+) -> list[Document]:
+    """Split Markdown into heading-scoped documents with inherited metadata."""
+    documents: list[Document] = []
+    heading_stack: list[str] = []
+    document_title = default_title
+    section_lines: list[str] = []
+
+    def append_section() -> None:
+        text = "\n".join(section_lines).strip()
+        if not text:
+            return
+        metadata = {
+            **base_metadata,
+            "document_title": document_title,
+            "section_title": heading_stack[-1] if heading_stack else "",
+            "heading_path": list(heading_stack),
+        }
+        documents.append(Document(text=text, metadata=metadata))
+
+    for line in markdown.splitlines():
+        match = MARKDOWN_HEADING_PATTERN.match(line)
+        if not match:
+            section_lines.append(line)
+            continue
+
+        append_section()
+        section_lines = []
+        level = len(match.group(1))
+        title = match.group(2).strip()
+        heading_stack = heading_stack[: level - 1]
+        heading_stack.append(title)
+        if level == 1:
+            document_title = title
+
+    append_section()
     return documents
 
 
@@ -93,7 +139,26 @@ def build_sentence_window_nodes(
         window_metadata_key="window",
         original_text_metadata_key="original_text",
     )
-    return parser.get_nodes_from_documents(documents)
+    nodes = parser.get_nodes_from_documents(documents)
+    chunk_indexes: dict[str, int] = {}
+    for node in nodes:
+        source_file = str(node.metadata.get("source_file") or "")
+        chunk_indexes[source_file] = chunk_indexes.get(source_file, 0) + 1
+        node.metadata["chunk_index"] = chunk_indexes[source_file]
+        node.metadata["embedding_text"] = _build_embedding_text(node.text, node.metadata)
+    return nodes
+
+
+def _build_embedding_text(text: str, metadata: dict[str, object]) -> str:
+    """Add Markdown structure to the text used only for vector embedding."""
+    heading_path = metadata.get("heading_path")
+    heading_text = " > ".join(heading_path) if isinstance(heading_path, list) else ""
+    fields = [
+        ("文档", metadata.get("document_title")),
+        ("章节", heading_text),
+        ("正文", text),
+    ]
+    return "\n".join(f"{label}：{value}" for label, value in fields if value)
 
 
 def write_sentence_window_nodes(

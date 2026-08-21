@@ -8,8 +8,11 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
+
+from ..runtime.logging import get_run_logger, log_step
 
 _PROMPT_PATH = Path(__file__).resolve().parent.parent / "prompts" / "code_based_modeling.md"
 _CODE_PROMPT_PATH = Path(__file__).resolve().parent.parent / "prompts" / "code_generation.md"
@@ -28,6 +31,10 @@ class CodeModelingError(Exception):
 
 class LLMTimeoutError(CodeModelingError):
     """LLM 调用超时。上层应"超时即回退"，不重试同一生成。"""
+
+
+class LLMEmptyResponseError(CodeModelingError):
+    """LLM 返回对象存在，但其中没有可用的文本内容。"""
 
 
 class CodeModeler:
@@ -69,7 +76,9 @@ class CodeModeler:
             f"[code_modeler] 第 1 段：LLM 根据问题设计数学模型"
             f"（超时 {MODEL_DESIGN_TIMEOUT}s）..."
         )
-        content = self._invoke(prompt, timeout=MODEL_DESIGN_TIMEOUT)
+        content = self._invoke(
+            prompt, timeout=MODEL_DESIGN_TIMEOUT, stage="model_design"
+        )
 
         model_json = self._parse_json(content)
         model_json.setdefault("model_name", "未命名模型")
@@ -106,7 +115,9 @@ class CodeModeler:
             f"[code_modeler] 第 2 段：LLM 生成求解代码"
             f"（模型={model_json.get('model_name', '?')}，超时 {CODE_GENERATION_TIMEOUT}s）..."
         )
-        content = self._invoke(prompt, timeout=CODE_GENERATION_TIMEOUT)
+        content = self._invoke(
+            prompt, timeout=CODE_GENERATION_TIMEOUT, stage="code_generation"
+        )
 
         code = self._extract_code(content)
         code_len = len(code)
@@ -117,8 +128,14 @@ class CodeModeler:
     # LLM 调用（超时 + 进度）
     # ------------------------------------------------------------------
 
-    def _invoke(self, prompt: str, timeout: float) -> str:
-        """调用 LLM，超时抛 LLMTimeoutError，等待期间打印进度。"""
+    def _invoke(self, prompt: str, timeout: float, stage: str = "unknown") -> str:
+        """调用 LLM，超时抛 LLMTimeoutError，等待期间打印进度。
+
+        Args:
+            prompt: 发给 LLM 的提示词。
+            timeout: 调用超时秒数。
+            stage: 当前生成阶段，用于问题追溯。
+        """
         import threading
 
         box: dict[str, Any] = {}
@@ -148,7 +165,17 @@ class CodeModeler:
         if "raw" not in box:
             raise CodeModelingError("LLM 调用未返回结果")
         raw = box["raw"]
-        return self._extract_content(raw)
+        try:
+            return self._extract_content(raw)
+        except LLMEmptyResponseError as exc:
+            log_step(
+                get_run_logger(),
+                "code_modeler.llm_response",
+                "failed",
+                error=str(exc),
+                detail=f"阶段: {stage}",
+            )
+            raise
 
     # ------------------------------------------------------------------
     # Prompt 构建
@@ -204,10 +231,70 @@ class CodeModeler:
 
     @staticmethod
     def _extract_content(raw: Any) -> str:
-        """兼容 langchain 消息对象与纯字符串。"""
-        if hasattr(raw, "content"):
-            return str(raw.content)
-        return str(raw)
+        """从常见 LLM 响应对象中提取文本，并保留空响应诊断信息。
+
+        常规 LangChain 响应使用 ``content``。部分兼容端点会把最终内容放在
+        ``text``、``additional_kwargs`` 或分段内容列表中，因此仅在 content
+        为空时按这些字段回退。若仍不可用，错误只记录响应结构，不记录回复正文。
+        """
+        if isinstance(raw, str):
+            if raw.strip():
+                return raw
+            raise LLMEmptyResponseError("LLM 响应为空（响应类型: str）")
+
+        candidates = [
+            CodeModeler._get_response_value(raw, "content"),
+            CodeModeler._get_response_value(raw, "text"),
+        ]
+        additional_kwargs = CodeModeler._get_response_value(raw, "additional_kwargs")
+        if isinstance(additional_kwargs, Mapping):
+            candidates.extend(
+                additional_kwargs.get(key)
+                for key in ("content", "text", "output_text", "final", "reasoning_content")
+            )
+
+        for candidate in candidates:
+            content = CodeModeler._content_to_text(candidate)
+            if content:
+                return content
+
+        fields = CodeModeler._response_fields(raw)
+        raise LLMEmptyResponseError(
+            f"LLM 响应为空（响应类型: {type(raw).__name__}，可用字段: {fields}）"
+        )
+
+    @staticmethod
+    def _get_response_value(raw: Any, key: str) -> Any:
+        """从映射或消息对象读取指定响应字段。"""
+        if isinstance(raw, Mapping):
+            return raw.get(key)
+        return getattr(raw, key, None)
+
+    @staticmethod
+    def _content_to_text(value: Any) -> str:
+        """将字符串或 LangChain 分段内容规整为文本。"""
+        if isinstance(value, str):
+            return value.strip()
+        if not isinstance(value, list):
+            return ""
+
+        parts: list[str] = []
+        for item in value:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, Mapping):
+                text = item.get("text") or item.get("content")
+                if isinstance(text, str):
+                    parts.append(text)
+        return "\n".join(part.strip() for part in parts if part.strip())
+
+    @staticmethod
+    def _response_fields(raw: Any) -> str:
+        """返回可安全写入日志的响应结构摘要。"""
+        if isinstance(raw, Mapping):
+            return ", ".join(sorted(str(key) for key in raw.keys())) or "无"
+        values = vars(raw) if hasattr(raw, "__dict__") else {}
+        return ", ".join(sorted(values.keys())) or "无"
 
     @staticmethod
     def _parse_json(content: str) -> dict:

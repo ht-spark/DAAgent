@@ -8,7 +8,11 @@ from KnowledgeBase import embedding
 
 
 class _FakeEmbeddingModel:
+    def __init__(self):
+        self.texts: list[str] = []
+
     def embed_documents(self, texts: list[str]):
+        self.texts = texts
         return [[float(index + 1), 0.5, 0.25] for index, _ in enumerate(texts)]
 
 
@@ -26,6 +30,11 @@ def test_build_local_qdrant_index_uses_local_chunks(monkeypatch, tmp_path):
                         "source_file": "reference.md",
                         "source_path": "C:/example/reference.md",
                         "document_id": "document-uuid",
+                        "document_title": "参考资料",
+                        "section_title": "模型假设",
+                        "heading_path": ["参考资料", "模型假设"],
+                        "chunk_index": 1,
+                        "embedding_text": "文档：参考资料\n章节：参考资料 > 模型假设\n正文：第一句。",
                     },
                 },
                 ensure_ascii=False,
@@ -38,10 +47,11 @@ def test_build_local_qdrant_index_uses_local_chunks(monkeypatch, tmp_path):
     model_path.mkdir()
     (model_path / "config.json").write_text("{}", encoding="utf-8")
     qdrant_path = tmp_path / "qdrant_db"
+    model = _FakeEmbeddingModel()
     monkeypatch.setattr(
         embedding,
         "_load_huggingface_embedding_model",
-        lambda path: _FakeEmbeddingModel(),
+        lambda path: model,
     )
 
     result = embedding.build_local_qdrant_index(chunk_path, model_path, qdrant_path)
@@ -55,6 +65,9 @@ def test_build_local_qdrant_index_uses_local_chunks(monkeypatch, tmp_path):
     assert collection.config.params.vectors.size == 3
     assert points[0].payload["source_file"] == "reference.md"
     assert points[0].payload["document_id"] == "document-uuid"
+    assert points[0].payload["heading_path"] == ["参考资料", "模型假设"]
+    assert points[0].payload["chunk_index"] == 1
+    assert model.texts[0].startswith("文档：参考资料")
     assert result.source_chunk_counts == {"reference.md": 2}
 
     embedding.delete_document_vectors({"document-uuid"}, qdrant_path)

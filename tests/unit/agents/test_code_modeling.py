@@ -16,6 +16,7 @@ import pytest
 
 from scr.agents.code_modeler import (
     CodeModeler,
+    LLMEmptyResponseError,
     CodeModelingError,
     LLMTimeoutError,
 )
@@ -27,6 +28,14 @@ from scr.schemas.question import CurrentQuestionContext, ProblemInterpretation
 class _Msg:
     def __init__(self, content: str) -> None:
         self.content = content
+
+
+class _ReasoningOnlyMsg:
+    """模拟把输出置于兼容端点附加字段的消息对象。"""
+
+    def __init__(self, content: str, reasoning_content: str) -> None:
+        self.content = content
+        self.additional_kwargs = {"reasoning_content": reasoning_content}
 
 
 class MockLLM:
@@ -130,6 +139,14 @@ class TestCodeModelerModelDesign:
         with pytest.raises(CodeModelingError, match="无法从 LLM 响应中解析"):
             modeler.generate_model("小问", "optimization")
 
+    def test_uses_reasoning_content_when_content_is_empty(self):
+        class ReasoningOnlyLLM:
+            def invoke(self, prompt: str) -> _ReasoningOnlyMsg:
+                return _ReasoningOnlyMsg("", _model_design())
+
+        model = CodeModeler(ReasoningOnlyLLM()).generate_model("小问", "optimization")
+        assert model["model_name"] == "测试LP"
+
 
 class TestCodeModelerCodeGeneration:
     def test_generate_code_plain(self):
@@ -147,6 +164,16 @@ class TestCodeModelerCodeGeneration:
         modeler = CodeModeler(MockLLM(["   \n  "]))
         with pytest.raises(CodeModelingError, match="响应为空"):
             modeler.generate_code(json.loads(_model_design()))
+
+    def test_empty_message_reports_response_shape(self):
+        class EmptyMessageLLM:
+            def invoke(self, prompt: str) -> _ReasoningOnlyMsg:
+                return _ReasoningOnlyMsg("", "")
+
+        modeler = CodeModeler(EmptyMessageLLM())
+        with pytest.raises(LLMEmptyResponseError, match="响应类型: _ReasoningOnlyMsg") as exc:
+            modeler.generate_code(json.loads(_model_design()))
+        assert "additional_kwargs" in str(exc.value)
 
 
 class TestLLMTimeout:

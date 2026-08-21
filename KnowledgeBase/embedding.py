@@ -97,7 +97,7 @@ def build_local_qdrant_index(
         raise FileNotFoundError(f"未找到本地嵌入模型：{model_path}")
 
     model = _load_huggingface_embedding_model(model_path)
-    texts = [record["text"] for record in records]
+    texts = [_embedding_text(record) for record in records]
     vectors = _embed_texts(model, texts)
     if len(vectors) != len(records) or not vectors or not vectors[0]:
         raise RuntimeError("嵌入模型返回的向量数量或维度无效")
@@ -165,6 +165,16 @@ def _embed_texts(model: Any, texts: list[str]) -> list[list[float]]:
     return [list(map(float, vector)) for vector in vectors]
 
 
+def _embedding_text(record: dict[str, Any]) -> str:
+    """Return the structure-aware text for vector embedding.
+
+    Existing node artifacts without ``embedding_text`` remain indexable.
+    """
+    metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
+    embedding_text = metadata.get("embedding_text")
+    return embedding_text if isinstance(embedding_text, str) and embedding_text.strip() else record["text"]
+
+
 def delete_document_vectors(
     document_ids: set[str],
     qdrant_path: Path = QDRANT_PATH,
@@ -212,6 +222,10 @@ def _node_payload(record: dict[str, Any]) -> dict[str, Any]:
         "original_text": str(metadata.get("original_text") or ""),
         "source_file": str(metadata.get("source_file") or ""),
         "source_path": str(metadata.get("source_path") or ""),
+        "document_title": str(metadata.get("document_title") or ""),
+        "section_title": str(metadata.get("section_title") or ""),
+        "heading_path": metadata.get("heading_path") if isinstance(metadata.get("heading_path"), list) else [],
+        "chunk_index": int(metadata.get("chunk_index") or 0),
     }
 
 

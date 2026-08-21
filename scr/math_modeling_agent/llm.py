@@ -96,11 +96,11 @@ def create_llm(
             kwargs["base_url"] = resolved_url
         # 单次调用超时（秒）。避免 LLM 端点无响应时线程无限阻塞，
         # 也让「中断任务」能在当前节点结束后尽快在边界生效。
-        kwargs["timeout"] = 120
+        kwargs["timeout"] = 180
         # 生成参数：控制输出的随机性
         kwargs["temperature"] = 0.3
         # 最大生成长度（字符）
-        kwargs["max_tokens"] = 40000
+        kwargs["max_tokens"] = 5000
         return ChatOpenAI(**kwargs)
     except ImportError:
         get_logger().warning("[llm] langchain_openai 未安装，LLM 不可用")
