@@ -1040,6 +1040,8 @@
 .kb-history-table .kb-history-action { width: 120px; text-align: center; }
 .kb-history-table .kb-history-detail { text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 360px; }
 .kb-history-table .kb-history-status { width: 100px; text-align: center; }
+.kb-history-table .kb-history-open { width: 140px; text-align: center; }
+.kb-history-table .kb-history-open .api-btn { padding: 5px 12px; font-size: 12px; }
 
 .kb-empty-row { text-align: center; color: var(--text-tertiary); padding: 32px 12px; }
 
@@ -1383,6 +1385,26 @@
 }
 .ce-summary-num { color: var(--primary-700, #3b4890); font-size: 20px; font-weight: 750; font-variant-numeric: tabular-nums; }
 .ce-summary-label { color: var(--text-tertiary); font-size: 11px; }
+
+/* 设置页顶部居中的统计条（待处理文档 / 预估分块） */
+.ce-summary-inline {
+  display: flex;
+  justify-content: center;
+  gap: 14px;
+  margin-bottom: 16px;
+}
+.ce-summary-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  min-width: 200px;
+  padding: 12px 28px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-card-solid);
+  box-shadow: var(--shadow-sm);
+}
 
 .ce-table-section {
   background: var(--bg-card-solid);

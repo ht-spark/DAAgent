@@ -38,10 +38,13 @@ export default function ChunkEmbeddingProgress({
   options,
   onBack,
   onNext,
+  visibleDocumentIds,
 }: {
   options: ChunkEmbeddingOptions
   onBack: () => void
   onNext: () => void
+  /** 只展示这些文档 ID（当前上传批次）；缺省时展示全库。 */
+  visibleDocumentIds?: string[]
 }) {
   const [documents, setDocuments] = useState<KnowledgeDocument[]>([])
   const [loading, setLoading] = useState(true)
@@ -52,9 +55,16 @@ export default function ChunkEmbeddingProgress({
 
   useEffect(() => {
     getKnowledgeStatus()
-      .then((status) => setDocuments(status.documents))
+      .then((status) =>
+        setDocuments(
+          status.documents.filter(
+            (doc) => !visibleDocumentIds || visibleDocumentIds.includes(doc.id),
+          ),
+        ),
+      )
       .catch((reason: unknown) => setError(reason instanceof Error ? reason.message : '无法连接知识库服务。'))
       .finally(() => setLoading(false))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   function estimateChunks(doc: KnowledgeDocument): number {
@@ -83,10 +93,12 @@ export default function ChunkEmbeddingProgress({
     const refreshProgress = async () => {
       try {
         const progress = await getKnowledgeChunkEmbedProgress()
-        if (!polling || (progress.stage !== 'chunking' && progress.stage !== 'embedding')) return
+        // 提取到 const 局部变量：属性收窄无法保留进下方嵌套闭包。
+        const activeStage = progress.stage
+        if (!polling || (activeStage !== 'chunking' && activeStage !== 'embedding')) return
         setProgressMap(
           Object.fromEntries(
-            documents.map((doc) => [doc.id, { stage: progress.stage, chunks: estimateChunks(doc) }]),
+            documents.map((doc) => [doc.id, { stage: activeStage, chunks: estimateChunks(doc) }]),
           ),
         )
       } catch {
@@ -96,7 +108,7 @@ export default function ChunkEmbeddingProgress({
     const progressTimer = window.setInterval(() => void refreshProgress(), 400)
     void refreshProgress()
     try {
-      const result = await chunkAndEmbedKnowledge()
+      const result = await chunkAndEmbedKnowledge(options.windowSize)
       setProgressMap(
         Object.fromEntries(
           documents.map((doc) => {

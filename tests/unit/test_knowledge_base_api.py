@@ -7,7 +7,7 @@ import json
 from fastapi import UploadFile
 from KnowledgeBase import upload_file
 from server import main
-from server.schemas import KnowledgeDocumentsDeleteBody
+from server.schemas import KnowledgeChunkEmbedRequest, KnowledgeDocumentsDeleteBody
 from KnowledgeBase.embedding import IndexBuildResult
 
 
@@ -100,8 +100,11 @@ def test_chunk_embed_endpoint_returns_actual_index_counts(monkeypatch, tmp_path)
     documents_root.mkdir()
     monkeypatch.setattr(upload_file, "DOCUMENTS_ROOT", documents_root)
     prepared = upload_file.prepare_upload("reference.md", b"# Reference\n")[0]
-    def chunk_documents():
+    chunk_kwargs_history: list[dict] = []
+
+    def chunk_documents(**kwargs):
         assert main._get_knowledge_processing_progress().stage == "chunking"
+        chunk_kwargs_history.append(kwargs)
         return tmp_path / "nodes.jsonl"
 
     def build_index():
@@ -114,19 +117,26 @@ def test_chunk_embed_endpoint_returns_actual_index_counts(monkeypatch, tmp_path)
             source_chunk_counts={prepared.name: 3},
         )
 
-    monkeypatch.setattr(main, "chunk_knowledge_documents", lambda **kwargs: chunk_documents())
+    monkeypatch.setattr(main, "chunk_knowledge_documents", lambda **kwargs: chunk_documents(**kwargs))
     monkeypatch.setattr(
         main,
         "build_local_qdrant_index",
         build_index,
     )
 
-    result = asyncio.run(main.chunk_and_embed_knowledge_endpoint())
+    default_result = asyncio.run(main.chunk_and_embed_knowledge_endpoint())
+    body_result = asyncio.run(
+        main.chunk_and_embed_knowledge_endpoint(KnowledgeChunkEmbedRequest(window_size=3))
+    )
 
-    assert result.chunks_indexed == 3
-    assert result.vector_size == 512
-    assert result.document_chunks == {prepared.document_id: 3}
+    assert default_result.chunks_indexed == 3
+    assert body_result.vector_size == 512
+    assert body_result.document_chunks == {prepared.document_id: 3}
     assert main._get_knowledge_processing_progress().stage == "done"
+    assert [kwargs["window_size"] for kwargs in chunk_kwargs_history] == [
+        main.DEFAULT_WINDOW_SIZE,
+        3,
+    ]
 
 
 def test_brainstorm_stream_endpoint_yields_tokens_and_saves_on_completion(monkeypatch):

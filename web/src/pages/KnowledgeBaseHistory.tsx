@@ -1,6 +1,6 @@
 import { useMemo } from 'react'
 
-import { loadKnowledgeHistory, type KnowledgeHistoryAction } from '../knowledgeHistory'
+import { loadKnowledgeHistory, type KnowledgeHistoryAction, type KnowledgeHistoryEvent } from '../knowledgeHistory'
 
 const ACTION_LABELS: Record<KnowledgeHistoryAction, string> = {
   upload: '上传文件',
@@ -13,7 +13,15 @@ const STATUS_LABELS = {
   failure: '失败',
 }
 
-export default function KnowledgeBaseHistory() {
+function canOpenUploadTask(event: KnowledgeHistoryEvent): boolean {
+  return event.action === 'upload' && Array.isArray(event.documentIds) && event.documentIds.length > 0
+}
+
+export default function KnowledgeBaseHistory({
+  onOpenUploadTask,
+}: {
+  onOpenUploadTask?: (documentIds: string[]) => void
+}) {
   const events = useMemo(() => loadKnowledgeHistory(), [])
 
   return (
@@ -39,12 +47,13 @@ export default function KnowledgeBaseHistory() {
                 <th className="kb-history-action">操作</th>
                 <th className="kb-history-detail">详情</th>
                 <th className="kb-history-status">状态</th>
+                <th className="kb-history-open">操作入口</th>
               </tr>
             </thead>
             <tbody>
               {events.length === 0 && (
                 <tr>
-                  <td colSpan={4} className="kb-empty-row">暂无知识库维护记录</td>
+                  <td colSpan={5} className="kb-empty-row">暂无知识库维护记录</td>
                 </tr>
               )}
               {events.map((event) => (
@@ -62,6 +71,17 @@ export default function KnowledgeBaseHistory() {
                   <td className="kb-history-detail" title={event.detail}>{event.detail}</td>
                   <td className="kb-history-status">
                     <span className={`kb-tag kb-tag-${event.status === 'failure' ? 'fail' : 'success'}`}>{STATUS_LABELS[event.status]}</span>
+                  </td>
+                  <td className="kb-history-open">
+                    {canOpenUploadTask(event) && onOpenUploadTask && (
+                      <button
+                        type="button"
+                        className="api-btn"
+                        onClick={() => onOpenUploadTask(event.documentIds!)}
+                      >
+                        查看上传任务
+                      </button>
+                    )}
                   </td>
                 </tr>
               ))}

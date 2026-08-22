@@ -6,6 +6,7 @@ export type KnowledgeHistoryEvent = {
   action: KnowledgeHistoryAction
   detail: string
   status: 'success' | 'failure'
+  documentIds?: string[]
 }
 
 const KEY_HISTORY = 'mmagent.knowledgeHistory'

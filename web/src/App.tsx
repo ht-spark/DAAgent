@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import Sidebar from './components/Sidebar'
 import { syncApiSettingsCache } from './api'
 import Home from './pages/Home'
@@ -31,10 +31,17 @@ export default function App() {
   const [modelingView, setModelingView] = useState<ModelingView>('overview')
   const [brainstormView, setBrainstormView] = useState<BrainstormView>('overview')
   const [discussionId, setDiscussionId] = useState<string | null>(null)
+  // 知识库上传页的进入方式：新批次（空表开始）或回看历史某次上传批次。
+  const [kbEntry, setKbEntry] = useState<{
+    startEmpty: boolean
+    filterIds?: string[]
+    from: BrainstormView
+  } | null>(null)
   const [chunkEmbeddingOptions, setChunkEmbeddingOptions] = useState<ChunkEmbeddingOptions>({
     strategy: 'semantic',
     chunkSize: 800,
     overlap: 100,
+    windowSize: 5,
   })
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [task, setTask] = useState<{ step: TaskStep; runId: string | null }>({
@@ -46,6 +53,11 @@ export default function App() {
   // 换浏览器/端口或清缓存后无需重新设置。
   useEffect(() => {
     void syncApiSettingsCache()
+  }, [])
+
+  // 知识库上传页展示的文档清单变化时，记录为当前批次的 ID 集合。
+  const handleKbVisibleIds = useCallback((documentIds: string[]) => {
+    setKbEntry((entry) => (entry ? { ...entry, filterIds: documentIds } : entry))
   }, [])
 
   function enterModeling() {
@@ -76,7 +88,12 @@ export default function App() {
       // 资料统计页返回知识库维护页；分块设置页返回资料统计页；执行页返回设置页。
       if (brainstormView === 'knowledge-hub') {
         setBrainstormView('overview')
+      } else if (brainstormView === 'knowledge' && kbEntry?.from === 'knowledge-history') {
+        // 从历史记录进入的上传批次页，返回时回到历史列表。
+        setKbEntry(null)
+        setBrainstormView('knowledge-history')
       } else if (brainstormView === 'knowledge' || brainstormView === 'knowledge-history') {
+        setKbEntry(null)
         setBrainstormView('knowledge-hub')
       } else if (brainstormView === 'stats') {
         setBrainstormView('knowledge')
@@ -162,24 +179,40 @@ export default function App() {
         )}
         {section === 'brainstorm' && brainstormView === 'knowledge-hub' && (
           <KnowledgeBaseHub
-            onUpdate={() => setBrainstormView('knowledge')}
+            onUpdate={() => {
+              // 每次进入知识库更新都是新批次：上传页从空白开始。
+              setKbEntry({ startEmpty: true, from: 'knowledge-hub' })
+              setBrainstormView('knowledge')
+            }}
             onHistory={() => setBrainstormView('knowledge-history')}
           />
         )}
         {section === 'brainstorm' && brainstormView === 'knowledge' && (
           <KnowledgeBase
+            startEmpty={kbEntry?.startEmpty ?? false}
+            visibleDocumentIds={kbEntry?.filterIds}
+            onVisibleIdsChange={handleKbVisibleIds}
             onNext={() => setBrainstormView('stats')}
           />
         )}
-        {section === 'brainstorm' && brainstormView === 'knowledge-history' && <KnowledgeBaseHistory />}
+        {section === 'brainstorm' && brainstormView === 'knowledge-history' && (
+          <KnowledgeBaseHistory
+            onOpenUploadTask={(documentIds) => {
+              setKbEntry({ startEmpty: false, filterIds: documentIds, from: 'knowledge-history' })
+              setBrainstormView('knowledge')
+            }}
+          />
+        )}
         {section === 'brainstorm' && brainstormView === 'stats' && (
           <KnowledgeBaseStats
+            visibleDocumentIds={kbEntry?.filterIds}
             onBack={() => setBrainstormView('knowledge')}
             onNext={() => setBrainstormView('chunking')}
           />
         )}
         {section === 'brainstorm' && brainstormView === 'chunking' && (
           <ChunkEmbedding
+            visibleDocumentIds={kbEntry?.filterIds}
             onBack={() => setBrainstormView('stats')}
             onNext={(options) => {
               setChunkEmbeddingOptions(options)
@@ -191,6 +224,7 @@ export default function App() {
         {section === 'brainstorm' && brainstormView === 'chunking-progress' && (
           <ChunkEmbeddingProgress
             options={chunkEmbeddingOptions}
+            visibleDocumentIds={kbEntry?.filterIds}
             onBack={() => setBrainstormView('chunking')}
             onNext={() => setBrainstormView('retrieval-ready')}
           />

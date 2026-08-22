@@ -111,6 +111,17 @@ class KnowledgeDocumentsDeleteBody(BaseModel):
     document_ids: list[str] = Field(min_length=1)
 
 
+class KnowledgeChunkEmbedRequest(BaseModel):
+    """Parameters for the local chunking and embedding operation."""
+
+    window_size: int = Field(
+        default=5,
+        ge=1,
+        le=20,
+        description="句子窗口大小：每个分块向前后扩展的句子数",
+    )
+
+
 class KnowledgeChunkEmbedResponse(BaseModel):
     """Completed local chunking and embedding operation."""
 

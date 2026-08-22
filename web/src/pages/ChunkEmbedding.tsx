@@ -8,6 +8,7 @@ export type ChunkEmbeddingOptions = {
   strategy: Strategy
   chunkSize: number
   overlap: number
+  windowSize: number
 }
 
 /** 按扩展名估算文档字符量（仅用于前端预估分块数，实际值以后端执行结果为准）。 */
@@ -24,10 +25,13 @@ export default function ChunkEmbedding({
   onBack,
   onNext,
   initialOptions,
+  visibleDocumentIds,
 }: {
   onBack: () => void
   onNext: (options: ChunkEmbeddingOptions) => void
   initialOptions: ChunkEmbeddingOptions
+  /** 只统计这些文档 ID（当前上传批次）；缺省时统计全库。 */
+  visibleDocumentIds?: string[]
 }) {
   const [documents, setDocuments] = useState<KnowledgeDocument[]>([])
   const [loading, setLoading] = useState(true)
@@ -35,12 +39,20 @@ export default function ChunkEmbedding({
   const [strategy, setStrategy] = useState<Strategy>(initialOptions.strategy)
   const [chunkSize, setChunkSize] = useState(initialOptions.chunkSize)
   const [overlap, setOverlap] = useState(initialOptions.overlap)
+  const [windowSize, setWindowSize] = useState(initialOptions.windowSize)
 
   useEffect(() => {
     getKnowledgeStatus()
-      .then((status) => setDocuments(status.documents))
+      .then((status) =>
+        setDocuments(
+          status.documents.filter(
+            (doc) => !visibleDocumentIds || visibleDocumentIds.includes(doc.id),
+          ),
+        ),
+      )
       .catch((reason: unknown) => setError(reason instanceof Error ? reason.message : '无法连接知识库服务。'))
       .finally(() => setLoading(false))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   function estimateChunks(doc: KnowledgeDocument): number {
@@ -85,6 +97,17 @@ export default function ChunkEmbedding({
       </div>
 
       {error && <div className="err-box">{error}</div>}
+
+      <div className="ce-summary-inline">
+        <div className="ce-summary-cell">
+          <span className="ce-summary-num">{documents.length}</span>
+          <span className="ce-summary-label">待处理文档</span>
+        </div>
+        <div className="ce-summary-cell">
+          <span className="ce-summary-num">{totalChunks}</span>
+          <span className="ce-summary-label">预估分块</span>
+        </div>
+      </div>
 
       <div className="ce-config-grid">
         {/* 分块设置 */}
@@ -152,6 +175,22 @@ export default function ChunkEmbedding({
             />
             <p className="ce-field-hint">相邻分块共享的字符数，缓解关键信息被切断的问题。</p>
           </div>
+
+          <div className="ce-field">
+            <label>
+              窗口大小
+              <span className="ce-field-value">{windowSize} 句</span>
+            </label>
+            <input
+              type="range"
+              min={1}
+              max={10}
+              step={1}
+              value={windowSize}
+              onChange={(event) => setWindowSize(Number(event.target.value))}
+            />
+            <p className="ce-field-hint">每个分块向前后扩展的句子数，检索命中时返回更完整的上下文。</p>
+          </div>
         </div>
 
         {/* 嵌入设置 */}
@@ -174,17 +213,6 @@ export default function ChunkEmbedding({
             <label>向量存储</label>
             <div className="ce-static-value">本地向量索引（随知识库运行目录持久化）</div>
           </div>
-
-          <div className="ce-summary">
-            <div>
-              <span className="ce-summary-num">{documents.length}</span>
-              <span className="ce-summary-label">待处理文档</span>
-            </div>
-            <div>
-              <span className="ce-summary-num">{totalChunks}</span>
-              <span className="ce-summary-label">预估分块</span>
-            </div>
-          </div>
         </div>
       </div>
 
@@ -193,7 +221,7 @@ export default function ChunkEmbedding({
         <button
           className="api-btn primary"
           disabled={documents.length === 0 || loading}
-          onClick={() => onNext({ strategy, chunkSize, overlap })}
+          onClick={() => onNext({ strategy, chunkSize, overlap, windowSize })}
         >
           下一步
         </button>

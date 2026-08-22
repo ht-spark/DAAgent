@@ -26,9 +26,12 @@ const PAGE_SIZE = 5
 export default function KnowledgeBaseStats({
   onBack,
   onNext,
+  visibleDocumentIds,
 }: {
   onBack: () => void
   onNext: () => void
+  /** 只统计这些文档 ID（当前上传批次）；缺省时统计全库。 */
+  visibleDocumentIds?: string[]
 }) {
   const [documents, setDocuments] = useState<KnowledgeDocument[]>([])
   const [loading, setLoading] = useState(true)
@@ -37,9 +40,16 @@ export default function KnowledgeBaseStats({
 
   useEffect(() => {
     getKnowledgeStatus()
-      .then((status) => setDocuments(status.documents))
+      .then((status) =>
+        setDocuments(
+          status.documents.filter(
+            (doc) => !visibleDocumentIds || visibleDocumentIds.includes(doc.id),
+          ),
+        ),
+      )
       .catch((reason: unknown) => setError(reason instanceof Error ? reason.message : '无法连接知识库服务。'))
       .finally(() => setLoading(false))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   const categorized = useMemo<CategorizedDoc[]>(() => {

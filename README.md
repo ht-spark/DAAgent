@@ -120,8 +120,8 @@ MMAgent 是一个面向**数学建模任务**的**智能体平台**。平台由�
 ### 4.2 配置条件
 
 1. **LLM API**：OpenAI、DeepSeek 或自定义 OpenAI 兼容 endpoint。
-2. **Tavily API**：联网检索功能需要（[www.tavily.com](https://www.tavily.com)）。
-3. **MinerU API**：非 Markdown 文档转换需要（[mineru.net](https://mineru.net)）。
+2. **[Tavily API](https://www.tavily.com)** ：联网检索功能需要注册 API 密钥。
+3. **[MinerU API](https://mineru.net)**：非 Markdown 文档转换需要注册 API 密钥）。
 4. **本地嵌入模型**：需下载 `bge-small-zh-v1.5` 到 `KnowledgeBase/embedding_model/`。
 
 ### 4.3 环境安装

@@ -235,8 +235,12 @@ export type KnowledgeChunkEmbedProgress = {
   error: string | null
 }
 
-export async function chunkAndEmbedKnowledge(): Promise<KnowledgeChunkEmbedResult> {
-  const res = await fetch('/api/knowledge/chunk-embed', { method: 'POST' })
+export async function chunkAndEmbedKnowledge(windowSize: number): Promise<KnowledgeChunkEmbedResult> {
+  const res = await fetch('/api/knowledge/chunk-embed', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ window_size: windowSize }),
+  })
   if (!res.ok) throw new Error(await extractDetail(res, '分块与嵌入失败'))
   return res.json()
 }

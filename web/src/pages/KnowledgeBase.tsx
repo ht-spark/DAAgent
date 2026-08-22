@@ -12,7 +12,20 @@ import { formatKnowledgeDocumentId } from '../knowledgeDocumentId'
 
 const PAGE_SIZE = 10
 
-export default function KnowledgeBase({ onNext }: { onNext: () => void }) {
+export default function KnowledgeBase({
+  onNext,
+  startEmpty = false,
+  visibleDocumentIds,
+  onVisibleIdsChange,
+}: {
+  onNext: () => void
+  /** 新批次模式：初始不加载已有文件，表格从空白开始，仅展示本次上传。 */
+  startEmpty?: boolean
+  /** 历史批次模式：只展示这些文档 ID（用于从历史记录回看某次上传）。 */
+  visibleDocumentIds?: string[]
+  /** 当前展示的文档 ID 变化时上报，供后续统计页保持同一批次作用域。 */
+  onVisibleIdsChange?: (documentIds: string[]) => void
+}) {
   const [documents, setDocuments] = useState<KnowledgeDocument[]>([])
   const [currentPage, setCurrentPage] = useState(1)
   const [loading, setLoading] = useState(true)
@@ -26,21 +39,35 @@ export default function KnowledgeBase({ onNext }: { onNext: () => void }) {
   const uploading = uploadProgress !== null
 
   useEffect(() => {
+    if (startEmpty && (!visibleDocumentIds || visibleDocumentIds.length === 0)) {
+      setLoading(false)
+      return
+    }
     getKnowledgeStatus()
       .then((status) =>
         setDocuments(
-          status.documents.map((doc) => ({
-            ...doc,
-            id: doc.id || crypto.randomUUID(),
-            upload_success: doc.upload_success ?? true,
-            is_markdown: doc.is_markdown ?? false,
-            is_conversion: doc.is_conversion ?? false,
-          })),
+          status.documents
+            .filter((doc) => !visibleDocumentIds || visibleDocumentIds.includes(doc.id))
+            .map((doc) => ({
+              ...doc,
+              id: doc.id || crypto.randomUUID(),
+              upload_success: doc.upload_success ?? true,
+              is_markdown: doc.is_markdown ?? false,
+              is_conversion: doc.is_conversion ?? false,
+            })),
         ),
       )
       .catch((reason: unknown) => setError(reason instanceof Error ? reason.message : '无法连接知识库服务。'))
       .finally(() => setLoading(false))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  // 当前批次文件清单变化时同步给父级，保证后续统计页展示同一批数据。
+  useEffect(() => {
+    if (!onVisibleIdsChange) return
+    onVisibleIdsChange(documents.map((doc) => doc.id))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [documents])
 
   const uploadFiles = useCallback(async (files: FileList | null | undefined) => {
     if (!files || files.length === 0) return
@@ -67,6 +94,7 @@ export default function KnowledgeBase({ onNext }: { onNext: () => void }) {
           action: 'upload',
           detail: prepared.map((doc) => doc.name).join('、') || file.name,
           status: 'success',
+          documentIds: prepared.map((doc) => doc.id),
         })
       } catch (reason) {
         failedNames.push(file.name)

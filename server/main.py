@@ -23,7 +23,7 @@ from fastapi.staticfiles import StaticFiles
 
 from server.files import list_figures, resolve_artifact
 from server.discussions import delete_discussion, get_discussion, list_discussions, rename_discussion, save_discussion_message
-from KnowledgeBase.chunk import chunk_knowledge_documents
+from KnowledgeBase.chunk import DEFAULT_WINDOW_SIZE, chunk_knowledge_documents
 from KnowledgeBase.embedding import build_local_qdrant_index, delete_document_vectors
 from KnowledgeBase.main import retrieve as retrieve_knowledge
 from KnowledgeBase.upload_file import (
@@ -61,6 +61,7 @@ from server.schemas import (
     BrainstormSource,
     CreateRunResponse,
     KnowledgeDocument,
+    KnowledgeChunkEmbedRequest,
     KnowledgeChunkEmbedResponse,
     KnowledgeChunkEmbedProgress,
     KnowledgeDocumentsDeleteBody,
@@ -74,7 +75,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 ARTIFACTS_ROOT = PROJECT_ROOT / "artifacts"
 WEB_DIST = PROJECT_ROOT / "web" / "dist"
 API_SETTINGS_PATH = Path(__file__).resolve().parent / "api_settings.json"
-BRAINSTORM_RETRIEVAL_TIMEOUT_SECONDS = 60    #知识库检索 + 上下文压缩的硬超时时间
+BRAINSTORM_RETRIEVAL_TIMEOUT_SECONDS = 120    #知识库检索 + 上下文压缩的硬超时时间
 BRAINSTORM_ANSWER_TIMEOUT_SECONDS = 120      #模型流式生成回答的硬超时时间
 MAX_DISCUSSION_ATTACHMENTS = 5               #单次讨论最多允许上传的附件数量
 MAX_DISCUSSION_ATTACHMENT_BYTES = 10 * 1024 * 1024    #单个附件的字节大小上限（10MB）
@@ -290,13 +291,16 @@ async def convert_knowledge_documents_endpoint(
 
 
 @app.post("/api/knowledge/chunk-embed", response_model=KnowledgeChunkEmbedResponse)
-async def chunk_and_embed_knowledge_endpoint() -> KnowledgeChunkEmbedResponse:
+async def chunk_and_embed_knowledge_endpoint(
+    body: KnowledgeChunkEmbedRequest | None = None,
+) -> KnowledgeChunkEmbedResponse:
     """Run local sentence-window chunking and HuggingFace embedding on demand."""
+    window_size = body.window_size if body else DEFAULT_WINDOW_SIZE
     if not _KNOWLEDGE_PROCESSING_LOCK.acquire(blocking=False):
         raise HTTPException(status_code=409, detail="已有知识库分块与嵌入任务正在执行")
     _set_knowledge_processing_progress("chunking")
     try:
-        result = await asyncio.to_thread(_build_knowledge_vector_index)
+        result = await asyncio.to_thread(_build_knowledge_vector_index, window_size)
         document_chunks = _document_chunk_counts(result.source_chunk_counts)
         _set_knowledge_processing_progress("done")
         return KnowledgeChunkEmbedResponse(
@@ -322,9 +326,12 @@ async def knowledge_chunk_embed_progress_endpoint() -> KnowledgeChunkEmbedProgre
     return _get_knowledge_processing_progress()
 
 
-def _build_knowledge_vector_index():
+def _build_knowledge_vector_index(window_size: int = DEFAULT_WINDOW_SIZE):
     """Regenerate chunks, then rebuild the local Qdrant collection."""
-    chunk_knowledge_documents(document_ids_by_source=_document_ids_by_source())
+    chunk_knowledge_documents(
+        window_size=window_size,
+        document_ids_by_source=_document_ids_by_source(),
+    )
     _set_knowledge_processing_progress("embedding")
     return build_local_qdrant_index()
 
