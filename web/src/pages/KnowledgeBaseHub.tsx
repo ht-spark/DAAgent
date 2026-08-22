@@ -5,7 +5,7 @@ type Props = {
 
 export default function KnowledgeBaseHub({ onUpdate, onHistory }: Props) {
   return (
-    <div className="page modeling-tasks-page brainstorm-hub-page">
+    <div className="page modeling-tasks-page brainstorm-hub-page brainstorm-main-hub-page">
       <div className="page-head modeling-tasks-head">
         <div>
           <h1 className="page-title">知识库维护</h1>

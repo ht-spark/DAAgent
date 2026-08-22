@@ -151,10 +151,11 @@ def _bm25_recall(
     question: str,
     records: list[tuple[str | int, dict[str, Any]]],
 ) -> list[tuple[str | int, dict[str, Any]]]:
-    """Rank stored chunk text with a small dependency-free BM25 implementation."""
+    """Rank the embedding text with a small dependency-free BM25 implementation."""
     query_tokens = _tokenize(question)
     tokenized_records = [
-        _tokenize(str(payload.get("text") or "")) for _, payload in records
+        _tokenize(str(payload.get("embedding_text") or payload.get("text") or ""))
+        for _, payload in records
     ]
     if not query_tokens or not any(tokenized_records):
         return []

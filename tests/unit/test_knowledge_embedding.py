@@ -67,6 +67,7 @@ def test_build_local_qdrant_index_uses_local_chunks(monkeypatch, tmp_path):
     assert points[0].payload["document_id"] == "document-uuid"
     assert points[0].payload["heading_path"] == ["参考资料", "模型假设"]
     assert points[0].payload["chunk_index"] == 1
+    assert points[0].payload["embedding_text"] == model.texts[0]
     assert model.texts[0].startswith("文档：参考资料")
     assert result.source_chunk_counts == {"reference.md": 2}
 

@@ -66,16 +66,16 @@ def test_retrieve_uses_original_question_and_fuses_dense_bm25(monkeypatch, tmp_p
     assert chunks[0].rrf_score > chunks[1].rrf_score
 
 
-def test_bm25_recall_uses_chinese_terms_and_excludes_zero_scores():
-    """BM25 only returns chunks with a lexical match to the question."""
+def test_bm25_recall_uses_embedding_text_and_excludes_zero_scores():
+    """BM25 uses the same structure-aware text as the vector index."""
     records = [
-        (1, {"text": "库存管理"}),
-        (2, {"text": "客户复购分析"}),
+        (1, {"text": "库存管理", "embedding_text": "文档：客户复购\n正文：复购率"}),
+        (2, {"text": "客户复购分析", "embedding_text": "文档：库存\n正文：周转"}),
     ]
 
     hits = retrieval._bm25_recall("复购率", records)
 
-    assert [point_id for point_id, _ in hits] == [2]
+    assert [point_id for point_id, _ in hits] == [1]
 
 
 def test_retrieve_rejects_blank_question():

@@ -226,6 +226,7 @@ def _node_payload(record: dict[str, Any]) -> dict[str, Any]:
         "section_title": str(metadata.get("section_title") or ""),
         "heading_path": metadata.get("heading_path") if isinstance(metadata.get("heading_path"), list) else [],
         "chunk_index": int(metadata.get("chunk_index") or 0),
+        "embedding_text": _embedding_text(record),
     }
 
 
