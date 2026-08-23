@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -46,6 +47,24 @@ def _as_mapping(value: Any, field_name: str) -> dict[str, Any]:
         f"[writer] 忽略格式异常的 {field_name}（期望字典，实际 {type(value).__name__}）",
     )
     return {}
+
+
+def _format_decision_variable(value: Any) -> str:
+    """Format a string or LLM variable record for report prose."""
+    if isinstance(value, Mapping):
+        symbol = str(value.get("symbol") or value.get("name") or "").strip()
+        meaning = str(value.get("meaning") or value.get("description") or "").strip()
+        domain = str(value.get("domain") or "").strip()
+        details = "；".join(part for part in (meaning, domain) if part)
+        return f"{symbol}（{details}）" if symbol and details else symbol or details
+    return str(value).strip()
+
+
+def _format_decision_variables(value: Any) -> list[str]:
+    """Normalize arbitrary variable collections before rendering a paper."""
+    if not isinstance(value, (list, tuple)):
+        value = [value]
+    return [text for item in value if (text := _format_decision_variable(item))]
 
 
 def _to_scalar_number(value: Any) -> float | None:
@@ -168,6 +187,9 @@ def _normalize_question_result(
     )
 
     formulation = dict(_as_mapping(result.formulation, f"{question_id}.formulation"))
+    formulation["decision_variables"] = _format_decision_variables(
+        formulation.get("decision_variables", [])
+    )
     formulation["parameters"] = _as_mapping(
         formulation.get("parameters", {}),
         f"{question_id}.formulation.parameters",
@@ -473,7 +495,7 @@ def _build_model_analysis_from_formulation(
     if desc:
         parts.append(desc)
 
-    dvs = formulation.get("decision_variables", [])
+    dvs = _format_decision_variables(formulation.get("decision_variables", []))
     if dvs:
         parts.append(
             f"模型设定{len(dvs)}类决策变量，"
@@ -1778,7 +1800,7 @@ class PaperWriter:
 
     def _professional_formula_lead(self, qid: str, formulation: dict) -> str:
         """Build a lead-in paragraph before formula display."""
-        variables = formulation.get("decision_variables") or []
+        variables = _format_decision_variables(formulation.get("decision_variables", []))
         parameters = formulation.get("parameters") or {}
         variable_text = (
             f"其中，核心决策变量包括{', '.join(variables[:4])}；"
@@ -1926,7 +1948,7 @@ class PaperWriter:
             analysis_parts: list[str] = []
             if interp.decision_variables:
                 analysis_parts.append(
-                    f"涉及的决策变量包括{', '.join(interp.decision_variables[:5])}等"
+                    f"涉及的决策变量包括{', '.join(_format_decision_variables(interp.decision_variables)[:5])}等"
                 )
             if interp.objective_function:
                 analysis_parts.append(
@@ -2014,7 +2036,9 @@ class PaperWriter:
                     interp.math_task_description if interp and interp.math_task_description
                     else f"小问 {qid}"
                 ),
-                decision_variables=formulation.get("decision_variables", []),
+                decision_variables=_format_decision_variables(
+                    formulation.get("decision_variables", [])
+                ),
                 objective_function=formulation.get("objective_function", ""),
                 constraints=formulation.get("constraints", []),
                 parameters=formulation.get("parameters", {}),
@@ -2027,9 +2051,12 @@ class PaperWriter:
                 lines.append(model_analysis)
                 lines.append("")
 
-            if formulation.get("decision_variables"):
+            decision_variables = _format_decision_variables(
+                formulation.get("decision_variables", [])
+            )
+            if decision_variables:
                 lines.append(
-                    f"**决策变量**：{', '.join(formulation['decision_variables'])}"
+                    f"**决策变量**：{', '.join(decision_variables)}"
                 )
                 lines.append("")
 

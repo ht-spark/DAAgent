@@ -146,6 +146,10 @@ cd web && npm run build
 **2.启动后端：**
 
 ```bash
+# 开发模式：只监听 server/ 和 scr/ 源码，建模产物写入 artifacts/ 不会中断任务
+uv run python -m server.dev
+
+# 常规运行：不启用自动重载
 uvicorn server.main:app --host 0.0.0.0 --port 8000
 # 访问网址：http://localhost:8000
 ```

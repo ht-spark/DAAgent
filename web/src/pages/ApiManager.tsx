@@ -24,6 +24,8 @@ const EMPTY: Omit<ApiConfig, 'id' | 'createdAt'> = {
   apiKey: '',
   baseUrl: '',
   model: '',
+  maxTokens: 20000,
+  temperature: 0.3,
 }
 
 const SERVICE_META: Record<ExternalService, { name: string; keyLabel: string; hint: string }> = {
@@ -99,6 +101,17 @@ export default function ApiManager({ onUsed }: Props) {
     const apiKey = editing.apiKey ?? ''
     const baseUrl = editing.baseUrl ?? ''
     const model = editing.model ?? ''
+    const maxTokens = Number(editing.maxTokens)
+    const temperature = Number(editing.temperature)
+
+    if (!Number.isInteger(maxTokens) || maxTokens < 1 || maxTokens > 200000) {
+      window.alert('最大输出 Token 必须是 1 到 200000 之间的整数。')
+      return
+    }
+    if (!Number.isFinite(temperature) || temperature < 0 || temperature > 2) {
+      window.alert('Temperature 必须是 0 到 2 之间的数值。')
+      return
+    }
 
     if (isNew) {
       const c: ApiConfig = {
@@ -108,6 +121,8 @@ export default function ApiManager({ onUsed }: Props) {
         apiKey,
         baseUrl,
         model,
+        maxTokens,
+        temperature,
         createdAt: Date.now(),
       }
       const next = [...configs, c]
@@ -116,7 +131,7 @@ export default function ApiManager({ onUsed }: Props) {
     } else if (editing.id) {
       const next = configs.map((c) =>
         c.id === editing.id
-          ? { ...c, name, provider, apiKey, baseUrl, model }
+          ? { ...c, name, provider, apiKey, baseUrl, model, maxTokens, temperature }
           : c,
       )
       persist(next, activeId)
@@ -235,6 +250,31 @@ export default function ApiManager({ onUsed }: Props) {
             />
           </div>
 
+          <div className="form-row">
+            <div className="field" style={{ flex: 1 }}>
+              <label>最大输出 Token</label>
+              <input
+                type="number"
+                min="1"
+                max="200000"
+                step="1"
+                value={editing.maxTokens ?? 20000}
+                onChange={(e) => setEditing({ ...editing, maxTokens: Number(e.target.value) })}
+              />
+            </div>
+            <div className="field" style={{ flex: 1 }}>
+              <label>Temperature</label>
+              <input
+                type="number"
+                min="0"
+                max="2"
+                step="0.1"
+                value={editing.temperature ?? 0.3}
+                onChange={(e) => setEditing({ ...editing, temperature: Number(e.target.value) })}
+              />
+            </div>
+          </div>
+
           <div style={{ display: 'flex', gap: 10, marginTop: 16 }}>
             <button className="submit-btn" style={{ marginTop: 0 }} onClick={save}>
               保存
@@ -275,6 +315,8 @@ export default function ApiManager({ onUsed }: Props) {
                   <div><span className="k">模型</span><span className="v">{c.model || '—'}</span></div>
                   <div><span className="k">Base URL</span><span className="v">{c.baseUrl || '默认'}</span></div>
                   <div><span className="k">Key</span><span className="v mono">{c.apiKey ? maskKey(c.apiKey) : '未填'}</span></div>
+                  <div><span className="k">最大输出</span><span className="v">{c.maxTokens ?? 20000} tokens</span></div>
+                  <div><span className="k">Temperature</span><span className="v">{c.temperature ?? 0.3}</span></div>
                 </div>
                 <div className="api-actions">
                   {!isActive && (

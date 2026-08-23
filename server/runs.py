@@ -469,6 +469,8 @@ async def execute_run(
         api_key=model_config.get("api_key"),
         base_url=model_config.get("base_url"),
         model=model_config.get("model"),
+        max_tokens=model_config.get("max_tokens"),
+        temperature=model_config.get("temperature"),
     )
 
     def _callback(event: dict) -> None:

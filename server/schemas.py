@@ -15,6 +15,12 @@ class ModelConfig(BaseModel):
     api_key: str | None = Field(None, description="API Key（服务端不持久化明文到日志）")
     base_url: str | None = Field(None, description="自定义 API 基地址")
     model: str | None = Field(None, description="模型名")
+    max_tokens: int | None = Field(
+        None, ge=1, le=200_000, description="单次回复的最大输出 token 数"
+    )
+    temperature: float | None = Field(
+        None, ge=0, le=2, description="生成随机性"
+    )
 
 
 class RunSummary(BaseModel):

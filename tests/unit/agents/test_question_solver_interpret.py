@@ -59,7 +59,5 @@ def test_solve_backfills_interpretation_from_model_output() -> None:
     result = solver.solve(_context())
 
     interp = result.problem_interpretation
-    assert interp.decision_variables == [
-        {"symbol": "x", "meaning": "种植面积", "domain": "continuous"}
-    ]
+    assert interp.decision_variables == ["x（种植面积；continuous）"]
     assert interp.objective_function == "max Z"

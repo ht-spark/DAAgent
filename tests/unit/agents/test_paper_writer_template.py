@@ -404,3 +404,25 @@ class TestWriteIntegration:
         assert writer._template is not None
         assert writer._template is UNIFIED_TEMPLATE
         assert "农作物" not in paper.abstract
+
+    def test_write_accepts_structured_llm_variables(self, writer: PaperWriter, tmp_path):
+        """LLM 的变量对象不能阻断报告 Markdown 的生成。"""
+        result = _make_question_result("q1", "物理遮蔽模型", "mechanism")
+        result.formulation = {
+            "decision_variables": [
+                {"symbol": "t_d", "meaning": "投放时刻", "domain": "continuous"},
+                {"symbol": "v", "meaning": "飞行速度", "domain": "continuous"},
+            ],
+            "objective_function": "max T_shield",
+            "constraints": ["70 ≤ v ≤ 140"],
+        }
+        state = {
+            "question_results": {"q1": result},
+            "project_context": _make_project_context("A题 烟幕干扰弹投放策略"),
+            "data_profile": None,
+        }
+
+        paper = writer.write(state, output_dir=str(tmp_path))
+
+        assert "t_d（投放时刻；continuous）" in paper.full_text
+        assert "v（飞行速度；continuous）" in paper.full_text

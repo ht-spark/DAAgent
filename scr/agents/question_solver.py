@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+from collections.abc import Mapping
 import time
 from typing import Any
 
@@ -40,6 +41,32 @@ class QuestionSolver(BaseAgent):
         super().__init__(llm=llm)
         self._builder = ModelBuilder(llm=llm, budget_manager=budget_manager)
         self._budget_manager = budget_manager
+
+    @staticmethod
+    def _normalize_decision_variables(raw: Any) -> list[str]:
+        """Convert LLM variable records into report-ready display strings.
+
+        Code-model prompts ask the LLM for objects such as ``{"symbol": "x",
+        "meaning": "投放时刻", "domain": "continuous"}``, while the shared
+        ``ProblemInterpretation`` contract requires ``list[str]``. Normalize at
+        this boundary so downstream report writing never receives dictionaries.
+        """
+        if not isinstance(raw, (list, tuple)):
+            raw = [raw]
+
+        normalized: list[str] = []
+        for item in raw:
+            if isinstance(item, Mapping):
+                symbol = str(item.get("symbol") or item.get("name") or "").strip()
+                meaning = str(item.get("meaning") or item.get("description") or "").strip()
+                domain = str(item.get("domain") or "").strip()
+                details = "；".join(part for part in (meaning, domain) if part)
+                text = f"{symbol}（{details}）" if symbol and details else symbol or details
+            else:
+                text = str(item).strip()
+            if text:
+                normalized.append(text)
+        return normalized
 
     @staticmethod
     def _normalize_assumptions(raw: Any) -> list[dict]:
@@ -151,7 +178,9 @@ class QuestionSolver(BaseAgent):
         # interpretation 在 build 前以中性记录创建，此处补全供报告写作与审查使用）
         intermediate = model_output["computation"].get("intermediate_values") or {}
         if not interpretation.decision_variables and intermediate.get("variables"):
-            interpretation.decision_variables = intermediate["variables"]
+            interpretation.decision_variables = self._normalize_decision_variables(
+                intermediate["variables"]
+            )
         if not interpretation.objective_function and intermediate.get("objective"):
             interpretation.objective_function = intermediate["objective"]
 

@@ -376,6 +376,8 @@ def _active_discussion_llm():
         api_key=config.get("apiKey"),
         base_url=config.get("baseUrl"),
         model=config.get("model"),
+        max_tokens=config.get("maxTokens"),
+        temperature=config.get("temperature"),
         fallback_env=False,
     )
 
@@ -663,15 +665,17 @@ async def create_run_endpoint(
     problem_text: str | None = Form(None, description="任务文本"),
     problem_file: UploadFile | None = File(None, description="任务文件(.md/.txt)"),
     data_files: list[UploadFile] | None = File(None, description="数据附件(可多个)"),
-    llm_config: str = Form("{}", description="JSON: provider/api_key/base_url/model"),
+    llm_config: str = Form(
+        "{}", description="JSON: provider/api_key/base_url/model/max_tokens/temperature"
+    ),
     task_name: str | None = Form(None, description="任务名称（用户自定义）"),
 ):
     """提交一次解题任务（后台异步执行）。"""
     try:
         # 解析模型配置
         try:
-            cfg = json.loads(llm_config) if llm_config else {}
-            ModelConfig(**cfg)
+                cfg = json.loads(llm_config) if llm_config else {}
+                cfg = ModelConfig(**cfg).model_dump(exclude_none=True)
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=400, detail=f"llm_config 解析失败: {exc}")
 

@@ -24,6 +24,8 @@ def create_llm(
     base_url: str | None = None,
     model: str | None = None,
     *,
+    max_tokens: int | None = None,
+    temperature: float | None = None,
     fallback_env: bool = True,
 ) -> Any | None:
     """创建一个 OpenAI 兼容的 LLM 客户端。
@@ -33,6 +35,8 @@ def create_llm(
         api_key: API Key，缺省时回退到环境变量。
         base_url: 自定义 API 基地址，缺省时回退到环境变量。
         model: 模型名，缺省时回退到环境变量默认值。
+        max_tokens: 单次回复的最大输出 token 数；缺省时使用 20000。
+        temperature: 生成随机性（0 到 2）；缺省时使用 0.3。
         fallback_env: 当显式参数缺失时是否回退到环境变量。
 
     Returns:
@@ -97,10 +101,9 @@ def create_llm(
         # 单次调用超时（秒）。避免 LLM 端点无响应时线程无限阻塞，
         # 也让「中断任务」能在当前节点结束后尽快在边界生效。
         kwargs["timeout"] = 180
-        # 生成参数：控制输出的随机性
-        kwargs["temperature"] = 0.3
-        # 最大生成长度（字符）
-        kwargs["max_tokens"] = 20000
+        # 生成参数可由网页 API 配置覆盖；保留默认值以兼容环境变量调用。
+        kwargs["temperature"] = 0.3 if temperature is None else temperature
+        kwargs["max_tokens"] = 20_000 if max_tokens is None else max_tokens
         return ChatOpenAI(**kwargs)
     except ImportError:
         get_logger().warning("[llm] langchain_openai 未安装，LLM 不可用")

@@ -33,12 +33,16 @@ export default function Submit({ onSubmitted }: { onSubmitted: (runId: string) =
     if (problemFile) fd.append('problem_file', problemFile)
     dataFiles.forEach((f) => fd.append('data_files', f))
     if (activeCfg) {
-      const cfg: Record<string, string> = {
+      const cfg: Record<string, string | number> = {
         provider: activeCfg.provider,
         api_key: activeCfg.apiKey,
       }
       if (activeCfg.baseUrl) cfg.base_url = activeCfg.baseUrl
       if (activeCfg.model) cfg.model = activeCfg.model
+      if (Number.isInteger(activeCfg.maxTokens) && activeCfg.maxTokens! > 0) cfg.max_tokens = activeCfg.maxTokens!
+      if (typeof activeCfg.temperature === 'number' && activeCfg.temperature >= 0 && activeCfg.temperature <= 2) {
+        cfg.temperature = activeCfg.temperature
+      }
       fd.append('llm_config', JSON.stringify(cfg))
     }
     try {

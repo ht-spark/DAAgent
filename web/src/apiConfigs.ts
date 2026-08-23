@@ -8,6 +8,8 @@ export type ApiConfig = {
   apiKey: string
   baseUrl: string
   model: string
+  maxTokens?: number
+  temperature?: number
   createdAt: number
 }
 
