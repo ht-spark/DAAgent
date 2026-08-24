@@ -226,3 +226,20 @@ def test_migrate_legacy_document_ids_replaces_numeric_and_duplicate_ids(monkeypa
     ids = [record["document_id"] for record in records]
     assert len(set(ids)) == 2
     assert all(str(UUID(document_id)) == document_id for document_id in ids)
+
+
+def test_update_embedding_status_persists_indexed_documents(monkeypatch, tmp_path):
+    raw_root = tmp_path / "raw"
+    documents_root = tmp_path / "documents"
+    monkeypatch.setattr(upload_file, "RAW_ROOT", raw_root)
+    monkeypatch.setattr(upload_file, "DOCUMENTS_ROOT", documents_root)
+    first = upload_file.prepare_upload("first.md", b"# First\n")[0]
+    second = upload_file.prepare_upload("second.md", b"# Second\n")[0]
+
+    upload_file.update_embedding_status({first.document_id: 4, second.document_id: 0})
+
+    records = {record.document_id: record for record in upload_file.list_upload_records()}
+    assert records[first.document_id].embedding_status == "embedded"
+    assert records[first.document_id].indexed_chunks == 4
+    assert records[second.document_id].embedding_status == "pending"
+    assert records[second.document_id].indexed_chunks == 0

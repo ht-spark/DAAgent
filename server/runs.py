@@ -34,6 +34,24 @@ _conn: sqlite3.Connection | None = None
 # 服务重启后后台任务本就不会存活，无需持久化。
 _cancel_flags: dict[str, bool] = {}
 
+# 正在执行的任务预算管理器。仅用于向前端暴露实时 token / LLM 耗时，
+# 任务结束后仍以 progress 中持久化的 budget_summary 为准。
+_active_budget_managers: dict[str, Any] = {}
+_active_budget_lock = threading.Lock()
+
+
+def get_run_monitor(run_id: str) -> dict[str, int] | None:
+    """返回运行中任务的实时预算快照；非运行中任务返回 ``None``。"""
+    with _active_budget_lock:
+        manager = _active_budget_managers.get(run_id)
+    if manager is None:
+        return None
+    totals = manager.get_total_usage()
+    return {
+        "time_total": int(totals.get(BudgetType.TIME, 0)),
+        "token_total": int(totals.get(BudgetType.TOKEN, 0)),
+    }
+
 # ---------------------------------------------------------------------------
 # 预算确认（人工介入）：run 跑到 configure_question_budget 节点时暂停，
 # 等待前端弹窗确认该问预算覆盖后再继续。仅进程内存。
@@ -711,10 +729,13 @@ async def execute_run(
         )
         return decision or {"action": "terminate"}
 
+    bm = None
     try:
         # 任务启动前：请求用户配置 G0 输入质量门预算。
         from scr.runtime.budget import BudgetManager
         bm = BudgetManager()
+        with _active_budget_lock:
+            _active_budget_managers[run_id] = bm
         initial_limits = await asyncio.to_thread(_request_initial_budget)
         if initial_limits:
             bm.update_run_limits(initial_limits)
@@ -760,3 +781,6 @@ async def execute_run(
             mark_cancelled(run_id)
         else:
             mark_failed(run_id, f"{type(exc).__name__}: {exc}")
+    finally:
+        with _active_budget_lock:
+            _active_budget_managers.pop(run_id, None)

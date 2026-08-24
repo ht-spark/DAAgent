@@ -73,6 +73,14 @@ class RunDetail(RunSummary):
         )
 
 
+class RunMonitor(BaseModel):
+    """任务运行时的实时资源消耗快照。"""
+
+    active: bool = False
+    time_total: int | None = None
+    token_total: int | None = None
+
+
 class CreateRunResponse(BaseModel):
     """提交任务后的返回。"""
 
@@ -102,6 +110,8 @@ class KnowledgeDocument(BaseModel):
     upload_success: bool = True
     is_markdown: bool = False
     is_conversion: bool = False
+    embedding_status: str = "pending"
+    indexed_chunks: int = 0
 
 
 class KnowledgeStatus(BaseModel):

@@ -55,13 +55,19 @@ export default function ChunkEmbeddingProgress({
 
   useEffect(() => {
     getKnowledgeStatus()
-      .then((status) =>
-        setDocuments(
-          status.documents.filter(
-            (doc) => !visibleDocumentIds || visibleDocumentIds.includes(doc.id),
+      .then((status) => {
+        const visibleDocuments = status.documents.filter(
+          (doc) => !visibleDocumentIds || visibleDocumentIds.includes(doc.id),
+        )
+        setDocuments(visibleDocuments)
+        setProgressMap(
+          Object.fromEntries(
+            visibleDocuments
+              .filter((doc) => doc.embedding_status === 'embedded')
+              .map((doc) => [doc.id, { stage: 'done', chunks: doc.indexed_chunks }]),
           ),
-        ),
-      )
+        )
+      })
       .catch((reason: unknown) => setError(reason instanceof Error ? reason.message : '无法连接知识库服务。'))
       .finally(() => setLoading(false))
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -167,7 +173,7 @@ export default function ChunkEmbeddingProgress({
                     <td className="ce-col-strategy">{options.strategy === 'semantic' ? '标题语义分块' : '固定长度分块'}</td>
                     <td className="ce-col-chunks">{progress?.chunks ?? estimateChunks(doc)}</td>
                     <td className="kb-col-status">
-                      {!progress || progress.stage === 'pending' ? <span className="kb-tag kb-tag-normal">待处理</span> : progress.stage === 'done' ? <span className="kb-tag kb-tag-success">完成</span> : <span className="ce-inline-progress"><span className="ce-mini-spinner" />{STAGE_LABEL[progress.stage]}</span>}
+                      {!progress || progress.stage === 'pending' ? <span className="kb-tag kb-tag-normal">待入库</span> : progress.stage === 'done' ? <span className="kb-tag kb-tag-success">已入库</span> : <span className="ce-inline-progress"><span className="ce-mini-spinner" />{STAGE_LABEL[progress.stage]}</span>}
                     </td>
                   </tr>
                 )

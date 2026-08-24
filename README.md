@@ -53,7 +53,7 @@ MMAgent 是一个面向**数学建模任务**的**智能体平台**。平台由�
 - `review_report.json`：审查报告
 - `run.log`：运行日志
 
-### 1.2 功能二：基于 RAG 知识库的头脑风暴
+### 1.2 功能二：基于 RAG 的头脑风暴
 
 构建本地知识库，与"读过这些资料的 LLM"对话，帮助梳理建模思路或者直接形成可用的针对问题的模型，形成的最终思路或模型可以直接加载到建模智能体。
 
@@ -147,7 +147,7 @@ cd web && npm run build
 
 ```bash
 # 开发模式：只监听 server/ 和 scr/ 源码，建模产物写入 artifacts/ 不会中断任务
-uv run python -m server.dev
+uvicorn server.main:app --reload --port 8000
 
 # 常规运行：不启用自动重载
 uvicorn server.main:app --host 0.0.0.0 --port 8000

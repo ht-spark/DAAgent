@@ -36,6 +36,7 @@ from KnowledgeBase.upload_file import (
     migrate_legacy_document_ids,
     prepare_upload,
     reconcile_conversion_records,
+    update_embedding_status,
 )
 from server.runs import (
     cancel_run,
@@ -46,6 +47,7 @@ from server.runs import (
     get_pending_budget,
     get_pending_clarification,
     get_run,
+    get_run_monitor,
     list_runs,
     rename_run,
     submit_budget_decision,
@@ -68,6 +70,7 @@ from server.schemas import (
     KnowledgeStatus,
     ModelConfig,
     RunDetail,
+    RunMonitor,
     RunSummary,
 )
 
@@ -135,6 +138,8 @@ def _list_knowledge_documents() -> list[KnowledgeDocument]:
                 upload_success=record.upload_success,
                 is_markdown=record.is_markdown,
                 is_conversion=record.is_conversion,
+                embedding_status=record.embedding_status,
+                indexed_chunks=record.indexed_chunks,
             )
             for record in records
         ]
@@ -245,6 +250,8 @@ async def upload_knowledge_document_endpoint(
             upload_success=True,
             is_markdown=item.is_markdown,
             is_conversion=item.is_conversion,
+            embedding_status="pending",
+            indexed_chunks=0,
         )
         for item in prepared
     ]
@@ -302,6 +309,7 @@ async def chunk_and_embed_knowledge_endpoint(
     try:
         result = await asyncio.to_thread(_build_knowledge_vector_index, window_size)
         document_chunks = _document_chunk_counts(result.source_chunk_counts)
+        update_embedding_status(document_chunks)
         _set_knowledge_processing_progress("done")
         return KnowledgeChunkEmbedResponse(
             collection_name=result.collection_name,
@@ -768,6 +776,33 @@ async def get_run_endpoint(run_id: str):
     if row is None:
         raise HTTPException(status_code=404, detail="run 不存在")
     return RunDetail.from_row(row)
+
+
+@app.get("/api/runs/{run_id}/monitor", response_model=RunMonitor)
+async def get_run_monitor_endpoint(run_id: str):
+    """返回实时 token / LLM 耗时；结束任务回退到最终预算汇总。"""
+    row = get_run(run_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="run 不存在")
+
+    live = get_run_monitor(run_id)
+    if live is not None:
+        return RunMonitor(active=True, **live)
+
+    summary = next(
+        (
+            event
+            for event in reversed(row.get("progress") or [])
+            if event.get("type") == "budget_summary"
+        ),
+        None,
+    )
+    if summary is None:
+        return RunMonitor()
+    return RunMonitor(
+        time_total=int(summary.get("time_total", 0)),
+        token_total=int(summary.get("token_total", 0)),
+    )
 
 
 @app.delete("/api/runs/{run_id}")

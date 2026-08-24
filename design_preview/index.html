@@ -1,0 +1,591 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>MMAgent · 数学建模智能体平台</title>
+<link rel="stylesheet" href="assets/shared.css" />
+<style>
+  /* ============ Hero ============ */
+  .hero {
+    position: relative;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    text-align: center;
+    padding: 130px 24px 80px;
+    overflow: hidden;
+  }
+  #heroCanvas {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    z-index: 0;
+  }
+  .hero-veil {
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+    background:
+      radial-gradient(ellipse 70% 55% at 50% 38%, rgba(108,124,255,0.14), transparent 65%),
+      radial-gradient(ellipse 45% 40% at 82% 12%, rgba(34,211,238,0.10), transparent 60%),
+      radial-gradient(ellipse 50% 45% at 12% 85%, rgba(167,139,250,0.10), transparent 60%);
+    pointer-events: none;
+  }
+  .hero-inner { position: relative; z-index: 2; max-width: 920px; }
+  .hero h1 {
+    margin-top: 30px;
+    font-size: clamp(40px, 6.5vw, 76px);
+    font-weight: 800;
+    line-height: 1.18;
+    letter-spacing: 1px;
+    text-shadow: 0 8px 50px rgba(108,124,255,0.25);
+  }
+  .hero h1 .thin { font-weight: 300; color: var(--text-dim); }
+  .hero .lead {
+    margin: 26px auto 0;
+    max-width: 680px;
+    color: var(--text-dim);
+    font-size: clamp(15px, 1.7vw, 18px);
+    line-height: 1.85;
+  }
+  .hero .cta-row {
+    margin-top: 44px;
+    display: flex;
+    gap: 18px;
+    justify-content: center;
+    flex-wrap: wrap;
+  }
+  .hero-meta {
+    margin-top: 58px;
+    display: flex;
+    gap: 28px;
+    justify-content: center;
+    flex-wrap: wrap;
+    color: var(--muted);
+    font-size: 13px;
+    letter-spacing: 1px;
+  }
+  .hero-meta span { display: inline-flex; align-items: center; gap: 7px; }
+  .hero-meta svg { opacity: 0.75; }
+
+  /* 向下滚动提示 */
+  .scroll-hint {
+    position: absolute;
+    bottom: 26px; left: 50%;
+    transform: translateX(-50%);
+    z-index: 2;
+    width: 26px; height: 42px;
+    border: 2px solid rgba(255,255,255,0.22);
+    border-radius: 14px;
+  }
+  .scroll-hint::after {
+    content: "";
+    position: absolute;
+    top: 7px; left: 50%;
+    width: 4px; height: 8px;
+    margin-left: -2px;
+    border-radius: 3px;
+    background: var(--cyan);
+    box-shadow: 0 0 8px var(--cyan);
+    animation: wheel 1.8s ease-in-out infinite;
+  }
+  @keyframes wheel {
+    0% { transform: translateY(0); opacity: 1; }
+    70% { transform: translateY(13px); opacity: 0; }
+    100% { transform: translateY(0); opacity: 0; }
+  }
+
+  /* ============ 数据统计 ============ */
+  .stats-band {
+    position: relative;
+    z-index: 2;
+    border-top: 1px solid rgba(255,255,255,0.06);
+    border-bottom: 1px solid rgba(255,255,255,0.06);
+    background: linear-gradient(180deg, rgba(14,20,36,0.6), rgba(10,14,26,0.3));
+    backdrop-filter: blur(8px);
+  }
+  .stats-grid {
+    max-width: 1100px;
+    margin: 0 auto;
+    padding: 46px 24px;
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 20px;
+  }
+  .stat { text-align: center; }
+  .stat .num {
+    font-size: clamp(30px, 3.6vw, 44px);
+    font-weight: 800;
+    font-family: Georgia, serif;
+    background: var(--grad);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+  .stat .num sup { font-size: 55%; }
+  .stat .label { margin-top: 8px; color: var(--text-dim); font-size: 14px; letter-spacing: 1px; }
+
+  /* ============ 特性 ============ */
+  .section { padding: 110px 0 40px; }
+  .feat-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 22px;
+  }
+  .feat {
+    position: relative;
+    padding: 32px 28px;
+    border-radius: 20px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    overflow: hidden;
+    transition: transform 0.35s cubic-bezier(0.22,0.68,0.36,1), border-color 0.35s, box-shadow 0.35s;
+  }
+  .feat::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    background: radial-gradient(420px circle at var(--mx,50%) var(--my,0%), rgba(108,124,255,0.16), transparent 45%);
+    opacity: 0;
+    transition: opacity 0.35s;
+    pointer-events: none;
+  }
+  .feat:hover {
+    transform: translateY(-6px);
+    border-color: rgba(108,124,255,0.5);
+    box-shadow: 0 18px 48px rgba(0,0,0,0.4), 0 0 0 1px rgba(108,124,255,0.18) inset;
+  }
+  .feat:hover::before { opacity: 1; }
+  .feat .icon {
+    width: 52px; height: 52px;
+    border-radius: 14px;
+    display: grid; place-items: center;
+    font-size: 25px;
+    margin-bottom: 20px;
+    background: linear-gradient(135deg, rgba(108,124,255,0.22), rgba(34,211,238,0.14));
+    border: 1px solid rgba(108,124,255,0.35);
+    box-shadow: inset 0 0 18px rgba(108,124,255,0.18);
+  }
+  .feat h3 { font-size: 18px; font-weight: 700; margin-bottom: 11px; }
+  .feat p { color: var(--text-dim); font-size: 14px; line-height: 1.8; }
+
+  /* ============ 流水线 ============ */
+  .pipeline-sec { padding: 90px 0 110px; }
+  .pipe {
+    display: flex;
+    gap: 0;
+    align-items: stretch;
+    overflow-x: auto;
+    padding: 30px 8px 22px;
+  }
+  .step {
+    flex: 1;
+    min-width: 118px;
+    position: relative;
+    text-align: center;
+    padding: 0 6px;
+  }
+  .step:not(:last-child)::after {
+    content: "";
+    position: absolute;
+    top: 21px;
+    left: calc(50% + 22px);
+    right: calc(-50% + 22px);
+    height: 2px;
+    background: repeating-linear-gradient(90deg, rgba(108,124,255,0.5) 0 8px, transparent 8px 16px);
+    background-size: 200% 100%;
+    animation: dashFlow 1.4s linear infinite;
+  }
+  @keyframes dashFlow { to { background-position: 32px 0; } }
+  .step .node {
+    width: 44px; height: 44px;
+    margin: 0 auto 13px;
+    border-radius: 50%;
+    display: grid; place-items: center;
+    font-size: 19px;
+    background: #101830;
+    border: 2px solid rgba(108,124,255,0.4);
+    position: relative;
+    transition: all 0.3s;
+  }
+  .step .node::before {
+    content: "";
+    position: absolute;
+    inset: -8px;
+    border-radius: 50%;
+    border: 1px solid rgba(34,211,238,0.35);
+    opacity: 0;
+  }
+  .step.active .node {
+    background: var(--grad);
+    border-color: transparent;
+    box-shadow: 0 0 26px rgba(108,124,255,0.65);
+    animation: nodePulse 1.6s ease-in-out infinite;
+  }
+  .step.active .node::before { animation: ringPulse 1.6s ease-out infinite; }
+  @keyframes nodePulse { 0%,100% { transform: scale(1);} 50% { transform: scale(1.08);} }
+  @keyframes ringPulse {
+    0% { transform: scale(0.85); opacity: 0.9; }
+    100% { transform: scale(1.5); opacity: 0; }
+  }
+  .step.done .node {
+    background: rgba(52,211,153,0.15);
+    border-color: rgba(52,211,153,0.6);
+  }
+  .step .t { font-size: 13.5px; font-weight: 600; }
+  .step .d { margin-top: 5px; font-size: 11.5px; color: var(--muted); line-height: 1.5; }
+  .step.active .t { color: var(--cyan); text-shadow: 0 0 14px rgba(34,211,238,0.5); }
+  .step.done .t { color: var(--success); }
+
+  /* ============ 技术栈跑马灯 ============ */
+  .marquee-band {
+    border-top: 1px solid rgba(255,255,255,0.05);
+    border-bottom: 1px solid rgba(255,255,255,0.05);
+    padding: 26px 0;
+    overflow: hidden;
+    background: rgba(10,14,26,0.5);
+    mask-image: linear-gradient(90deg, transparent, #000 12%, #000 88%, transparent);
+    -webkit-mask-image: linear-gradient(90deg, transparent, #000 12%, #000 88%, transparent);
+  }
+  .marquee { display: flex; gap: 56px; width: max-content; animation: scrollX 26s linear infinite; }
+  @keyframes scrollX { to { transform: translateX(-50%); } }
+  .marquee span {
+    font-family: var(--mono);
+    font-size: 14px;
+    color: var(--muted);
+    white-space: nowrap;
+    letter-spacing: 1px;
+    display: inline-flex; align-items: center; gap: 56px;
+  }
+  .marquee span::after { content: "◆"; color: rgba(108,124,255,0.4); font-size: 8px; }
+
+  /* ============ CTA ============ */
+  .final-cta { position: relative; padding: 120px 24px; text-align: center; overflow: hidden; }
+  .final-cta .orb {
+    position: absolute;
+    left: 50%; top: 50%;
+    width: 720px; height: 720px;
+    transform: translate(-50%, -50%);
+    background: radial-gradient(circle, rgba(108,124,255,0.16), rgba(34,211,238,0.07) 45%, transparent 68%);
+    filter: blur(6px);
+    pointer-events: none;
+  }
+  .final-cta h2 { font-size: clamp(30px, 4.6vw, 50px); font-weight: 800; }
+  .final-cta p { margin: 18px auto 40px; color: var(--text-dim); max-width: 520px; line-height: 1.8; }
+
+  /* ============ 响应式 ============ */
+  @media (max-width: 900px) {
+    .stats-grid { grid-template-columns: repeat(2, 1fr); gap: 30px; }
+    .feat-grid { grid-template-columns: 1fr; }
+    .nav-links a:not(.nav-cta) { display: none; }
+  }
+</style>
+<link rel="stylesheet" href="assets/warm.css" />
+</head>
+<body>
+
+<!-- ================= 导航 ================= -->
+<nav class="nav">
+  <a class="nav-logo" href="index.html">
+    <span class="mark">∑</span>
+    <span class="word">
+      <div class="name">MMAgent</div>
+      <div class="sub">数学建模智能体平台</div>
+    </span>
+  </a>
+  <div class="nav-links">
+    <a class="active" href="index.html">首页</a>
+    <a href="task.html">建模任务</a>
+    <a href="brainstorm.html">头脑风暴</a>
+    <a href="dashboard.html">数据看板</a>
+    <a class="nav-cta" href="#start">开始建模 →</a>
+  </div>
+</nav>
+
+<!-- ================= Hero ================= -->
+<header class="hero">
+  <canvas id="heroCanvas"></canvas>
+  <div class="hero-veil"></div>
+  <div class="hero-inner">
+    <span class="badge reveal in"><i class="dot"></i> 全流程自动化 · RAG 增强建模</span>
+    <h1>
+      从<span class="grad-text">赛题</span>到<span class="grad-text">论文</span><br />
+      <span class="thin">交给智能体，一步到位</span>
+    </h1>
+    <p class="lead">
+      提交题目与数据，MMAgent 自动完成问题拆解、方法选型、代码求解与报告撰写；
+      配合本地知识库 RAG 头脑风暴，让每一次灵感都有据可依。
+    </p>
+    <div class="cta-row reveal in d2">
+      <a class="btn btn-primary" href="task.html">立即体验 <span class="arrow">→</span></a>
+      <a class="btn btn-ghost" href="brainstorm.html">进入头脑风暴</a>
+    </div>
+    <div class="hero-meta">
+      <span>⌁ 端到端流水线</span>
+      <span>◈ 沙箱可复现求解</span>
+      <span>❖ 引用溯源回答</span>
+    </div>
+  </div>
+  <div class="scroll-hint"></div>
+</header>
+
+<!-- ================= 统计带 ================= -->
+<div class="stats-band">
+  <div class="stats-grid">
+    <div class="stat reveal"><div class="num"><span data-count="1284">0</span><sup>+</sup></div><div class="label">累计建模任务</div></div>
+    <div class="stat reveal d1"><div class="num"><span data-count="96.8" data-decimals="1">0</span><sup>%</sup></div><div class="label">报告一次通过率</div></div>
+    <div class="stat reveal d2"><div class="num"><span data-count="3.2" data-decimals="1">0</span><sup>×</sup></div><div class="label">平均效率提升</div></div>
+    <div class="stat reveal d3"><div class="num"><span data-count="52">0</span><sup>万+</sup></div><div class="label">知识库切片索引</div></div>
+  </div>
+</div>
+
+<!-- ================= 核心特性 ================= -->
+<section class="section wrap">
+  <div class="sec-head reveal">
+    <div class="kicker">Core Features</div>
+    <h2>为什么选择 <span class="grad-text">MMAgent</span></h2>
+    <p>两大核心引擎协同工作：端到端建模智能体负责解题，本地知识库 RAG 负责出谋划策。</p>
+  </div>
+  <div class="feat-grid">
+    <div class="feat reveal">
+      <div class="icon">🧭</div>
+      <h3>双路径方法选型</h3>
+      <p>联网检索真实文献 + LLM 推理双路探索建模方法，RRF 融合排序，告别“拍脑袋”选模型。</p>
+    </div>
+    <div class="feat reveal d1">
+      <div class="icon">⚡</div>
+      <h3>代码化可信求解</h3>
+      <p>LLM 生成 Python 求解代码，隔离子进程沙箱执行，每一步结果可复现、可审计。</p>
+    </div>
+    <div class="feat reveal d2">
+      <div class="icon">📄</div>
+      <h3>可追溯建模报告</h3>
+      <p>报告章节与决策日志、证据链一一对应，自动审查打分，Markdown / Word 双格式交付。</p>
+    </div>
+    <div class="feat reveal d3">
+      <div class="icon">🧠</div>
+      <h3>RAG 头脑风暴</h3>
+      <p>BGE 语义向量 + BM25 关键词混合检索，Top5 精选片段注入对话，思路生成有理有据。</p>
+    </div>
+    <div class="feat reveal d4">
+      <div class="icon">🤝</div>
+      <h3>人机协同介入</h3>
+      <p>运行中随时回答澄清提问、调整各问时间预算、一键取消任务，全程尽在掌控。</p>
+    </div>
+    <div class="feat reveal d4">
+      <div class="icon">📚</div>
+      <h3>知识沉淀复用</h3>
+      <p>历史报告审查后入库，PDF / DOCX / PPT 经 MinerU 解析公式表格，经验越滚越多。</p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 流水线 ================= -->
+<section class="pipeline-sec wrap">
+  <div class="sec-head reveal">
+    <div class="kicker">Pipeline</div>
+    <h2>八步流水线，<span class="grad-text">全自动</span>推进</h2>
+    <p>从提交题目到最终交付，每个阶段的产物都落盘留痕：input / questions / figures / paper。</p>
+  </div>
+  <div class="pipe glass reveal" id="pipe">
+    <!-- JS 自动渲染步骤 -->
+  </div>
+</section>
+
+<!-- ================= 技术栈 ================= -->
+<div class="marquee-band">
+  <div class="marquee">
+    <span>LangGraph 编排</span><span>FastAPI + SSE 实时推送</span><span>Qdrant 向量检索</span>
+    <span>BGE-Small-Zh 本地嵌入</span><span>MinerU 文档解析</span><span>BM25 × RRF 混合召回</span>
+    <span>React + Vite + KaTeX</span><span>Python 沙箱执行</span>
+    <span>LangGraph 编排</span><span>FastAPI + SSE 实时推送</span><span>Qdrant 向量检索</span>
+    <span>BGE-Small-Zh 本地嵌入</span><span>MinerU 文档解析</span><span>BM25 × RRF 混合召回</span>
+    <span>React + Vite + KaTeX</span><span>Python 沙箱执行</span>
+  </div>
+</div>
+
+<!-- ================= CTA ================= -->
+<section class="final-cta" id="start">
+  <div class="orb"></div>
+  <div class="reveal">
+    <h2>准备好赢下下一场<br /><span class="grad-text">数模竞赛</span>了吗？</h2>
+    <p>现在提交你的第一道赛题，或上传资料构建专属知识库，让智能体成为你的建模伙伴。</p>
+    <div class="cta-row" style="display:flex;gap:18px;justify-content:center;flex-wrap:wrap;">
+      <a class="btn btn-primary" href="task.html">提交建模任务 <span class="arrow">→</span></a>
+      <a class="btn btn-ghost" href="dashboard.html">查看数据看板</a>
+    </div>
+  </div>
+</section>
+
+<footer class="footer">
+  <div class="foot-links">
+    <a href="index.html">首页</a><a href="task.html">建模任务</a>
+    <a href="brainstorm.html">头脑风暴</a><a href="dashboard.html">数据看板</a>
+  </div>
+  © 2026 MMAgent · 数学建模智能体平台 - Design Preview
+</footer>
+
+<script>
+/* ============================================================
+   Hero 背景：粒子网络 + 漂浮数学符号
+   ============================================================ */
+(function () {
+  const canvas = document.getElementById("heroCanvas");
+  const ctx = canvas.getContext("2d");
+  let W, H, nodes = [], glyphs = [];
+  const GLYPHS = ["∑","∫","∂","√","π","λ","∇","∞","φ","θ","Σ","μ","Ω","≈","≠","∈","ℝ","Δ"];
+
+  function resize() {
+    W = canvas.width = canvas.offsetWidth * devicePixelRatio;
+    H = canvas.height = canvas.offsetHeight * devicePixelRatio;
+    build();
+  }
+  function build() {
+    const n = Math.min(64, Math.floor(W / 26000 * devicePixelRatio));
+    nodes = Array.from({ length: n }, () => ({
+      x: Math.random() * W,
+      y: Math.random() * H,
+      vx: (Math.random() - 0.5) * 0.22 * devicePixelRatio,
+      vy: (Math.random() - 0.5) * 0.22 * devicePixelRatio,
+      r: (Math.random() * 1.6 + 0.7) * devicePixelRatio,
+    }));
+    glyphs = Array.from({ length: Math.min(18, GLYPHS.length) }, (_, i) => ({
+      ch: GLYPHS[i % GLYPHS.length],
+      x: Math.random() * W,
+      y: Math.random() * H,
+      vy: -(Math.random() * 0.16 + 0.05) * devicePixelRatio,
+      size: (Math.random() * 22 + 14) * devicePixelRatio,
+      alpha: Math.random() * 0.10 + 0.04,
+      drift: (Math.random() - 0.5) * 0.1 * devicePixelRatio,
+    }));
+  }
+  const LINK = devicePixelRatio * 150;
+  function tick() {
+    ctx.clearRect(0, 0, W, H);
+
+    // 连线网络
+    for (const p of nodes) {
+      p.x += p.vx; p.y += p.vy;
+      if (p.x < 0 || p.x > W) p.vx *= -1;
+      if (p.y < 0 || p.y > H) p.vy *= -1;
+    }
+    for (let i = 0; i < nodes.length; i++) {
+      for (let j = i + 1; j < nodes.length; j++) {
+        const dx = nodes[i].x - nodes[j].x, dy = nodes[i].y - nodes[j].y;
+        const d = Math.hypot(dx, dy);
+        if (d < LINK) {
+          ctx.strokeStyle =
+            `rgba(108,124,255,${(1 - d / LINK) * 0.16})`;
+          ctx.lineWidth = devicePixelRatio;
+          ctx.beginPath();
+          ctx.moveTo(nodes[i].x, nodes[i].y);
+          ctx.lineTo(nodes[j].x, nodes[j].y);
+          ctx.stroke();
+        }
+      }
+    }
+    for (const p of nodes) {
+      ctx.fillStyle = "rgba(140,160,255,0.5)";
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // 上浮数学符号
+    for (const g of glyphs) {
+      g.y += g.vy;
+      g.x += g.drift;
+      if (g.y < -g.size) { g.y = H + g.size; g.x = Math.random() * W; }
+      if (g.x < -g.size || g.x > W + g.size) g.x = Math.random() * W;
+      ctx.font = `${g.size}px Georgia, serif`;
+      ctx.fillStyle = `rgba(122,144,235,${g.alpha})`;
+      ctx.fillText(g.ch, g.x, g.y);
+    }
+    requestAnimationFrame(tick);
+  }
+  window.addEventListener("resize", resize);
+  resize();
+  tick();
+})();
+
+/* ============================================================
+   流水线步骤渲染 + 状态轮播
+   ============================================================ */
+(function () {
+  const STEPS = [
+    ["📥", "提交题目", "文本 / md / txt"],
+    ["🔍", "数据画像", "特征·缺失·分布"],
+    ["🧩", "问题拆解", "逐问分解预算"],
+    ["🛰️", "方法选型", "联网检索+LLM"],
+    ["⚙️", "代码求解", "Python 沙箱"],
+    ["✅", "结果验证", "失败自动重试"],
+    ["📝", "报告撰写", "图表·公式·结论"],
+    {"icon":"🛡️","t":"自动审查","d":"评分·修订循环"},
+  ].map(s => Array.isArray(s) ? s : [s.icon, s.t, s.d]);
+
+  const pipe = document.getElementById("pipe");
+  pipe.innerHTML = STEPS.map(([ic, t, d], i) => `
+    <div class="step" data-i="${i}">
+      <div class="node">${ic}</div>
+      <div class="t">${t}</div>
+      <div class="d">${d}</div>
+    </div>`).join("");
+
+  const steps = [...pipe.children];
+  let cur = 0;
+  function paint() {
+    steps.forEach((el, i) => {
+      el.classList.toggle("done", i < cur);
+      el.classList.toggle("active", i === cur);
+    });
+  }
+  paint();
+  setInterval(() => { cur = (cur + 1) % STEPS.length; paint(); }, 1800);
+})();
+
+/* ============================================================
+   数字滚动计数
+   ============================================================ */
+(function () {
+  const io = new IntersectionObserver((entries) => {
+    entries.forEach((e) => {
+      if (!e.isIntersecting) return;
+      const el = e.target;
+      io.unobserve(el);
+      const target = parseFloat(el.dataset.count);
+      const dec = parseInt(el.dataset.decimals || "0");
+      const dur = 1600, t0 = performance.now();
+      (function frame(t) {
+        const k = Math.min(1, (t - t0) / dur);
+        const eased = 1 - Math.pow(1 - k, 3);
+        el.textContent = (target * eased).toFixed(dec).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+        if (k < 1) requestAnimationFrame(frame);
+      })(t0);
+    });
+  }, { threshold: 0.5 });
+  document.querySelectorAll("[data-count]").forEach(el => io.observe(el));
+})();
+
+/* ============================================================
+   滚动入场 & 特性卡光斑跟随
+   ============================================================ */
+const revIO = new IntersectionObserver((es) =>
+  es.forEach(e => e.isIntersecting && e.target.classList.add("in")),
+{ threshold: 0.12 });
+document.querySelectorAll(".reveal").forEach(el => revIO.observe(el));
+
+document.querySelectorAll(".feat").forEach(card => {
+  card.addEventListener("mousemove", (e) => {
+    const r = card.getBoundingClientRect();
+    card.style.setProperty("--mx", (e.clientX - r.left) + "px");
+    card.style.setProperty("--my", (e.clientY - r.top) + "px");
+  });
+});
+</script>
+</body>
+</html>

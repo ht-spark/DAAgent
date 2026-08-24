@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { confirmBudget, createRun, checkBackendOnline, getRun, getPaper, getFigures, renameRun, submitClarification } from '../api'
+import { confirmBudget, createRun, checkBackendOnline, getRun, getRunMonitor, getPaper, getFigures, renameRun, submitClarification, type RunMonitor } from '../api'
 import { loadConfigs, loadActiveId, ApiConfig } from '../apiConfigs'
 import { NODE_CN, fmtQid, formatCurrentStep, formatProgressLine, nextProgressQuestionId } from '../progressFormat'
 
@@ -219,6 +219,233 @@ type ClarificationReq = {
   failed_checks: string[]
 }
 
+type TimelineItem = {
+  key: string
+  title: string
+  detail: string
+  timestamp?: number
+  status: 'done' | 'active'
+}
+
+function formatDuration(totalSeconds: number | null): string {
+  if (totalSeconds === null || !Number.isFinite(totalSeconds) || totalSeconds < 0) return '--'
+  const hours = Math.floor(totalSeconds / 3600)
+  const minutes = Math.floor((totalSeconds % 3600) / 60)
+  const seconds = Math.floor(totalSeconds % 60)
+  return hours > 0
+    ? `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`
+    : `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`
+}
+
+function formatEventTime(timestamp?: number): string {
+  if (!timestamp) return ''
+  return new Date(timestamp * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+}
+
+function buildTimeline(events: any[], phase: Phase, currentStep: string): TimelineItem[] {
+  const items: TimelineItem[] = []
+  const completed = events.filter((event) => event?.type === 'node')
+  for (const [index, event] of completed.entries()) {
+    const title = formatProgressLine(event, event.current_question_id || '') || NODE_CN[event.node] || '建模步骤'
+    items.push({
+      key: `${event.node || 'node'}-${event.timestamp || index}`,
+      title,
+      detail: event.workflow_status ? `状态：${event.workflow_status}` : '步骤已完成',
+      timestamp: event.timestamp,
+      status: 'done',
+    })
+  }
+  const lastStart = [...events].reverse().find((event) => event?.type === 'node_start')
+  const lastCompleted = completed[completed.length - 1]
+  if (phase === 'running' && lastStart && lastStart.node !== lastCompleted?.node) {
+    items.push({
+      key: `active-${lastStart.node}-${lastStart.timestamp || 'now'}`,
+      title: formatCurrentStep(lastStart, lastStart.current_question_id || ''),
+      detail: '正在执行，新的节点结果会实时同步到此处',
+      timestamp: lastStart.timestamp,
+      status: 'active',
+    })
+  } else if (phase === 'running' && items.length === 0) {
+    items.push({
+      key: 'active-initial',
+      title: currentStep || '接收任务',
+      detail: '正在准备任务环境与输入材料',
+      status: 'active',
+    })
+  }
+  return items.slice(-12)
+}
+
+function RunMonitorPanel({
+  run,
+  monitor,
+  log,
+  now,
+  phase,
+  currentStep,
+}: {
+  run: any | null
+  monitor: RunMonitor | null
+  log: string
+  now: number
+  phase: Phase
+  currentStep: string
+}) {
+  const startedAt = run?.created_at ? Date.parse(run.created_at) : NaN
+  const elapsed = Number.isFinite(startedAt)
+    ? Math.max(0, Math.floor((now - startedAt) / 1000))
+    : null
+  const timeline = buildTimeline(run?.progress || [], phase, currentStep)
+  const logLines = log.split(/\r?\n/).filter(Boolean).slice(-80)
+
+  return (
+    <aside className="run-monitor" aria-label="任务运行监控">
+      <section className="run-overview">
+        <div className="run-panel-heading">
+          <span>◆ 总体进度</span>
+          <span className={`run-live ${phase === 'running' ? 'is-live' : ''}`}>{phase === 'running' ? 'LIVE' : run ? '已结束' : '等待任务'}</span>
+        </div>
+        {run ? (
+          <div className="run-overview-content">
+            <div className="run-time-orbit"><span>已运行</span><strong>{formatDuration(elapsed)}</strong></div>
+            <dl className="run-metrics">
+              <div><dt>Token 消耗</dt><dd>{monitor?.token_total === null || monitor?.token_total === undefined ? '--' : monitor.token_total.toLocaleString()}</dd></div>
+              <div><dt>LLM 耗时</dt><dd>{formatDuration(monitor?.time_total ?? null)}</dd></div>
+            </dl>
+          </div>
+        ) : (
+          <p className="run-empty-copy">开始建模后，会在这里显示时间、Token 与阶段进度。</p>
+        )}
+        {run && <p className="run-refresh-note">每 30 秒刷新资源统计</p>}
+      </section>
+
+      <section className="run-timeline-panel">
+        <div className="run-panel-heading"><span>⌁ 求解流水线</span><span>{timeline.length} 个节点</span></div>
+        <div className="run-timeline">
+          {timeline.length > 0 ? timeline.map((item) => (
+            <div className={`run-stage is-${item.status}`} key={item.key}>
+              <div className="run-stage-rail"><span>{item.status === 'done' ? '✓' : '·'}</span></div>
+              <div className="run-stage-main"><div className="run-stage-title">{item.title}<em>{item.status === 'done' ? '已完成' : '进行中'}</em></div><p>{item.detail}</p></div>
+              <time>{formatEventTime(item.timestamp)}</time>
+            </div>
+          )) : <p className="run-empty-copy">尚未产生可展示的任务节点。</p>}
+        </div>
+      </section>
+
+      <section className="run-log-panel">
+        <div className="run-log-head"><span><i></i><i></i><i></i> run.log</span><b>{phase === 'running' ? '● LIVE' : '记录'}</b></div>
+        <pre className="run-log-content">{logLines.length ? logLines.join('\n') : '等待运行日志写入…'}</pre>
+      </section>
+    </aside>
+  )
+}
+
+function TaskWorkflow({
+  runId,
+  taskName,
+  run,
+  monitor,
+  now,
+  phase,
+  currentStep,
+  activeName,
+  model,
+  onViewResult,
+}: {
+  runId: string
+  taskName: string
+  run: any | null
+  monitor: RunMonitor | null
+  now: number
+  phase: Phase
+  currentStep: string
+  activeName: string
+  model?: string
+  onViewResult: () => void
+}) {
+  const timeline = buildTimeline(run?.progress || [], phase, currentStep)
+  const startedAt = run?.created_at ? Date.parse(run.created_at) : NaN
+  const elapsed = Number.isFinite(startedAt) ? Math.max(0, Math.floor((now - startedAt) / 1000)) : null
+  const inputFiles = (run?.artifacts || []).filter((path: string) => path.startsWith('input/'))
+  const resultFiles = (run?.artifacts || []).filter((path: string) => !path.startsWith('input/'))
+  const completedCount = timeline.filter((item) => item.status === 'done').length
+
+  return (
+    <main className="workflow-workspace">
+      <header className="workflow-header">
+        <div>
+          <p className="workflow-path">建模任务 / {phase === 'running' ? '运行中' : '已结束'} / {runId}</p>
+          <h1>{taskName || run?.task_name || '未命名建模任务'}</h1>
+        </div>
+        <div className="workflow-actions">
+          {phase === 'running' && <span className="workflow-running">运行中</span>}
+          {phase === 'done' && <button className="workflow-result-button" onClick={onViewResult}>查看报告</button>}
+        </div>
+      </header>
+
+      <div className="workflow-grid">
+        <aside className="workflow-sidebar">
+          <section className="workflow-card workflow-overview-card">
+            <h2>总体进度</h2>
+            <div className="workflow-overview-body">
+              <div className="workflow-orbit"><span>{phase === 'running' ? '处理中' : '完成'}</span><strong>{completedCount}</strong><small>个步骤</small></div>
+              <dl>
+                <div><dt>已用时间</dt><dd>{formatDuration(elapsed)}</dd></div>
+                <div><dt>Token 消耗</dt><dd>{monitor?.token_total === null || monitor?.token_total === undefined ? '--' : monitor.token_total.toLocaleString()}</dd></div>
+                <div><dt>模型耗时</dt><dd>{formatDuration(monitor?.time_total ?? null)}</dd></div>
+              </dl>
+            </div>
+            <p className="workflow-refresh-note">资源统计每 30 秒刷新</p>
+          </section>
+
+          <section className="workflow-card">
+            <h2>模型配置</h2>
+            <dl className="workflow-details">
+              <div><dt>当前 API</dt><dd>{activeName || '未命名配置'}</dd></div>
+              <div><dt>主模型</dt><dd>{model || '默认模型'}</dd></div>
+              <div><dt>任务编号</dt><dd className="workflow-code">{runId}</dd></div>
+            </dl>
+          </section>
+
+          <section className="workflow-card">
+            <h2>输入材料</h2>
+            {inputFiles.length > 0 ? (
+              <ul className="workflow-files">
+                {inputFiles.map((path: string) => <li key={path}>{path.replace(/^input\//, '')}</li>)}
+              </ul>
+            ) : <p className="workflow-empty">正在整理已上传的任务与附件。</p>}
+          </section>
+
+          {resultFiles.length > 0 && (
+            <section className="workflow-card">
+              <h2>实时产物</h2>
+              <ul className="workflow-files">{resultFiles.slice(-5).map((path: string) => <li key={path}>{path}</li>)}</ul>
+            </section>
+          )}
+        </aside>
+
+        <section className="workflow-canvas">
+          <div className="workflow-canvas-head">
+            <div><h2>求解流水线</h2><p>{phase === 'running' ? '节点状态会随任务执行实时更新。' : '任务已结束，可查看最终报告。'}</p></div>
+            <span>{phase === 'running' ? '实时状态' : '执行记录'}</span>
+          </div>
+          <div className="workflow-stages" aria-live="polite">
+            {timeline.length ? timeline.map((item) => (
+              <article className={`workflow-stage is-${item.status}`} key={item.key}>
+                <div className="workflow-stage-marker" aria-hidden="true"><span>{item.status === 'done' ? '✓' : '…'}</span></div>
+                <div className="workflow-stage-content"><h3>{item.title}</h3><p>{item.detail}</p></div>
+                <time>{formatEventTime(item.timestamp) || (item.status === 'active' ? '进行中' : '')}</time>
+              </article>
+            )) : (
+              <div className="workflow-stage-empty"><strong>正在准备工作流</strong><p>任务节点会在系统开始处理后显示在这里。</p></div>
+            )}
+          </div>
+        </section>
+      </div>
+    </main>
+  )
+}
+
 type Props = {
   /** 若提供，则直接进入“接管进行中任务”模式：跳过输入，实时同步该 run 的进度 */
   resumeRunId?: string | null
@@ -254,6 +481,11 @@ export default function ChatModeling({ resumeRunId, onViewResult }: Props) {
   /** 任务名称编辑态（输入框值） */
   const [taskNameDraft, setTaskNameDraft] = useState('')
   const [editingName, setEditingName] = useState(false)
+  const [submitError, setSubmitError] = useState('')
+  const [runSnapshot, setRunSnapshot] = useState<any | null>(null)
+  const [runMonitor, setRunMonitor] = useState<RunMonitor | null>(null)
+  const [runLog, setRunLog] = useState('')
+  const [monitorNow, setMonitorNow] = useState(Date.now())
 
   const esRef = useRef<EventSource | null>(null)
   const listRef = useRef<HTMLDivElement | null>(null)
@@ -263,6 +495,7 @@ export default function ChatModeling({ resumeRunId, onViewResult }: Props) {
   const progressQueueRef = useRef<any[]>([])
   const progressTimerRef = useRef<number | null>(null)
   const currentQuestionIdRef = useRef('')
+  const autoConfirmedBudgetRef = useRef(new Set<string>())
 
   function push(role: 'user' | 'assistant', text: string, kind: MsgKind = 'info', result?: ResultData) {
     setMessages((m) => [...m, { id: nextId(), role, text, kind, ts: Date.now(), result }])
@@ -306,6 +539,59 @@ export default function ChatModeling({ resumeRunId, onViewResult }: Props) {
     const el = listRef.current
     if (el) el.scrollTop = el.scrollHeight
   }, [messages])
+
+  // 资源数据按 30 秒从服务端拉取；耗时用本地时钟连续更新，避免数字停顿。
+  useEffect(() => {
+    if (!runId) {
+      setRunSnapshot(null)
+      setRunMonitor(null)
+      setRunLog('')
+      return
+    }
+    let cancelled = false
+    const refresh = async () => {
+      const [snapshot, monitor] = await Promise.all([
+        getRun(runId).catch(() => null),
+        getRunMonitor(runId).catch(() => null),
+      ])
+      if (cancelled) return
+      if (snapshot) setRunSnapshot(snapshot)
+      if (monitor) setRunMonitor(monitor)
+    }
+    void refresh()
+    const refreshTimer = window.setInterval(() => void refresh(), 30_000)
+    const clockTimer = window.setInterval(() => setMonitorNow(Date.now()), 1_000)
+    return () => {
+      cancelled = true
+      window.clearInterval(refreshTimer)
+      window.clearInterval(clockTimer)
+    }
+  }, [runId])
+
+  // 纯工作流模式不展示旧聊天界面的预算确认卡，因此默认放行每个预算关卡，
+  // 防止任务在 initial / question / delivery 阶段无限等待人工确认。
+  useEffect(() => {
+    if (!runId || phase !== 'running' || !runSnapshot?.progress) return
+    const events: any[] = runSnapshot.progress
+    const request = [...events].reverse().find((event) => event?.type === 'budget_request')
+    if (!request) return
+    const confirmed = events.some((event) =>
+      event?.type === 'budget_confirmed'
+      && event.phase === request.phase
+      && (event.question_id || '') === (request.question_id || ''),
+    )
+    const requestKey = `${request.phase || 'question'}:${request.question_id || ''}:${request.timestamp || ''}`
+    if (confirmed || autoConfirmedBudgetRef.current.has(requestKey)) return
+
+    autoConfirmedBudgetRef.current.add(requestKey)
+    void confirmBudget(runId, {
+      question_id: request.question_id || undefined,
+      use_defaults: true,
+    }).catch((error) => {
+      autoConfirmedBudgetRef.current.delete(requestKey)
+      setSubmitError(`无法确认默认预算：${error instanceof Error ? error.message : String(error)}`)
+    })
+  }, [phase, runId, runSnapshot])
 
   /** 追加一行进度到合并进度消息（不存在则创建） */
   function ensureProgressMessage(): number {
@@ -649,12 +935,13 @@ export default function ChatModeling({ resumeRunId, onViewResult }: Props) {
   async function handleStart() {
     if (busy || phase !== 'compose') return
     const text = problemText.trim()
+    setSubmitError('')
     if (!text && !problemFile) {
-      push('assistant', '请先输入任务文本，或上传任务文件，再开始建模。', 'warn')
+      setSubmitError('请先输入任务文本，或上传任务文件，再开始建模。')
       return
     }
     if (!activeCfg) {
-      push('assistant', '尚未配置 API，请先到侧边栏「API 管理」添加并设为默认后再开始。', 'error')
+      setSubmitError('尚未配置 API，请先到 API 管理添加并设为默认。')
       return
     }
     setBusy(true)
@@ -662,7 +949,7 @@ export default function ChatModeling({ resumeRunId, onViewResult }: Props) {
     // 提交前检查后端是否在线，避免长时间等待后才发现连接失败
     const online = await checkBackendOnline()
     if (!online) {
-      push('assistant', '后端服务未启动或无法连接。请先在终端运行：python -m uvicorn server.main:app --port 8000', 'error')
+      setSubmitError('后端服务未启动或无法连接，请检查本地服务。')
       setBusy(false)
       return
     }
@@ -696,7 +983,8 @@ export default function ChatModeling({ resumeRunId, onViewResult }: Props) {
       push('assistant', `已收到任务，开始建模。(任务编号${r.run_id})`, 'info')
       attachStream(r.run_id)
     } catch (err) {
-      push('assistant', `提交失败：${err instanceof Error ? err.message : String(err)}`, 'error')
+      const message = err instanceof Error ? err.message : String(err)
+      setSubmitError(`创建任务失败：${message}`)
     } finally {
       setBusy(false)
     }
@@ -763,8 +1051,64 @@ export default function ChatModeling({ resumeRunId, onViewResult }: Props) {
     setEditingName(false)
   }
 
+  if (composing) {
+    return (
+      <main className="task-setup">
+        <header className="task-setup-header">
+          <p>新建建模任务</p>
+          <h1>提交问题与材料</h1>
+          <span>系统会根据任务文本和附件创建完整建模工作流。</span>
+        </header>
+        <section className="task-setup-form">
+          <label className="task-setup-label" htmlFor="task-name">任务名称</label>
+          <input id="task-name" className="task-setup-input" value={taskName} onChange={(event) => { setTaskName(event.target.value); setTaskNameDraft(event.target.value) }} placeholder="例如：2024 高教社杯 C 题" />
+          <label className="task-setup-label" htmlFor="task-problem">任务文本</label>
+          <textarea id="task-problem" className="task-setup-textarea" value={problemText} onChange={(event) => setProblemText(event.target.value)} placeholder="粘贴题目、约束条件和需要解决的问题…" rows={8} />
+          <div className="task-upload-grid">
+            <label className="task-upload-slot">
+              <span>任务文件</span><strong>{problemFile?.name || '选择 Markdown 或 TXT 文件'}</strong>
+              <input type="file" accept=".md,.txt" hidden onChange={(event) => { setProblemFile(event.target.files?.[0] ?? null); event.target.value = '' }} />
+            </label>
+            <label className="task-upload-slot">
+              <span>数据附件</span><strong>{dataFiles.length ? `已选择 ${dataFiles.length} 个附件` : '选择数据、表格或图片'}</strong>
+              <input type="file" multiple hidden onChange={(event) => { const files = Array.from(event.target.files ?? []); if (files.length) setDataFiles((current) => [...current, ...files]); event.target.value = '' }} />
+            </label>
+          </div>
+          {(problemFile || dataFiles.length > 0) && (
+            <div className="task-file-list">
+              {problemFile && <span>{problemFile.name}<button onClick={() => setProblemFile(null)} aria-label="移除任务文件">×</button></span>}
+              {dataFiles.map((file, index) => <span key={`${file.name}-${index}`}>{file.name}<button onClick={() => setDataFiles((current) => current.filter((_, itemIndex) => itemIndex !== index))} aria-label={`移除 ${file.name}`}>×</button></span>)}
+            </div>
+          )}
+          <div className="task-setup-footer">
+            <p className={submitError ? 'task-setup-error' : ''}>{submitError || (activeName ? `将使用 ${activeName}${activeCfg?.model ? ` / ${activeCfg.model}` : ''}` : '请先在 API 管理中设置可用配置')}</p>
+            <button className="task-start-button" onClick={handleStart} disabled={busy}>{busy ? '正在创建任务…' : '开始建模'}</button>
+          </div>
+        </section>
+      </main>
+    )
+  }
+
+  if (runId) {
+    return (
+      <TaskWorkflow
+        runId={runId}
+        taskName={taskName}
+        run={runSnapshot}
+        monitor={runMonitor}
+        now={monitorNow}
+        phase={phase}
+        currentStep={currentStep}
+        activeName={activeName}
+        model={activeCfg?.model}
+        onViewResult={() => onViewResult(runId)}
+      />
+    )
+  }
+
   return (
     <div className="chatapp">
+      <section className="chatapp-conversation">
       <div className="chatapp-head">
         <div>
           <div className="chatapp-title-row">
@@ -1038,6 +1382,16 @@ export default function ChatModeling({ resumeRunId, onViewResult }: Props) {
           </button>
         </div>
       </div>
+
+      </section>
+      <RunMonitorPanel
+        run={runSnapshot}
+        monitor={runMonitor}
+        log={runLog}
+        now={monitorNow}
+        phase={phase}
+        currentStep={currentStep}
+      />
 
       {/* 预览模态框 */}
       {preview && (

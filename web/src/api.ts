@@ -180,6 +180,28 @@ export type KnowledgeDocument = {
   upload_success: boolean
   is_markdown: boolean
   is_conversion: boolean
+  embedding_status: 'pending' | 'embedded'
+  indexed_chunks: number
+}
+
+export type RunMonitor = {
+  active: boolean
+  time_total: number | null
+  token_total: number | null
+}
+
+/** 读取任务的实时资源统计；由页面按 30 秒频率刷新。 */
+export async function getRunMonitor(runId: string): Promise<RunMonitor> {
+  const res = await fetch(`/api/runs/${runId}/monitor`)
+  if (!res.ok) throw new Error('获取实时监控失败')
+  return res.json()
+}
+
+/** 读取当前任务写入中的 run.log；日志尚未生成时返回空内容。 */
+export async function getRunLog(runId: string): Promise<string> {
+  const res = await fetch(`/api/runs/${runId}/files/run.log`)
+  if (!res.ok) return ''
+  return res.text()
 }
 
 export type KnowledgeStatus = {

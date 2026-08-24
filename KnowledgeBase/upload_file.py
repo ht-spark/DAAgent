@@ -64,6 +64,8 @@ class UploadRecord:
     output_name: str
     is_markdown: bool
     is_conversion: bool
+    embedding_status: str
+    indexed_chunks: int
 
 
 def list_upload_records() -> list[UploadRecord]:
@@ -104,11 +106,34 @@ def list_upload_records() -> list[UploadRecord]:
                         )
                     ),
                     is_conversion=bool(item.get("is_conversion", False)),
+                    embedding_status=(
+                        str(item.get("embedding_status"))
+                        if item.get("embedding_status") in {"pending", "embedded"}
+                        else "pending"
+                    ),
+                    indexed_chunks=max(0, int(item.get("indexed_chunks", 0))),
                 )
             )
         except (KeyError, TypeError, ValueError):
             continue
     return records
+
+
+def update_embedding_status(document_chunks: dict[str, int]) -> None:
+    """Persist whether each uploaded document has vectors in the rebuilt index."""
+    records = list_upload_records()
+    if not records:
+        return
+    _write_upload_records(
+        [
+            replace(
+                record,
+                embedding_status="embedded" if document_chunks.get(record.document_id, 0) > 0 else "pending",
+                indexed_chunks=max(0, document_chunks.get(record.document_id, 0)),
+            )
+            for record in records
+        ]
+    )
 
 
 def reconcile_conversion_records() -> list[UploadRecord]:
@@ -376,6 +401,8 @@ def _persist_upload_records(
             "output_name": record.output_name,
             "is_markdown": record.is_markdown,
             "is_conversion": record.is_conversion,
+            "embedding_status": record.embedding_status,
+            "indexed_chunks": record.indexed_chunks,
         }
         for record in existing
     ] + [
@@ -389,6 +416,8 @@ def _persist_upload_records(
             "output_name": document.name,
             "is_markdown": document.is_markdown,
             "is_conversion": document.is_conversion,
+            "embedding_status": "pending",
+            "indexed_chunks": 0,
         }
         for document in assigned
     ]
@@ -488,6 +517,8 @@ def _write_upload_records(records: list[UploadRecord]) -> None:
                 "output_name": record.output_name,
                 "is_markdown": record.is_markdown,
                 "is_conversion": record.is_conversion,
+                "embedding_status": record.embedding_status,
+                "indexed_chunks": record.indexed_chunks,
             }
             for record in records
         ]

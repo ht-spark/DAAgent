@@ -137,6 +137,8 @@ def test_chunk_embed_endpoint_returns_actual_index_counts(monkeypatch, tmp_path)
         main.DEFAULT_WINDOW_SIZE,
         3,
     ]
+    assert upload_file.list_upload_records()[0].embedding_status == "embedded"
+    assert upload_file.list_upload_records()[0].indexed_chunks == 3
 
 
 def test_brainstorm_stream_endpoint_yields_tokens_and_saves_on_completion(monkeypatch):

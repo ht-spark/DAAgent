@@ -312,12 +312,13 @@ export default function KnowledgeBase({
                   <th className="kb-col-status">上传状态</th>
                   <th className="kb-col-unknown">is_markdown</th>
                   <th className="kb-col-unknown">is_conversion</th>
+                  <th className="kb-col-status">向量状态</th>
                 </tr>
               </thead>
               <tbody>
                 {!loading && documents.length === 0 && (
                   <tr>
-                    <td colSpan={7} className="kb-empty-row">暂无文件记录</td>
+                    <td colSpan={8} className="kb-empty-row">暂无文件记录</td>
                   </tr>
                 )}
                 {paginatedDocuments.map((doc) => (
@@ -359,6 +360,13 @@ export default function KnowledgeBase({
                         <span className="kb-tag kb-tag-unknown">是</span>
                       ) : (
                         <span className="kb-tag kb-tag-normal">否</span>
+                      )}
+                    </td>
+                    <td className="kb-col-status">
+                      {doc.embedding_status === 'embedded' ? (
+                        <span className="kb-tag kb-tag-success">已入库 {doc.indexed_chunks} 块</span>
+                      ) : (
+                        <span className="kb-tag kb-tag-normal">待入库</span>
                       )}
                     </td>
                     <td className="kb-col-unknown">
