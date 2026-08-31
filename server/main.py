@@ -1,7 +1,11 @@
 """FastAPI 入口。
 
 启动：在项目根目录执行
-    uvicorn server.main:app --reload --port 8000
+    开发模式：uv run python -m server.dev
+    常规模式：uvicorn server.main:app --host 0.0.0.0 --port 8000
+
+开发模式只监控 server/ 与 scr/。不要直接使用项目根目录下的
+``uvicorn server.main:app --reload``，否则 artifacts/ 中的建模产物会触发重载。
 """
 from __future__ import annotations
 

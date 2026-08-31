@@ -19,3 +19,6 @@ def test_dev_server_watches_only_source_directories(monkeypatch):
     assert str(dev.PROJECT_ROOT / "server") in reload_dirs
     assert str(dev.PROJECT_ROOT / "scr") in reload_dirs
     assert str(dev.PROJECT_ROOT / "artifacts") not in reload_dirs
+    assert captured["kwargs"]["reload_excludes"] == [
+        str(dev.PROJECT_ROOT / "artifacts")
+    ]

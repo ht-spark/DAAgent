@@ -1,6 +1,6 @@
 """完成单个子问题的端到端求解。
 
-协调问题澄清、方法选择、模型计算和自评修订，将过程整理为标准的 QuestionResult 与可供后续子问题复用的摘要。
+协调问题澄清、问题驱动建模、模型计算和自评修订，将过程整理为标准的 QuestionResult 与可供后续子问题复用的摘要。
 """
 from __future__ import annotations
 
@@ -115,7 +115,7 @@ class QuestionSolver(BaseAgent):
 
         Args:
             context: 当前小问的上下文包。
-            data_profile: 数据画像（供方法探索器硬过滤和建模数据准备）。
+            data_profile: 数据画像（供建模数据准备）。
             output_dir: 产物目录（LLM 生成的解题代码将保存到其 questions/<qid>/ 下）。
 
         Returns:
@@ -270,27 +270,28 @@ class QuestionSolver(BaseAgent):
             "tables_count": len(model_output.get("tables", [])),
         }
 
-        # 提取关键数值
+        # 关键结果：只回显计算产物中的标量结论，不按预设方法键名猜重点
         if comp_status == "success":
-            if "weights" in results:
-                findings["key_result"] = f"权重: {results['weights']}"
-            elif "closeness" in results:
-                findings["key_result"] = f"相对接近度: {results['closeness']}"
-            elif "coefficients" in results:
-                findings["key_result"] = f"回归系数: {results['coefficients']}"
-            elif "predicted_future" in results:
-                findings["key_result"] = f"预测值: {results['predicted_future']}"
-            elif "expected_objective" in results:
-                findings["key_result"] = (
-                    f"期望目标值: {results.get('expected_objective', 0):.4f}, "
-                    f"最坏情况: {results.get('worst_case_objective', 0):.4f}"
-                )
-            elif "optimal_objective" in results:
-                findings["key_result"] = f"最优目标值: {results['optimal_objective']}"
-            elif "data_summary" in results:
+            if "data_summary" in results:
                 findings["key_result"] = "描述统计完成"
             else:
-                findings["key_result"] = "计算成功"
+                scalar_items = [
+                    f"{key}={value:.4f}" if isinstance(value, float) else f"{key}={value}"
+                    for key, value in results.items()
+                    if isinstance(value, (int, float, str))
+                    and not isinstance(value, bool)
+                    and key != "method"
+                ]
+                if not scalar_items:
+                    scalar_items = [
+                        f"{key}={value:.4f}" if isinstance(value, float) else f"{key}={value}"
+                        for key, value in metrics.items()
+                        if isinstance(value, (int, float, str))
+                        and not isinstance(value, bool)
+                    ]
+                findings["key_result"] = (
+                    "；".join(scalar_items[:3]) if scalar_items else "计算成功"
+                )
 
             # 记录关键指标
             if metrics:
@@ -331,89 +332,6 @@ class QuestionSolver(BaseAgent):
             relation_description=relation_desc,
         )
 
-    def _guess_math_task(self, context: CurrentQuestionContext) -> str:
-        """启发式判断数学任务类型。
-
-        基于任务文本关键词判断：
-          - 评价/排序/评估 → evaluation
-          - 预测/趋势/预报 → prediction
-          - 模拟/仿真（含"通过模拟数据求解"等明确指示）→ simulation
-          - 不确定性/随机/鲁棒 → stochastic_optimization（优先于普通 optimization）
-          - 优化/最优/策略/规划 → optimization
-          - 分类/聚类 → classification/clustering
-          - 默认 → composite
-
-        注意：
-          - simulation 在 optimization 之前检查，因为"通过模拟数据求解"
-            是比"最优策略"更明确的任务指示。
-          - stochastic_optimization 在 optimization 之前检查，因为"不确定性"
-            是比"最优"更具体的任务指示，需要不同的方法族。
-        """
-        text = (context.question_text + " " + context.objective).lower()
-        original = (context.question_text + " " + context.objective)
-
-        # 评价类：排序、评估、综合评价
-        if any(kw in text for kw in ["评价", "排序", "评估", "综合评", "排名", "evaluate", "rank"]):
-            return "evaluation"
-
-        # 预测类：预测、趋势、预报
-        if any(kw in text for kw in ["预测", "趋势", "预报", "predict", "forecast"]):
-            return "prediction"
-
-        # 仿真类：明确要求"模拟数据""仿真"等（优先于优化判断）
-        # 因为"通过模拟数据进行求解"是比"最优策略"更具体的任务指示
-        sim_keywords = ["模拟数据", "仿真", "蒙特卡洛", "simulate", "simulation", "monte carlo"]
-        if any(kw in original for kw in sim_keywords):
-            return "simulation"
-        # "模拟" + "求解" 的组合也算仿真
-        if "模拟" in original and ("求解" in original or "分析" in original):
-            return "simulation"
-
-        # 随机/鲁棒优化类：含不确定性关键词（优先于普通 optimization）
-        # 因为"考虑不确定性"需要随机规划或鲁棒优化，而非确定性线性规划
-        stochastic_keywords = [
-            "不确定性", "随机规划", "鲁棒优化", "鲁棒", "概率分布",
-            "随机变量", "概率约束", "场景规划", "stochastic", "robust",
-            "uncertain", "不确定性", "潜在风险", "波动", "随机波动",
-        ]
-        # 同时检查"最优"/"策略"/"规划" + 不确定性关键词的组合
-        has_optimization_intent = any(
-            kw in text for kw in ["优化", "最优", "策略", "规划", "optimize", "optimal", "strategy", "plan"]
-        )
-        has_uncertainty = any(kw in original for kw in stochastic_keywords)
-        if has_optimization_intent and has_uncertainty:
-            return "stochastic_optimization"
-
-        # 优化类：最优、优化、策略、规划
-        if any(kw in text for kw in ["优化", "最优", "策略", "规划", "optimize", "optimal", "strategy", "plan"]):
-            return "optimization"
-
-        # 分类/聚类
-        if any(kw in text for kw in ["分类", "聚类", "classify", "cluster"]):
-            return "classification"
-
-        # 默认复合类型
-        return "composite"
-
-    def _guess_result_form(
-        self,
-        context: CurrentQuestionContext,
-        math_task: str,
-    ) -> str:
-        """根据数学任务类型推断结果形式。"""
-        forms = {
-            "evaluation": "评价排名表",
-            "prediction": "预测值与误差表",
-            "optimization": "最优方案表",
-            "stochastic_optimization": "鲁棒最优方案表",
-            "classification": "分类结果表",
-            "clustering": "聚类标签表",
-            "simulation": "仿真结果统计表",
-            "mechanism": "机理模型与参数",
-            "composite": "综合结果表",
-        }
-        return forms.get(math_task, "结果表")
-
     def _build_summary(
         self,
         qid: str,
@@ -431,38 +349,24 @@ class QuestionSolver(BaseAgent):
         comp_status = computation.get("status", "unknown")
         results = computation.get("results", {})
         metrics = computation.get("metrics", {})
+        model_name = computation.get("model_name", "") or selected_method
 
         conclusions = [
-            f"小问 {qid} 的数学任务类型: {interpretation.math_task}",
-            f"选用方法: {selected_method}",
-            f"方法家族: {decision_record.get('selected_family', '未知')}",
+            f"小问 {qid} 建模完成: {model_name}",
             f"计算状态: {comp_status}",
         ]
 
-        # 提取关键数值结论
+        # 关键数值结论：只回显标量形式的计算产物，不按预设方法键名提取
         if comp_status == "success":
-            if "weights" in results:
-                weights_str = ", ".join(
-                    f"{model_output.get('data_preparation', {}).get('feature_names', ['x'])[i] if i < len(model_output.get('data_preparation', {}).get('feature_names', [])) else f'x{i}'}={w:.4f}"
-                    for i, w in enumerate(results["weights"][:5])
-                )
-                conclusions.append(f"指标权重: {weights_str}")
-            if "ranking" in results:
-                conclusions.append(f"排名: {results['ranking'][:5]}")
-            if "r_squared" in metrics:
-                conclusions.append(f"R² = {metrics['r_squared']:.4f}")
-            if "predicted_future" in results:
-                conclusions.append(f"预测值: {results['predicted_future']}")
-            if "development_coefficient_a" in results:
-                conclusions.append(f"发展系数 a = {results['development_coefficient_a']:.6f}")
-            if "expected_objective" in results:
-                conclusions.append(f"期望目标值 = {results['expected_objective']:.4f}")
-            if "worst_case_objective" in results:
-                conclusions.append(f"最坏情况目标值 = {results['worst_case_objective']:.4f}")
-            if "robustness_ratio" in metrics:
-                conclusions.append(f"鲁棒性比率 = {metrics['robustness_ratio']:.4f}")
-            if "optimal_objective" in results and "expected_objective" not in results:
-                conclusions.append(f"最优目标值 = {results['optimal_objective']:.4f}")
+            for key, value in list(results.items()) + list(metrics.items()):
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    continue
+                if isinstance(value, float):
+                    conclusions.append(f"{key} = {value:.6f}")
+                else:
+                    conclusions.append(f"{key} = {value}")
+                if len(conclusions) >= 8:
+                    break
 
         # 如果继承了前问结论，也记录到可复用摘要
         if context.inherited_summaries:
@@ -490,7 +394,7 @@ class QuestionSolver(BaseAgent):
             question_id=qid,
             verified_conclusions=conclusions,
             reusable_datasets=reusable_datasets,
-            model_interface=f"{selected_method}_{interpretation.math_task}",
+            model_interface=model_name,
             key_parameters=key_params,
             limitations=self._build_limitations(decision_record, interpretation, model_output),
             improvement_directions=[

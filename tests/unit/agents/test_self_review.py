@@ -24,9 +24,18 @@ def test_feedback_reaches_code_generation(sample_csv: Path, tmp_path: Path):
             self.prompts.append(prompt)
             return super().invoke(prompt)
 
-    code = ('import json\n'
-            'print("__MODEL_RESULT__" + json.dumps('
-            '{"solution": [1.0], "objective": 5.0, "metrics": {"n": 1}}))\n')
+    code = (
+        "import json, os\n"
+        "import matplotlib\n"
+        "matplotlib.use('Agg')\n"
+        "import matplotlib.pyplot as plt\n"
+        'print("__MODEL_RESULT__" + json.dumps('
+        '{"solution": [1.0], "objective": 5.0, "metrics": {"n": 1}}))\n'
+        'fig_dir = os.environ["MODEL_FIGURE_DIR"]\n'
+        "fig, ax = plt.subplots()\n"
+        'ax.bar(["x"], [1.0])\n'
+        'fig.savefig(os.path.join(fig_dir, "q1_result.png"))\n'
+    )
     # 分段接口：第一段输出模型设计 JSON，第二段输出求解代码
     llm = RecordingLLM([_model_design(), code])
     dp = run_intake(

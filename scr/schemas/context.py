@@ -16,7 +16,7 @@ class QuestionInfo(BaseModel):
     original_text: str
     objective: str = ""
     expected_output: str = ""
-    question_type: str = ""  # evaluation/prediction/optimization/classification/simulation/mechanism/composite
+    question_type: str = ""  # 自由文本口径（保留字段，当前主流程未使用）
     required_data: list[str] = Field(default_factory=list)
     depends_on: list[str] = Field(default_factory=list)
     status: Literal["pending", "solving", "validated", "blocked"] = "pending"

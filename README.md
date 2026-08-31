@@ -147,7 +147,10 @@ cd web && npm run build
 
 ```bash
 # 开发模式：只监听 server/ 和 scr/ 源码，建模产物写入 artifacts/ 不会中断任务
-uvicorn server.main:app --reload --port 8000
+uv run python -m server.dev
+
+# 如不使用 uv，可使用等效命令（不要省略 reload-dir 与 reload-exclude）
+uvicorn server.main:app --reload --port 8000 --reload-dir server --reload-dir scr --reload-exclude artifacts
 
 # 常规运行：不启用自动重载
 uvicorn server.main:app --host 0.0.0.0 --port 8000

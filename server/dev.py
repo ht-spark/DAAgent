@@ -12,6 +12,7 @@ import uvicorn
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RELOAD_DIRS = (PROJECT_ROOT / "server", PROJECT_ROOT / "scr")
+RELOAD_EXCLUDES = (PROJECT_ROOT / "artifacts",)
 
 
 def run() -> None:
@@ -22,6 +23,7 @@ def run() -> None:
         port=8000,
         reload=True,
         reload_dirs=[str(path) for path in RELOAD_DIRS],
+        reload_excludes=[str(path) for path in RELOAD_EXCLUDES],
     )
 
 

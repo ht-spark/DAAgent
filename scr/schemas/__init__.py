@@ -12,7 +12,6 @@ from .problem import (
     DataInventory,
     NumericStats,
     ProblemAnalysis,
-    ProblemClassification,
     SubProblem,
     SubProblemList,
 )
@@ -92,7 +91,6 @@ __all__ = [
     "PreprocessingReport",
     "PreprocessingStep",
     "ProblemAnalysis",
-    "ProblemClassification",
     "ProblemInterpretation",
     "ProjectContext",
     "QualityIssue",

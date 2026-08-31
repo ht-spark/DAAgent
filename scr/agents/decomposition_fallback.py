@@ -187,16 +187,6 @@ def _infer_expected_outputs(
         if outputs:
             return outputs
 
-    if re.search(r"评价|评估|排序|排名|得分|综合", task):
-        return ["指标体系与权重说明", "综合得分与排序结果", "结果解释与稳健性分析"]
-    if re.search(r"预测|预报|趋势|未来|估计", task):
-        return ["预测结果", "误差评价指标", "趋势解释与不确定性说明"]
-    if re.search(r"优化|最优|方案|调度|路径|选址|配置|成本|收益", task):
-        return ["最优方案", "目标函数值", "约束满足性与敏感性分析"]
-    if re.search(r"分类|识别|判别|聚类", task):
-        return ["分类或分组结果", "模型性能指标", "关键特征解释"]
-    if re.search(r"仿真|模拟|随机|情景|风险", task):
-        return ["模拟结果", "情景或风险指标", "敏感性分析"]
     return [f"问题{index}的计算结果", "建模过程与结论分析"]
 
 

@@ -621,9 +621,10 @@ def _build_modeling_constraints(
     correlated_pairs: list[CorrelatedPair],
     spatial_columns: list[str],
 ) -> list[str]:
-    """建模假设预判：基于画像的确定性规则，输出模型可用性硬约束。
+    """数据事实陈述：基于画像的确定性规则，供 LLM 判断模型可用性。
 
-    这是数据画像第 6 维度的核心产出，直接服务 L2 模型过滤。
+    这是数据画像第 6 维度的核心产出。只陈述数据事实，不裁决应使用或
+    排除哪类方法——方法与数据的匹配由 LLM 建模时自行判断。
     """
     constraints: list[str] = []
     numeric_fields = [f for f in fields if f.dtype in ("int", "float")]
@@ -631,29 +632,29 @@ def _build_modeling_constraints(
 
     # 1. 时间维度
     if not time_columns:
-        constraints.append("无时间维度列：排除时间序列模型（ARIMA/Prophet/LSTM 等）")
+        constraints.append("无时间维度列：数据不含时间字段")
     elif time_unique_count == 0:
-        constraints.append("时间列无有效值（全空或解析失败）：无法使用时间序列模型")
+        constraints.append("时间列无有效值（全空或解析失败）：时间维度不可用")
     elif time_unique_count < 30:
         constraints.append(
-            f"时间点仅 {time_unique_count} 个：时序模型样本不足，慎用"
+            f"时间点仅 {time_unique_count} 个：时间粒度较粗"
         )
 
     # 2. 样本量
     if n_rows < 30:
         constraints.append(
-            f"样本量 {n_rows} < 30：排除高参数机器学习模型（随机森林/GBDT/深度学习）"
+            f"样本量 {n_rows} < 30：小样本"
         )
     elif n_rows < 100:
         constraints.append(
-            f"样本量 {n_rows} < 100：统计推断需谨慎，优先低参数模型"
+            f"样本量 {n_rows} < 100：样本量偏小"
         )
 
     # 3. 特征可用性
     if not numeric_fields:
-        constraints.append("无数值特征列：排除回归/数值预测类方法")
+        constraints.append("无数值特征列：所有字段均为非数值类型")
     if not categorical_fields:
-        constraints.append("无分类特征列：分类方法直接应用受限")
+        constraints.append("无分类特征列：所有字段均为数值类型")
 
     # 4. 目标不平衡（目标变量特殊性）
     for f in categorical_fields:
@@ -662,7 +663,7 @@ def _build_modeling_constraints(
             continue
         if share >= 0.9:
             constraints.append(
-                f"分类字段 '{f.name}' 最大类别占比 {share:.1%}：严重不平衡，需采样/加权"
+                f"分类字段 '{f.name}' 最大类别占比 {share:.1%}：严重不平衡"
             )
         elif share >= 0.8:
             constraints.append(
@@ -673,14 +674,14 @@ def _build_modeling_constraints(
     if correlated_pairs:
         names = ", ".join(f"{p.col_a}-{p.col_b}" for p in correlated_pairs[:3])
         constraints.append(
-            f"存在高相关数值列对（|r|≥{_CORRELATION_THRESHOLD:.1f}）：{names}，线性模型注意共线性"
+            f"存在高相关数值列对（|r|≥{_CORRELATION_THRESHOLD:.1f}）：{names}"
         )
 
     # 6. 高缺失（数据质量）
     for f in fields:
         if f.missing_rate > 0.5:
             constraints.append(
-                f"字段 '{f.name}' 缺失率 {f.missing_rate:.1%}：需填充或删除决策"
+                f"字段 '{f.name}' 缺失率 {f.missing_rate:.1%}：缺失严重"
             )
 
     # 7. 高离群（数据质量；空间坐标列/时间列不做数值离群约束）
@@ -692,18 +693,18 @@ def _build_modeling_constraints(
             and f.numeric_stats.outlier_rate > 0.05
         ):
             constraints.append(
-                f"字段 '{f.name}' 离群率 {f.numeric_stats.outlier_rate:.1%}：注意鲁棒性与异常值处理"
+                f"字段 '{f.name}' 离群率 {f.numeric_stats.outlier_rate:.1%}：离群点较多"
             )
 
     # 8. 常量列
     constant_cols = [f.name for f in fields if f.unique_count <= 1 and f.missing_rate == 0]
     if constant_cols:
-        constraints.append(f"常量列（无信息量，建议剔除）：{', '.join(constant_cols[:5])}")
+        constraints.append(f"常量列（无信息量）：{', '.join(constant_cols[:5])}")
 
     # 9. 空间结构
     if spatial_columns:
         constraints.append(
-            f"检测到空间坐标列 {', '.join(spatial_columns[:3])}：可考虑空间分析方法"
+            f"检测到空间坐标列 {', '.join(spatial_columns[:3])}"
         )
 
     return constraints

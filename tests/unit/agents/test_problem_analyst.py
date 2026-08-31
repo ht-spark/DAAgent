@@ -1,7 +1,7 @@
 """ProblemAnalyst 单元测试。
 
 使用 FakeLLM 注入，不需要真实 API Key 或 langchain 安装。
-覆盖 understand / decompose / classify / analyze 四个方法。
+覆盖 understand / decompose 两个方法。
 """
 from __future__ import annotations
 
@@ -14,7 +14,6 @@ from scr.agents.problem_analyst import ProblemAnalyst
 from scr.schemas.problem import (
     DataInventory,
     ProblemAnalysis,
-    ProblemClassification,
     SubProblem,
     SubProblemList,
 )
@@ -104,16 +103,6 @@ def sample_subproblems() -> list[SubProblem]:
             parallelizable=False,
         ),
     ]
-
-
-@pytest.fixture
-def sample_classification() -> ProblemClassification:
-    return ProblemClassification(
-        primary_type="evaluation",
-        secondary_types=["prediction"],
-        reasoning="题目核心是对 5 个城市进行综合排名，属于评价类问题。"
-        "同时涉及对影响因素的分析，具有预测性质，但非核心任务。",
-    )
 
 
 @pytest.fixture
@@ -242,94 +231,6 @@ class TestDecompose:
 
 
 # ---------------------------------------------------------------------------
-# classify 测试
-# ---------------------------------------------------------------------------
-
-
-class TestClassify:
-    def test_returns_classification(
-        self, fake_llm, sample_analysis, sample_subproblems, sample_classification
-    ):
-        fake_llm.register(ProblemClassification, sample_classification)
-        analyst = ProblemAnalyst(llm=fake_llm)
-        result = analyst.classify(sample_analysis, sample_subproblems)
-        assert isinstance(result, ProblemClassification)
-        assert result.primary_type == "evaluation"
-        assert "prediction" in result.secondary_types
-
-    def test_primary_type_valid(
-        self, fake_llm, sample_analysis, sample_subproblems
-    ):
-        valid_types = {
-            "evaluation", "prediction", "optimization",
-            "classification", "simulation", "mechanism", "composite",
-        }
-        for ptype in valid_types:
-            fake_llm = FakeLLM()
-            fake_llm.register(
-                ProblemClassification,
-                ProblemClassification(
-                    primary_type=ptype,
-                    secondary_types=[],
-                    reasoning="测试",
-                ),
-            )
-            analyst = ProblemAnalyst(llm=fake_llm)
-            result = analyst.classify(sample_analysis, sample_subproblems)
-            assert result.primary_type == ptype
-
-
-# ---------------------------------------------------------------------------
-# analyze（串联三步）测试
-# ---------------------------------------------------------------------------
-
-
-class TestAnalyze:
-    def test_chained(
-        self,
-        fake_llm,
-        sample_analysis,
-        sample_subproblems,
-        sample_classification,
-    ):
-        fake_llm.register(ProblemAnalysis, sample_analysis)
-        fake_llm.register(
-            SubProblemList,
-            SubProblemList(subproblems=sample_subproblems),
-        )
-        fake_llm.register(ProblemClassification, sample_classification)
-
-        analyst = ProblemAnalyst(llm=fake_llm)
-        pa, sps, pc = analyst.analyze("某省 5 个城市经济数据...")
-
-        assert isinstance(pa, ProblemAnalysis)
-        assert isinstance(sps, list)
-        assert isinstance(pc, ProblemClassification)
-        assert pa.research_subject == "城市经济综合评价"
-        assert len(sps) == 2
-        assert pc.primary_type == "evaluation"
-
-    def test_chained_with_inventory(
-        self,
-        fake_llm,
-        sample_analysis,
-        sample_subproblems,
-        sample_classification,
-        sample_inventory,
-    ):
-        fake_llm.register(ProblemAnalysis, sample_analysis)
-        fake_llm.register(
-            SubProblemList,
-            SubProblemList(subproblems=sample_subproblems),
-        )
-        fake_llm.register(ProblemClassification, sample_classification)
-
-        analyst = ProblemAnalyst(llm=fake_llm)
-        pa, sps, pc = analyst.analyze("题目", data_inventory=sample_inventory)
-        assert pa.research_subject == "城市经济综合评价"
-
-
-# ---------------------------------------------------------------------------
 # prompt 模板测试
 # ---------------------------------------------------------------------------
 
@@ -345,12 +246,6 @@ class TestPromptTemplates:
         analyst = ProblemAnalyst(llm=FakeLLM())
         template = analyst._load_prompt("task_decomposition")
         assert "{problem_analysis}" in template
-
-    def test_problem_classification_template_exists(self):
-        analyst = ProblemAnalyst(llm=FakeLLM())
-        template = analyst._load_prompt("problem_classification")
-        assert "{problem_analysis}" in template
-        assert "{subproblems}" in template
 
     def test_render_prompt_replaces_placeholders(self):
         rendered = BaseAgent._render_prompt(

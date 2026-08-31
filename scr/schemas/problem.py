@@ -206,7 +206,7 @@ class DataInventory(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# L0 understand / decompose / classify
+# L0 understand / decompose
 # ---------------------------------------------------------------------------
 
 
@@ -287,29 +287,3 @@ class SubProblemList(BaseModel):
     """子问题列表包装，用于 LLM 结构化输出。"""
 
     subproblems: list[SubProblem] = Field(min_length=1)
-
-
-class ProblemClassification(BaseModel):
-    """题型分类（L0 classify 节点输出）。
-
-    对应 architecture.md §4 L0 classify：
-      判定主类型（evaluation / prediction / optimization / classification /
-      simulation / mechanism / composite），允许一主多次。
-
-    Attributes:
-        primary_type: 主题型。
-        secondary_types: 次题型列表（可为空）。
-        reasoning: 分类理由。
-    """
-
-    primary_type: Literal[
-        "evaluation",
-        "prediction",
-        "optimization",
-        "classification",
-        "simulation",
-        "mechanism",
-        "composite",
-    ]
-    secondary_types: list[str] = Field(default_factory=list)
-    reasoning: str

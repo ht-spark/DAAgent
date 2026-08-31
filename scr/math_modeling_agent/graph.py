@@ -335,7 +335,7 @@ def _solve_question_node(state: ProjectState) -> dict:
 
 @_logged_node("validate_result")
 def _validate_result_node(state: ProjectState) -> dict:
-    """validate_result 节点：题型验证（Phase 5）。"""
+    """validate_result 节点：计算证据记录（Phase 5）。"""
     return validate_result_node(state)
 
 

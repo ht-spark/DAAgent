@@ -12,31 +12,6 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 
-ModelingTask = Literal[
-    "evaluation",
-    "prediction",
-    "optimization",
-    "stochastic_optimization",
-    "classification",
-    "clustering",
-    "simulation",
-    "mechanism",
-    "composite",
-]
-
-MODELING_TASKS = {
-    "evaluation",
-    "prediction",
-    "optimization",
-    "stochastic_optimization",
-    "classification",
-    "clustering",
-    "simulation",
-    "mechanism",
-    "composite",
-}
-
-
 class VariableIR(BaseModel):
     """A decision, state, score, or fitted variable in a model."""
 
@@ -58,7 +33,7 @@ class FormulationIR(BaseModel):
     """Domain-neutral formulation for a mathematical modeling subproblem."""
 
     question_id: str
-    math_task: ModelingTask
+    math_task: str = "composite"
     method_key: str = ""
     method_name: str = ""
     sets: list[str] = Field(default_factory=list)

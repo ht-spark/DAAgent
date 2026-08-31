@@ -9,14 +9,12 @@ class ProblemInterpretation(BaseModel):
     """问题澄清（architecture.md §5.2）。
     
     当前小问的问题理解输出，必须能使审查器判断"所建模型是否真正回答了该问"。
+    
+    ``math_task`` 只作展示用途的自由文本口径（由 LLM 建模产物回填），
+    不参与任何方法选择或分支判断。
     """
     question_id: str
-    math_task: Literal[
-        "evaluation", "prediction", "optimization",
-        "stochastic_optimization",
-        "classification", "clustering", "simulation",
-        "mechanism", "composite",
-    ]
+    math_task: str = "composite"
     math_task_description: str = ""
     decision_variables: list[str] = Field(default_factory=list)
     objective_function: str = ""
