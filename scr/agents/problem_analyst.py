@@ -46,8 +46,7 @@ class ProblemAnalyst(BaseAgent):
         data_inventory: DataInventory | None = None,
     ) -> ProblemAnalysis:
         """理解任务背景，提取关键信息。
-
-        对应 architecture.md §4 L0 understand：
+        
           提取研究对象、背景、显式小问、约束、预期输出、关键词。
           禁止推荐模型或开始求解。
 
