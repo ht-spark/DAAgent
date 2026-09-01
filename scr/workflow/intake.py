@@ -8,7 +8,8 @@
   4. 将原始输入登记为只读产物
 
 数据画像由确定性工具生成（file_tools.py），不依赖 LLM。
-画像的作用是约束后续方法选择：无时间列淘汰时间序列、样本量过小淘汰高参数模型。
+画像只陈述数据事实（modeling_constraints，如无时间列、样本量偏小、存在共线性），
+方法与数据的匹配由 LLM 建模时自行判断，不做硬性淘汰裁决。
 
 画像覆盖六个维度：
   1. 数据基本面 — 规模、类型构成、粒度（候选键）、时空覆盖
@@ -23,6 +24,8 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
+import pandas as pd
+
 from ..runtime.logging import get_run_logger, log_step
 from ..schemas.context import (
     DataProfile,
@@ -33,7 +36,16 @@ from ..schemas.context import (
     TableRelationship,
 )
 from ..schemas.problem import DataField, DataInventory
-from ..tools.file_tools import generate_data_inventories
+from ..tools.file_tools import (
+    generate_data_inventories,
+    read_csv,
+    read_excel,
+    read_json,
+    read_mat,
+)
+
+# 表间关联值域校验：每侧最多取的唯一值数（防超大表内存膨胀）
+_RELATIONSHIP_MAX_UNIQUE = 50000
 
 
 def run_intake(state: dict) -> dict:
@@ -117,8 +129,6 @@ def _build_data_profile(
 
 def _register_profile_artifacts(profile: DataProfile, context_dir: Path) -> None:
     """登记画像产物路径：DataProfile 报告 + 各表 inventory JSON。
-
-    对应 architecture.md §3.2 artifacts（画像报告、描述统计路径）。
     """
     artifacts: list[str] = []
 
@@ -207,6 +217,7 @@ def _convert_inventories_to_profile(
                 field_name=df.name,
                 dtype=df.dtype,
                 unit_hint=df.unit_hint,
+                sample_values=df.sample_values,
                 missing_count=df.missing_count,
                 missing_rate=df.missing_rate,
                 unique_count=df.unique_count,
@@ -216,6 +227,12 @@ def _convert_inventories_to_profile(
                 is_spatial=df.is_spatial,
                 skewness=df.numeric_stats.skewness if df.numeric_stats else None,
                 kurtosis=df.numeric_stats.kurtosis if df.numeric_stats else None,
+                mean=df.numeric_stats.mean if df.numeric_stats else None,
+                std=df.numeric_stats.std if df.numeric_stats else None,
+                median=df.numeric_stats.median if df.numeric_stats else None,
+                q1=df.numeric_stats.q1 if df.numeric_stats else None,
+                q3=df.numeric_stats.q3 if df.numeric_stats else None,
+                iqr=df.numeric_stats.iqr if df.numeric_stats else None,
                 outlier_rate=df.numeric_stats.outlier_rate if df.numeric_stats else 0.0,
                 max_category_share=(
                     df.categorical_stats.max_category_share
@@ -243,8 +260,8 @@ def _convert_inventories_to_profile(
                 error_message="文件读取或画像生成失败",
             ))
 
-    # 表间关联（同名列 + 候选键加权置信度）
-    relationships = _detect_table_relationships(tables)
+    # 表间关联（同名列 + 候选键加权置信度 + 值域重叠校验）
+    relationships = _detect_table_relationships(tables, inventories)
 
     # 初步发现（6 维度汇总）
     findings = _build_preliminary_findings(
@@ -399,21 +416,83 @@ def _append_field_quality_issues(
         ))
 
 
+def _read_inventory_frame(inv: DataInventory) -> pd.DataFrame | None:
+    """按画像记录的文件类型读取原始表（用于表间关联的值域校验）。"""
+    p = Path(inv.file_path)
+    if not p.exists():
+        return None
+    if inv.file_type == "csv":
+        return read_csv(p)
+    if inv.file_type == "excel":
+        return read_excel(p, sheet_name=inv.sheet_name or 0)
+    if inv.file_type == "json":
+        return read_json(p)
+    if inv.file_type == "mat":
+        return read_mat(p, variable_name=inv.sheet_name or None)
+    return None
+
+
+def _value_overlap(s1: pd.Series, s2: pd.Series) -> float | None:
+    """两列非空值集合的交集占比：|交集| / 较小侧唯一值数。
+
+    唯一值过多时各侧最多取前 _RELATIONSHIP_MAX_UNIQUE 个，避免超大表内存膨胀。
+
+    Returns:
+        占比 [0, 1]；任一侧无非空值时返回 None（无法校验）。
+    """
+    v1 = s1.dropna().unique()[:_RELATIONSHIP_MAX_UNIQUE]
+    v2 = s2.dropna().unique()[:_RELATIONSHIP_MAX_UNIQUE]
+    set1 = {str(v) for v in v1}
+    set2 = {str(v) for v in v2}
+    smaller = min(len(set1), len(set2))
+    if smaller == 0:
+        return None
+    return len(set1 & set2) / smaller
+
+
 def _detect_table_relationships(
     tables: list[TableProfile],
+    inventories: list[DataInventory],
 ) -> list[TableRelationship]:
-    """表间关联候选：跨表同名列 + 候选键加权置信度。
+    """表间关联候选：跨表同名列 + 候选键加权置信度 + 值域重叠校验。
 
     置信度规则（architecture.md §3.2 relationships：关联键与置信度）：
       - 共享列在任一张表中是候选主键 → 0.8（强关联候选）
       - 普通同名列 → 0.5（提示级，需人工确认）
 
+    值域校验：同名列进一步比较两侧非空值集合的交集占比
+    （|交集| / 较小侧唯一值数）：
+      - 候选键关联占比 < 0.5 → 降级为 0.5（疑似仅同名，需人工确认）
+      - 普通同名关联占比 = 0 → 剔除（值域完全不相交，视为偶然同名）
+      - 数据不可读时跳过校验，维持列名级置信度
+
     Args:
         tables: 表画像列表。
+        inventories: 数据画像列表（提供重新读盘的文件路径与 sheet/变量名）。
 
     Returns:
         表间关联候选列表（每对表最多 5 条，按置信度降序）。
     """
+    # 懒加载缓存：只有存在共享列的表才会真正读盘，且每表至多读一次
+    frames: dict[tuple[str, str], pd.DataFrame | None] = {}
+    inv_map: dict[tuple[str, str], DataInventory] = {}
+    for inv in inventories:
+        parts = inv.file_name.split("::")
+        inv_map[(parts[0], parts[1] if len(parts) > 1 else "")] = inv
+
+    def _frame_for(t: TableProfile) -> pd.DataFrame | None:
+        key = (t.source_file, t.sheet_name)
+        if key not in frames:
+            inv = inv_map.get(key)
+            df = None
+            if inv is not None:
+                try:
+                    df = _read_inventory_frame(inv)
+                except Exception:
+                    df = None
+            frames[key] = df
+        return frames[key]
+
     rels: list[TableRelationship] = []
     for i in range(len(tables)):
         for j in range(i + 1, len(tables)):
@@ -427,15 +506,28 @@ def _detect_table_relationships(
 
             key_cols_1 = set(t1.candidate_keys)
             key_cols_2 = set(t2.candidate_keys)
+            df1 = _frame_for(t1)
+            df2 = _frame_for(t2)
 
             # 按置信度排序，优先候选键关联
-            candidates = sorted(
-                (
-                    (0.8 if (col in key_cols_1 or col in key_cols_2) else 0.5, col)
-                    for col in shared
-                ),
-                reverse=True,
-            )
+            candidates: list[tuple[float, str]] = []
+            for col in shared:
+                overlap = (
+                    _value_overlap(df1[col], df2[col])
+                    if (
+                        df1 is not None and df2 is not None
+                        and col in df1.columns and col in df2.columns
+                    )
+                    else None
+                )
+                if col in key_cols_1 or col in key_cols_2:
+                    conf = 0.8 if (overlap is None or overlap >= 0.5) else 0.5
+                else:
+                    if overlap == 0.0:
+                        continue  # 值域完全不相交，视为偶然同名
+                    conf = 0.5
+                candidates.append((conf, col))
+            candidates.sort(reverse=True)
 
             left = t1.source_file if not t1.sheet_name else f"{t1.source_file}::{t1.sheet_name}"
             right = t2.source_file if not t2.sheet_name else f"{t2.source_file}::{t2.sheet_name}"

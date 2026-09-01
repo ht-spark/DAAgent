@@ -292,8 +292,12 @@ function RunMonitorPanel({
   currentStep: string
 }) {
   const startedAt = run?.created_at ? Date.parse(run.created_at) : NaN
+  // 任务结束后应冻结计时：以前端 `now` 计算会让计时器持续上涨，
+  // 改为用服务端的 `updated_at` 作为冻结的结束时间戳。
+  const endedAt = run?.updated_at ? Date.parse(run.updated_at) : NaN
+  const referenceTime = phase === 'done' && Number.isFinite(endedAt) ? endedAt : now
   const elapsed = Number.isFinite(startedAt)
-    ? Math.max(0, Math.floor((now - startedAt) / 1000))
+    ? Math.max(0, Math.floor((referenceTime - startedAt) / 1000))
     : null
   const timeline = buildTimeline(run?.progress || [], phase, currentStep)
   const logLines = log.split(/\r?\n/).filter(Boolean).slice(-80)
@@ -365,7 +369,10 @@ function TaskWorkflow({
 }) {
   const timeline = buildTimeline(run?.progress || [], phase, currentStep)
   const startedAt = run?.created_at ? Date.parse(run.created_at) : NaN
-  const elapsed = Number.isFinite(startedAt) ? Math.max(0, Math.floor((now - startedAt) / 1000)) : null
+  // 任务结束后应冻结计时：用服务端 updated_at 作为结束时间，避免前端 `now` 继续走导致数字持续上涨。
+  const endedAt = run?.updated_at ? Date.parse(run.updated_at) : NaN
+  const referenceTime = phase === 'done' && Number.isFinite(endedAt) ? endedAt : now
+  const elapsed = Number.isFinite(startedAt) ? Math.max(0, Math.floor((referenceTime - startedAt) / 1000)) : null
   const inputFiles = (run?.artifacts || []).filter((path: string) => path.startsWith('input/'))
   const resultFiles = (run?.artifacts || []).filter((path: string) => !path.startsWith('input/'))
   const completedCount = timeline.filter((item) => item.status === 'done').length
@@ -426,7 +433,7 @@ function TaskWorkflow({
 
         <section className="workflow-canvas">
           <div className="workflow-canvas-head">
-            <div><h2>求解流水线</h2><p>{phase === 'running' ? '节点状态会随任务执行实时更新。' : '任务已结束，可查看最终报告。'}</p></div>
+            <div><h2>建模工作流</h2><p>{phase === 'running' ? '节点状态会随任务执行实时更新。' : '任务已结束，可查看最终报告。'}</p></div>
             <span>{phase === 'running' ? '实时状态' : '执行记录'}</span>
           </div>
           <div className="workflow-stages" aria-live="polite">
@@ -1061,9 +1068,7 @@ export default function ChatModeling({ resumeRunId, onViewResult }: Props) {
         </header>
         <section className="task-setup-form">
           <label className="task-setup-label" htmlFor="task-name">任务名称</label>
-          <input id="task-name" className="task-setup-input" value={taskName} onChange={(event) => { setTaskName(event.target.value); setTaskNameDraft(event.target.value) }} placeholder="例如：2024 高教社杯 C 题" />
-          <label className="task-setup-label" htmlFor="task-problem">任务文本</label>
-          <textarea id="task-problem" className="task-setup-textarea" value={problemText} onChange={(event) => setProblemText(event.target.value)} placeholder="粘贴题目、约束条件和需要解决的问题…" rows={8} />
+          <input id="task-name" className="task-setup-input" value={taskName} onChange={(event) => { setTaskName(event.target.value); setTaskNameDraft(event.target.value) }} placeholder="" />
           <div className="task-upload-grid">
             <label className="task-upload-slot">
               <span>任务文件</span><strong>{problemFile?.name || '选择 Markdown 或 TXT 文件'}</strong>

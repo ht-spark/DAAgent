@@ -6,11 +6,6 @@
 功能：
   - 读取 CSV / Excel / MATLAB(.mat) / Markdown 文件
   - 对数据文件生成确定性画像（data_inventory）
-
-画像包含：行列数、字段类型、缺失率、单位线索、时间维度。
-它是 L2 硬过滤的关键输入：
-  - 无时间列 → 淘汰 ARIMA
-  - 样本量 < 30 → 淘汰机器学习类候选
 """
 from __future__ import annotations
 
@@ -797,10 +792,6 @@ def generate_data_inventory(
     variable_name: str | None = None,
 ) -> DataInventory:
     """对数据文件生成确定性画像。
-
-    画像包含：行列数、字段类型、缺失率、单位线索、时间维度。
-    它是 L2 硬过滤的关键输入。
-
     Args:
         file_path: 数据文件路径（.csv / .xlsx / .xls / .mat / .json）。
         output_path: 可选，画像 JSON 写入路径。
@@ -868,14 +859,27 @@ def generate_data_inventory(
         sample_rows.append({str(k): _cell_to_str(v) for k, v in row.items()})
 
     # 时空结构：时间覆盖 + 空间坐标列
+    # 覆盖范围取所有时间列的并集：min 取最早、max 取最晚、时间点数为去重并集
     spatial_columns = [f.name for f in fields if f.is_spatial]
     time_min: str | None = None
     time_max: str | None = None
     time_unique_count = 0
     if time_columns:
-        time_min, time_max, time_unique_count = _compute_time_coverage(
-            df, time_columns[0]
-        )
+        mins: list[str] = []
+        maxs: list[str] = []
+        uniques: set[str] = set()
+        for tc in time_columns:
+            col_min, col_max, _ = _compute_time_coverage(df, tc)
+            if col_min:
+                mins.append(col_min)
+            if col_max:
+                maxs.append(col_max)
+            uniques.update(str(v) for v in df[tc].dropna())
+        if mins:
+            time_min = min(mins)
+        if maxs:
+            time_max = max(maxs)
+        time_unique_count = len(uniques)
 
     # 分布特征·多变量：高相关列对（共线性）
     correlated_pairs = _compute_correlated_pairs(df)

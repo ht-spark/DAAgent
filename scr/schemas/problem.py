@@ -142,7 +142,7 @@ class DataInventory(BaseModel):
         file_path: 文件绝对路径。
         file_type: 文件格式。
         file_size: 文件大小（字节）。
-        n_rows: 行数（样本量），用于 L2 硬过滤。
+        n_rows: 行数（样本量），用于小样本建模约束判断。
         n_cols: 列数。
         fields: 每个字段的画像列表。
         overall_missing_rate: 全表缺失率 [0, 1]。
@@ -152,14 +152,14 @@ class DataInventory(BaseModel):
         sample_rows: 前 5 行样例（值转为字符串，控制体积）。
         has_time_column: 是否存在时间维度列。
         time_columns: 时间列名列表。
-        time_min / time_max: 时间覆盖范围（首列时间字段）。
+        time_min / time_max: 时间覆盖范围（所有时间列的并集）。
         time_unique_count: 时间点数量（粒度线索）。
         spatial_columns: 空间坐标列名列表。
         correlated_pairs: |r|≥阈值 的高相关数值列对。
         numeric_columns: 数值列名列表。
         categorical_columns: 分类列名列表。
         modeling_constraints: 建模假设预判（确定性规则生成）。
-        sample_size: 样本量（= n_rows），冗余字段便于硬过滤直接引用。
+        sample_size: 样本量（= n_rows），冗余字段便于约束判断直接引用。
     """
 
     file_name: str
