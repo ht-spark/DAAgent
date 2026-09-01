@@ -346,9 +346,10 @@ class TestEdgeCases:
         assert inv.overall_missing_rate == 0.0
 
     def test_small_sample(self, small_sample_csv: Path):
-        """样本量 < 30 → L2 硬过滤应淘汰 ML 候选。"""
+        """样本量 < 30 应生成小样本建模约束（只陈述事实，不淘汰方法）。"""
         inv = generate_data_inventory(small_sample_csv)
         assert inv.sample_size < 30
+        assert any("样本量" in c for c in inv.modeling_constraints)
 
     def test_string_numbers(self, str_number_csv: Path):
         """字符串数字应被推断为数值类型。"""

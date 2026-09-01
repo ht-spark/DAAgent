@@ -77,6 +77,30 @@ class TestFieldProfile:
         assert city.missing_count == 1
         assert city.is_candidate_key is False
 
+    def test_sample_values_pass_through(self, sample_csv: Path, tmp_path: Path):
+        fields = _run([str(sample_csv)], tmp_path)["data_profile"].fields
+        city = next(f for f in fields if f.field_name == "城市")
+        # 城市列 5 行含 1 个缺失，非缺失样例应补齐到 4 个
+        assert city.sample_values == ["北京", "上海", "广州", "深圳"]
+
+        growth = next(f for f in fields if f.field_name == "增长率(%)")
+        assert len(growth.sample_values) == 4  # 缺失值已剔除
+        assert all(isinstance(v, str) for v in growth.sample_values)
+
+    def test_numeric_stats_pass_through(self, sample_csv: Path, tmp_path: Path):
+        """数值列的集中/离散/四分位统计应进入 FieldProfile，分类列为 None。"""
+        fields = _run([str(sample_csv)], tmp_path)["data_profile"].fields
+        gdp = next(f for f in fields if f.field_name == "GDP(亿元)")
+        assert gdp.mean == 34010.0
+        assert gdp.median == 30664.0
+        assert gdp.q1 == 28232.0
+        assert gdp.q3 == 40269.0
+        assert gdp.iqr == 12037.0
+        assert gdp.std is not None and gdp.std > 0
+
+        city = next(f for f in fields if f.field_name == "城市")
+        assert city.mean is None and city.median is None
+
 
 class TestQualityIssues:
     def test_duplicate_issue(self, duplicate_csv: Path, tmp_path: Path):
@@ -131,7 +155,48 @@ class TestRelationshipsAndArtifacts:
         dp = _run([str(p1), str(p2)], tmp_path)["data_profile"]
         rels = [r for r in dp.relationships if r.left_field == "站点"]
         assert len(rels) >= 1
-        assert rels[0].confidence == 0.8  # 站点在两表中均为候选键
+        assert rels[0].confidence == 0.8  # 站点为候选键且值域重叠 2/3 ≥ 0.5
+
+    def test_key_relationship_downgraded_on_disjoint_values(self, tmp_path: Path):
+        """候选键同名但值域完全不相交 → 降级为 0.5（疑似仅同名）。"""
+        df1 = pd.DataFrame({"编号": ["A", "B", "C"], "值": [1, 2, 3]})
+        df2 = pd.DataFrame({"编号": ["X", "Y", "Z"], "其他": [4, 5, 6]})
+        p1 = tmp_path / "k1.csv"
+        p2 = tmp_path / "k2.csv"
+        df1.to_csv(p1, index=False)
+        df2.to_csv(p2, index=False)
+
+        dp = _run([str(p1), str(p2)], tmp_path)["data_profile"]
+        rels = [r for r in dp.relationships if r.left_field == "编号"]
+        assert len(rels) == 1
+        assert rels[0].confidence == 0.5
+
+    def test_same_name_disjoint_values_dropped(self, tmp_path: Path):
+        """普通同名列且值域完全不相交 → 剔除（偶然同名）。"""
+        df1 = pd.DataFrame({"名称": ["甲", "乙", "甲"], "v1": [1, 2, 3]})
+        df2 = pd.DataFrame({"名称": ["子", "丑", "子"], "v2": [4, 5, 6]})
+        p1 = tmp_path / "n1.csv"
+        p2 = tmp_path / "n2.csv"
+        df1.to_csv(p1, index=False)
+        df2.to_csv(p2, index=False)
+
+        dp = _run([str(p1), str(p2)], tmp_path)["data_profile"]
+        rels = [r for r in dp.relationships if r.left_field == "名称"]
+        assert rels == []
+
+    def test_time_coverage_union_of_multiple_time_columns(self, tmp_path: Path):
+        """多时间列时覆盖范围取并集，而非只取第一列。"""
+        df = pd.DataFrame({
+            "起始日期": ["2023-01-01", "2023-01-02", "2023-01-03"],
+            "结束日期": ["2023-02-01", "2023-02-02", "2023-02-03"],
+            "值": [1, 2, 3],
+        })
+        p = tmp_path / "multi_time.csv"
+        df.to_csv(p, index=False)
+
+        t = _run([str(p)], tmp_path)["data_profile"].tables[0]
+        assert t.time_coverage.startswith("2023-01-01 ~ 2023-02-03")
+        assert "6 个时间点" in t.time_coverage
 
     def test_artifacts_registered(self, sample_csv: Path, tmp_path: Path):
         dp = _run([str(sample_csv)], tmp_path)["data_profile"]

@@ -67,7 +67,7 @@ def empty_csv(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def small_sample_csv(tmp_path: Path) -> Path:
-    """样本量 < 30 的 CSV（触发 L2 硬过滤条件）。"""
+    """样本量 < 30 的 CSV（触发小样本建模约束）。"""
     df = pd.DataFrame({"x": [1, 2, 3], "y": [4, 5, 6]})
     path = tmp_path / "small.csv"
     df.to_csv(path, index=False)

@@ -22,12 +22,19 @@ export default function Result({
 
   const artifacts: string[] = run?.artifacts || []
   const dl = (p: string) => `/api/runs/${runId}/files/${encodeURIComponent(p)}`
+  // 产物路径里的最后一段作为下载默认文件名（路径示例：questions/q1/solution.py → solution.py）。
+  const basename = (p: string) => {
+    const parts = p.split('/').filter(Boolean)
+    return parts[parts.length - 1] || p
+  }
 
   // 仅展示：paper.md / paper.docx / 图表 / 解题代码
   const paperDocx = artifacts.find((p) => p === 'paper.docx')
   const codeFiles = artifacts
     .filter((p) => /^questions\/[^/]+\/solution\.py$/.test(p))
     .map((p) => ({ path: p, name: `解题代码（${p.split('/')[1]}）.py` }))
+  // 图表文件直接走 figures 子目录；与 listing 端点的路径保持一致。
+  const figureUrl = (f: string) => `/api/runs/${runId}/files/figures/${encodeURIComponent(f)}`
 
   return (
     <div className="form-card">
@@ -56,20 +63,38 @@ export default function Result({
         <div className="dl-group-title">下载产物</div>
         <ul className="dl-list">
           <li>
-            <a href={dl('paper.md')} target="_blank" rel="noreferrer">
+            <a
+              href={dl('paper.md')}
+              download="paper.md"
+              target="_blank"
+              rel="noreferrer"
+              title="点击下载 paper.md"
+            >
               paper.md
             </a>
           </li>
           {paperDocx && (
             <li>
-              <a href={dl(paperDocx)} target="_blank" rel="noreferrer">
+              <a
+                href={dl(paperDocx)}
+                download="paper.docx"
+                target="_blank"
+                rel="noreferrer"
+                title="点击下载 paper.docx"
+              >
                 paper.docx
               </a>
             </li>
           )}
           {codeFiles.map((cf) => (
             <li key={cf.path}>
-              <a href={dl(cf.path)} target="_blank" rel="noreferrer">
+              <a
+                href={dl(cf.path)}
+                download={basename(cf.path)}
+                target="_blank"
+                rel="noreferrer"
+                title={`点击下载 ${basename(cf.path)}`}
+              >
                 {cf.name}
               </a>
             </li>
@@ -80,7 +105,17 @@ export default function Result({
       <h3 style={{ fontSize: 16, margin: '22px 0 8px' }}>图表</h3>
       <div className="figs">
         {figures.map((f) => (
-          <img key={f} src={`/api/runs/${runId}/files/figures/${encodeURIComponent(f)}`} alt={f} />
+          <a
+            key={f}
+            href={figureUrl(f)}
+            download={f}
+            target="_blank"
+            rel="noreferrer"
+            className="fig-link"
+            title={`点击下载 ${f}`}
+          >
+            <img src={figureUrl(f)} alt={f} loading="lazy" />
+          </a>
         ))}
         {figures.length === 0 && <span className="muted">（无图表）</span>}
       </div>

@@ -81,8 +81,8 @@ class FieldProfile(BaseModel):
     覆盖数据画像 6 大维度（由 file_tools 确定性统计转换而来）：
       - 基本面：dtype / is_candidate_key / is_spatial
       - 质量：missing_count / missing_rate / outlier_rate / numeric_parseable_rate
-      - 分布：skewness / kurtosis / value_range
-      - 语义：unit_hint / max_category_share（目标不平衡）
+      - 分布：skewness / kurtosis / mean / std / median / q1 / q3 / iqr / value_range
+      - 语义：unit_hint / max_category_share（目标不平衡）/ sample_values
       - 时空：is_time_column
     """
 
@@ -91,10 +91,17 @@ class FieldProfile(BaseModel):
     field_name: str
     dtype: str  # int/float/str/datetime/bool/category
     unit_hint: str | None = None
+    sample_values: list[str] = Field(default_factory=list, max_length=5)
     missing_count: int = Field(default=0, ge=0)
     missing_rate: float = Field(ge=0.0, le=1.0)
     unique_count: int = Field(ge=0)
     value_range: str = ""  # "min~max" 或 "top3 values"
+    mean: float | None = None
+    std: float | None = None
+    median: float | None = None
+    q1: float | None = None
+    q3: float | None = None
+    iqr: float | None = None
     is_time_column: bool = False
     is_candidate_key: bool = False
     is_spatial: bool = False
