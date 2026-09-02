@@ -20,13 +20,14 @@ from ..tools.code_executor import generate_all_figures
 from ..tools.table_tools import (
     format_solution_table,
     format_metrics_table,
-    format_structured_evidence_table,
     format_validation_table,
     format_data_summary_table,
     format_comparison_table,
     format_assumptions_table,
     format_symbols_table,
     generate_latex_formula,
+    public_evidence_pairs,
+    zh_label_for_key,
     _unicode_to_latex,
     _is_mathematical_constraint,
 )
@@ -270,24 +271,26 @@ def _write_model_from_evidence(qid: str, formulation: dict[str, Any]) -> str:
 
 
 def _write_results_from_evidence(qid: str, computation: dict[str, Any]) -> str:
-    """Summarize recorded scalar outputs without task-type assumptions."""
+    """Summarize recorded scalar outputs without task-type assumptions.
+
+    只引用能完整中文化的标量结论；内部流程键（model_name、figures 等）
+    与原始 snake_case 键名一律不进入论文文本。
+    """
     status = computation.get("status", "unknown")
     if status in {"failed", "error", "infeasible"}:
         return "当前计算未形成可用于论文结论的有效结果，需修正模型或参数后重新求解。"
-    evidence = {
-        **_as_mapping(computation.get("results", {}), f"{qid}.results"),
-        **_as_mapping(computation.get("metrics", {}), f"{qid}.metrics"),
-    }
-    displayed = [
-        f"{key}={_fmt_numeric(value)}"
-        for key, value in evidence.items()
-        if not isinstance(value, dict)
-    ]
-    if not displayed:
-        return f"问题{qid}的计算结果见本节表格和图表；未记录可直接展开的标量结论。"
+    results = _as_mapping(computation.get("results", {}), f"{qid}.results")
+    metrics = _as_mapping(computation.get("metrics", {}), f"{qid}.metrics")
+    pairs = public_evidence_pairs(results, max_items=4) or \
+        public_evidence_pairs(metrics, max_items=4)
+    if not pairs:
+        return (
+            f"问题{qid}的求解形成了稳定的数值输出，关键数值结论、"
+            "表格与图形见正文相应章节。"
+        )
+    shown = "；".join(f"{label}为{value}" for label, value in pairs)
     return (
-        "计算得到的关键结果为：" + "；".join(displayed[:6])
-        + "。上述输出仅在题设条件和已声明假设下成立。"
+        f"计算得到{shown}。上述输出仅在题设条件和已声明假设下成立。"
     )
 
 
@@ -296,6 +299,54 @@ def _write_conclusion_from_evidence(qid: str, computation: dict[str, Any]) -> st
     if computation.get("status") in {"failed", "error", "infeasible"}:
         return f"问题{qid}尚未形成可交付结论，需要补充有效计算结果。"
     return f"问题{qid}的结论以本节列示的模型计算结果为依据，适用范围限于题设条件和已声明的模型假设。"
+
+
+# 可复用结论中允许出现在论文里的内部流程标志（命中即整行丢弃）
+_CONCLUSION_DROP_KEYWORDS = (
+    "Phase", "题型验证待", "待 Phase", "计算状态", "确定性代码",
+    "方法家族", "⚠", "generation_attempts",
+    # 内部键名与产物路径痕迹：无论出现在结论行何处都整行丢弃
+    "model_name", "model_summary", "figures", "figure",
+    "artifacts", "code_path", "solution_code", "validation_details",
+    ".png", ".jpg", ".csv", ".json", ".py",
+)
+
+# “原始键名 = 数值” 形式的结论行（键名可能无法中文化）
+_RAW_CONCLUSION_PATTERN = None  # 延迟初始化，见 _public_conclusion_line
+
+
+def _public_conclusion_line(line: str) -> str | None:
+    """把一条内部结论转换为论文可用文本；无法安全展示时返回 None。
+
+    - 命中内部流程关键词或本地路径的行直接丢弃；
+    - “snake_case_key = 0.000000” 形式的行翻译为“中文标签为 0.000000”，
+      键名无法完整中文化时丢弃，避免原始键名泄漏。
+    """
+    global _RAW_CONCLUSION_PATTERN
+    import re
+
+    text = line.strip()
+    if not text:
+        return None
+    if any(kw in text for kw in _CONCLUSION_DROP_KEYWORDS):
+        return None
+    # 本地绝对路径（盘符）
+    if re.search(r"[A-Za-z]:\\", text):
+        return None
+    if _RAW_CONCLUSION_PATTERN is None:
+        _RAW_CONCLUSION_PATTERN = re.compile(
+            r"^([A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)+)\s*=\s*(.+)$"
+        )
+    match = _RAW_CONCLUSION_PATTERN.match(text)
+    if match:
+        label = zh_label_for_key(match.group(1))
+        if not label:
+            return None
+        return f"{label}为{match.group(2).strip()}"
+    # 非键值行：行内若残留 snake_case 键名则整行丢弃
+    if re.search(r"\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b", text):
+        return None
+    return text
 
 
 def _validation_summary_from_evidence(qid: str, validation: dict[str, Any]) -> str:
@@ -308,7 +359,15 @@ def _validation_summary_from_evidence(qid: str, validation: dict[str, Any]) -> s
 
 
 def _remove_internal_writing_terms(text: str) -> str:
-    """Keep implementation vocabulary out of the delivered paper."""
+    """Keep implementation vocabulary out of the delivered paper.
+
+    除固定词替换外，还以正则清除三类泄漏：
+      1. 本地绝对路径（如 ``D:\\MM\\artifacts\\...``、``/tmp/...``）；
+      2. ``model_name=...``、``figures=[...]`` 等内部键值对；
+      3. ``snake_case_key = 0.0000`` 形式的原始结果键值对。
+    """
+    import re
+
     replacements = {
         "LLM 问题驱动建模": "本题数学模型",
         "LLM问题驱动建模": "本题数学模型",
@@ -317,6 +376,31 @@ def _remove_internal_writing_terms(text: str) -> str:
     }
     for source, target in replacements.items():
         text = text.replace(source, target)
+
+    # 本地绝对路径（盘符路径 / artifacts 相对路径），保留 Markdown 相对图片链接
+    text = re.sub(r"[A-Za-z]:\\[^\s；;）)\]、，。]*", "", text)
+    text = re.sub(r"(?<!\()(?:artifacts[/\\])\S+\.(?:png|jpg|csv|json|py)\b", "", text)
+
+    # 内部键值对（model_name=、figures=[...]、status: success 等）
+    text = re.sub(
+        r"\b(?:model_name|model_summary|validation_details|artifacts_dir|"
+        r"solution_code_snippet|generation_attempts)\s*[=:：]\s*[^；;\n]*",
+        "",
+        text,
+    )
+    text = re.sub(r"\bfigures\s*[=:：]\s*\[[^\]]*\]", "", text)
+    text = re.sub(r"\bstatus\s*[=:：]\s*(?:success|error|failed|unknown)\b", "", text)
+
+    # 原始 snake_case 键值对（如 effective_shielding_duration_seconds = 0.0000）
+    text = re.sub(
+        r"\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\s*=\s*-?\d[\d.,eE+-]*",
+        "",
+        text,
+    )
+
+    # 清理替换后留下的空 bullet / 空行残留
+    text = re.sub(r"^[ \t]*-[ \t]*：?[ \t]*$", "", text, flags=re.MULTILINE)
+    text = re.sub(r"\n{3,}", "\n\n", text)
     return text
 
 
@@ -416,8 +500,17 @@ class PaperWriter:
 
             text = strip_thinking(str(text))
             text = self._strip_markdown_headers(text)
+            text = _remove_internal_writing_terms(text)
             if any(term in text for term in _INTERNAL_WRITING_TERMS):
                 print(f"[writer] LLM 起草 {template_name} 包含内部流程术语，改用事实型正文")
+                return None
+            # 清洗后仍残留本地路径或多段 snake_case 键值对则拒绝整段草稿
+            import re as _re
+
+            if _re.search(r"[A-Za-z]:\\", text) or _re.search(
+                r"\b[a-z][a-z0-9]*(?:_[a-z0-9]+){2,}\s*[=:：]", text
+            ):
+                print(f"[writer] LLM 起草 {template_name} 残留内部键名/路径，改用事实型正文")
                 return None
             return text or None
         except Exception as e:
@@ -547,8 +640,11 @@ class PaperWriter:
         revision_notes = self._build_revision_notes(review_report, gf_retry)
         full_text = self._assemble_full_text(sections, abstract, revision_notes)
 
-        # 收集引用列表
-        references = self._collect_references(validated)
+        # 收集引用列表（从参考文献章节文本解析）
+        references_text = next(
+            (s.content for s in sections if s.section_id == "6"), ""
+        )
+        references = self._collect_references(references_text)
 
         print(
             f"[writer] 报告写作完成: {self._title} "
@@ -765,6 +861,51 @@ class PaperWriter:
     # 摘要（最后生成）
     # ------------------------------------------------------------------
 
+    def _abstract_background(self) -> str:
+        """提取摘要用的问题背景文本（去页码标记，适度截断）。"""
+        if not (self._project_context and self._project_context.background_summary):
+            return ""
+        import re as _re
+
+        bg_text = _re.sub(
+            r"---\s*第\s*\d+\s*页\s*---", "", self._project_context.background_summary
+        ).strip()
+        if len(bg_text) > 800:
+            bg_text = bg_text[:800] + "……"
+        return bg_text
+
+    def _build_abstract_question_material(
+        self, qid: str, result: QuestionResult
+    ) -> dict[str, Any]:
+        """为摘要 LLM 起草构建单问材料（仅含论文可公开信息）。"""
+        computation = _as_mapping(result.computation, f"{qid}.computation")
+        results = _as_mapping(computation.get("results", {}), f"{qid}.results")
+        metrics = _as_mapping(computation.get("metrics", {}), f"{qid}.metrics")
+        formulation = _as_mapping(result.formulation, f"{qid}.formulation")
+        interp = result.problem_interpretation
+
+        model_desc = str(formulation.get("description", "")).strip()
+        if not model_desc:
+            model_name = str(computation.get("model_name", "")).strip()
+            if model_name and "LLM" not in model_name:
+                model_desc = model_name
+        if len(model_desc) > 300:
+            model_desc = model_desc[:300] + "……"
+
+        pairs = public_evidence_pairs(results, max_items=6) or \
+            public_evidence_pairs(metrics, max_items=6)
+
+        return {
+            "问题编号": qid,
+            "问题任务": (
+                interp.math_task_description if interp and interp.math_task_description
+                else f"小问 {qid}"
+            ),
+            "模型与方法": model_desc or "（模型描述见正文）",
+            "关键数值结论": [f"{label} = {value}" for label, value in pairs],
+            "图表": f"{len(result.figures or [])} 张图、{len(result.tables or [])} 张表",
+        }
+
     def _write_abstract(
         self,
         question_results: dict[str, QuestionResult],
@@ -772,10 +913,8 @@ class PaperWriter:
     ) -> str:
         """生成摘要（最后生成，不引入新数字）。
 
-        包含问题背景概述、方法论、各问关键结果和总体结论。
-        所有数值均来自 QuestionResult，不引入新数字。
-        采用学术报告摘要的规范写作风格。
-        摘要结构参考报告模板的 abstract_guide。
+        优先由 LLM 按"背景-方法-结果-结论"结构起草；失败时回退到
+        确定性模板。所有数值均来自 QuestionResult，不引入新数字。
         """
         template = self._template or get_template()
         lines: list[str] = []
@@ -784,13 +923,8 @@ class PaperWriter:
 
         # 问题背景概述（基于项目上下文生成具体描述）
         category_desc = self._get_category_description(template)
-        bg_text = ""
-        if self._project_context and self._project_context.background_summary:
-            import re as _re
-            bg_text = _re.sub(r"---\s*第\s*\d+\s*页\s*---", "", self._project_context.background_summary).strip()
-            # 截取前 200 字作为背景概述
-            if len(bg_text) > 200:
-                bg_text = bg_text[:200] + "……"
+        bg_text = self._abstract_background()
+        bg_brief = bg_text[:200] + "……" if len(bg_text) > 200 else bg_text
 
         if n == 0:
             # 无任何已验证结果：明确说明，避免产出"已完整建模"的误导性摘要
@@ -802,6 +936,25 @@ class PaperWriter:
             )
             return (bg_text + "\n" if bg_text else "") + notice
 
+        # 优先由 LLM 按"背景-方法-结果-结论"结构起草；失败回退确定性模板
+        question_materials = [
+            self._build_abstract_question_material(qid, question_results[qid])
+            for qid in sorted_qids
+        ]
+        abstract_llm = self._llm_write_prompt(
+            "paper_abstract",
+            background=bg_text or "（见正文问题重述）",
+            questions=json.dumps(question_materials, ensure_ascii=False, indent=2),
+            template_guide=self._template_guide,
+            writing_guide=self._writing_guide,
+        )
+        if abstract_llm:
+            keywords = self._collect_keywords(question_results)
+            if keywords:
+                abstract_llm += "\n\n**关键词**：" + "；".join(keywords)
+            return abstract_llm
+
+        # --- 回退：确定性模板摘要 ---
         if bg_text:
             lines.append(bg_text)
             lines.append(
@@ -1230,14 +1383,6 @@ class PaperWriter:
         # 获取题型和方法信息
         interp = result.problem_interpretation
         findings = _as_mapping(result.findings, f"{qid}.findings")
-        decision_record = _as_mapping(result.decision_record, f"{qid}.decision_record")
-        task = findings.get("math_task", interp.math_task if interp else "composite")
-        method = findings.get(
-            "selected_method",
-            decision_record.get("selected_method", "未知方法"),
-        )
-        decision_record = {}
-        task = ""
 
         # --- 问题描述 ---
         lines.append(f"#### {qid}.1 问题描述")
@@ -1275,57 +1420,68 @@ class PaperWriter:
         else:
             lines.append("（问题理解待补充）")
 
-        # --- 方法选择 ---
+        # --- 建模思路 ---
+        formulation_preview = dict(
+            _as_mapping(result.formulation, f"{qid}.formulation")
+        )
         lines.append("")
         lines.append(f"#### {qid}.2 建模思路")
         lines.append("")
-        decision = decision_record
-        family = decision.get("selected_family", "")
-        reason = decision.get(
-            "selection_reason", decision.get("reason", "")
-        )
-        alternatives = decision.get("alternatives", [])
 
-        lines.append(
-            "针对本问的特点，围绕题设条件建立可计算的数学关系。"
-        )
-        lines.append("")
-
-        # 学术性方法描述
-        lines.append("本问围绕题设对象、已知条件、约束边界和所需输出建立具体数学关系；内部的探索过程不作为论文中的模型名称。")
-        lines.append("")
-
-        if reason:
-            lines.append(f"选用该方法的主要理由是：{reason}")
-            lines.append("")
-        if alternatives:
-            # 过滤无效的方法名（提取错误产生的片段）
-            _INVALID_PATTERNS = ["的", "将", "问题", "变量", "定义", "本文", "针对"]
-            alt_names = []
-            for a in alternatives[:5]:
-                if not isinstance(a, dict):
-                    continue
-                name = a.get("name", a.get("method", ""))
-                if not name or len(name) < 2:
-                    continue
-                # 跳过以无效词开头或包含过多中文字符的方法名
-                if any(name.startswith(p) for p in _INVALID_PATTERNS):
-                    continue
-                if len(name) > 20:  # 过长的名称可能是错误提取
-                    continue
-                alt_names.append(name)
-            if alt_names:
-                lines.append(
-                    f"在方法比选阶段，还考虑了{', '.join(alt_names)}等方法。"
-                    f"经综合评估各方法的适用条件和求解效率，"
-                    f"最终确定{method}为本问的最优选择。"
+        objective_and_constraints_parts: list[str] = []
+        if formulation_preview.get("objective_function"):
+            objective_and_constraints_parts.append(
+                f"目标：{formulation_preview['objective_function']}"
+            )
+        constraints_preview = formulation_preview.get("constraints", [])
+        if constraints_preview:
+            shown_constraints = [
+                str(c) for c in constraints_preview[:5] if str(c).strip()
+            ]
+            if shown_constraints:
+                objective_and_constraints_parts.append(
+                    "约束：" + "；".join(shown_constraints)
                 )
+
+        approach_analysis = self._llm_write_prompt(
+            "paper_approach_section",
+            question_text=(
+                interp.math_task_description if interp and interp.math_task_description
+                else f"小问 {qid}"
+            ),
+            model_description=formulation_preview.get("description", ""),
+            decision_variables=_format_decision_variables(
+                formulation_preview.get("decision_variables", [])
+            ),
+            objective_and_constraints="\n".join(objective_and_constraints_parts)
+            or "（未记录）",
+            template_guide=self._template_guide,
+            writing_guide=self._writing_guide,
+        )
+        if approach_analysis:
+            lines.append(approach_analysis)
+        else:
+            # 回退：用模型设计描述组织建模思路（无内部流程词汇）
+            description = _public_model_label(formulation_preview)
+            if description != "本题数学模型":
+                lines.append(
+                    f"本问的核心任务是{interp.math_task_description if interp else '求解题设要求的目标量'}。"
+                    f"为此，将题设对象、条件与约束抽象为数学关系，"
+                    f"建立{description}，并通过数值计算完成求解。"
+                )
+            else:
+                lines.append(
+                    "本问将题设对象、条件与约束抽象为可计算的数学关系："
+                    "先明确刻画对象状态与过程的变量，再依据题设条件建立变量之间的"
+                    "数学关系与约束边界，最后通过数值计算得到题设要求的目标量。"
+                )
+        lines.append("")
 
         # --- 模型建立 ---
         lines.append("")
         lines.append(f"#### {qid}.3 模型建立")
         lines.append("")
-        formulation = dict(_as_mapping(result.formulation, f"{qid}.formulation"))
+        formulation = formulation_preview
         formulation["parameters"] = _as_mapping(
             formulation.get("parameters", {}),
             f"{qid}.formulation.parameters",
@@ -1444,8 +1600,6 @@ class PaperWriter:
         metrics = computation.get("metrics", {})
 
         # 根据计算状态生成学术性描述
-        lines.append("本节仅报告模型实际输出的数值、表格和图形，不补充未记录的求解过程或统计结论。")
-        lines.append("")
         if status in ("success", "optimal", "feasible"):
             lines.append("计算结果表明，模型在当前数据与约束条件下能够形成稳定的数值输出。")
         elif status == "generic_stats":
@@ -1489,30 +1643,18 @@ class PaperWriter:
             q_tables.append(ds_table)
             lines.append("")
 
-        # 关键指标表（使用表格工具）
-        if metrics:
+        # 关键指标表（仅保留可中文化的公共指标；无可展示行时跳过该表）
+        metrics_table = _render_table_safely(
+            f"问题 {qid} 关键指标表",
+            lambda: format_metrics_table(computation, qid),
+        )
+        if metrics_table:
+            metrics_table = self._strip_table_title(metrics_table)
             self._tbl_counter += 1
             lines.append(f"**表 {self._tbl_counter}：问题 {qid} 关键指标**")
             lines.append("")
-            metrics_table = _render_table_safely(
-                f"问题 {qid} 关键指标表",
-                lambda: format_metrics_table(computation, qid),
-            )
-            metrics_table = self._strip_table_title(metrics_table)
             lines.append(metrics_table)
             q_tables.append(metrics_table)
-            lines.append("")
-
-        evidence_table = _render_table_safely(
-            f"问题 {qid} 结构化证据摘要",
-            lambda: format_structured_evidence_table(metrics, qid),
-        )
-        if evidence_table:
-            self._tbl_counter += 1
-            lines.append(f"**表 {self._tbl_counter}：问题 {qid} 结构化计算证据摘要**")
-            lines.append("")
-            lines.append(evidence_table)
-            q_tables.append(evidence_table)
             lines.append("")
 
         # 结果分析段落：LLM 起草，失败时回退到证据式摘要
@@ -1538,45 +1680,27 @@ class PaperWriter:
         lines.append(result_analysis or _write_results_from_evidence(qid, computation))
         lines.append("")
 
-        # 其他结果（仅展示有意义的摘要值，过滤原始数据数组和代码细节）
-        if results:
-            # 需要跳过的键（原始数据倾倒 + 代码实现细节）
-            _SKIP_KEYS = {
-                "optimal_solution", "optimal_objective", "simulation",
-                "data_summary", "note", "solver", "solver_status",
-                # 原始数据数组，不应直接展示
-                "predictions", "residuals", "coefficients",
-                "intercept", "slope", "fitted_values", "true_values",
-                # 内部实现细节，不应展示
-                "variable_count", "constraint_count", "method",
-                # 代码级细节
-                "baseline_objective", "scenario_objectives",
-                # 求解器内部状态
-                "status", "message", "success",
-            }
-            extra_shown = False
-            for key, value in results.items():
-                if key in _SKIP_KEYS:
-                    continue
-                if isinstance(value, str) and any(
-                    p in value for p in ["占位", "stub", "需要具体问题建模"]
-                ):
-                    continue
-                # 跳过长数组（>5个元素的列表）
-                if isinstance(value, (list, tuple)) and len(value) > 5:
-                    continue
-                # 跳过大型字典
-                if isinstance(value, dict) and len(value) > 5:
-                    continue
-                if not extra_shown:
-                    lines.append("**其他计算结果**：")
-                    lines.append("")
-                    extra_shown = True
-                lines.append(f"- {key}: {self._fmt_value(value)}")
+        # 补充数值结果：仅在 LLM 结果分析缺失时作为确定性安全网，
+        # 且只列出能完整中文化的标量结论，杜绝原始键名与路径泄漏
+        if result_analysis is None:
+            extra_pairs = public_evidence_pairs(results, max_items=8) or \
+                public_evidence_pairs(metrics, max_items=8)
+            if extra_pairs:
+                lines.append("**关键数值结果**：")
+                lines.append("")
+                for label, value in extra_pairs:
+                    lines.append(f"- {label}：{value}")
+                lines.append("")
 
         if computation.get("error"):
-            lines.append("")
-            lines.append(f"**错误信息**：{computation['error']}")
+            err_text = _remove_internal_writing_terms(
+                str(computation["error"])
+            ).strip()
+            if len(err_text) > 120:
+                err_text = err_text[:120] + "……"
+            if err_text:
+                lines.append("")
+                lines.append(f"**求解异常说明**：{err_text}")
 
         # 数据准备说明（过滤代码细节，仅保留学术性描述）
         if data_prep and data_prep.get("data_source"):
@@ -1629,43 +1753,42 @@ class PaperWriter:
         lines.append("")
         lines.append(f"#### {qid}.6 结论")
         lines.append("")
-        summary = findings.get("summary", "")
         key_result = findings.get("key_result", "")
 
         # 学术性结论段落
         lines.append(_write_conclusion_from_evidence(qid, computation))
         lines.append("")
 
-        # 格式化关键结果，避免过多小数位
-        if key_result:
+        # 关键结果（源端已过滤内部键；此处再做防御性清洗与小数位规范）
+        public_key_result = _public_conclusion_line(key_result) if key_result else None
+        if public_key_result:
             import re as _re
+
             def _fmt_key_result(text: str) -> str:
                 def _replace_float(m):
                     val = float(m.group(0))
                     return f"{val:.4f}"
                 return _re.sub(r"\d+\.\d{6,}", _replace_float, text)
-            key_result = _fmt_key_result(key_result)
-            lines.append(f"**关键结果**：{key_result}")
 
-        # 可复用结论（过滤内部技术结论和跨问题引用）
+            public_key_result = _fmt_key_result(public_key_result)
+            lines.append(f"**关键结果**：{public_key_result}")
+
+        # 可复用结论（过滤内部技术结论、跨问题引用与原始键名）
         if result.reusable_summary is not None:
             conclusions = result.reusable_summary.verified_conclusions
-            # 过滤掉内部技术结论和跨问题引用
-            filtered_conclusions = []
+            filtered_conclusions: list[str] = []
             for c in conclusions:
-                # 跳过含 Phase/验证待的内部引用
-                if any(kw in c for kw in ["Phase", "题型验证待", "待 Phase"]):
-                    continue
-                # 跳过跨问题引用
-                if c.startswith("小问 ") and not c.startswith(f"小问 {qid}"):
-                    continue
                 # 跳过已在前问展示过的结论
                 if c in self._shown_conclusions:
                     continue
-                # 跳过代码级细节结论
-                if any(kw in c for kw in ["确定性代码", "可复现", "方法家族", "计算状态"]):
+                # 跨问继承的结论行不再重复展示
+                if c.startswith("问题 ") and not c.startswith(f"问题 {qid}"):
                     continue
-                filtered_conclusions.append(c)
+                # 翻译原始键名 / 丢弃内部流程行
+                public_line = _public_conclusion_line(c)
+                if not public_line:
+                    continue
+                filtered_conclusions.append(public_line)
                 self._shown_conclusions.add(c)
             if filtered_conclusions:
                 lines.append("")
@@ -1682,8 +1805,8 @@ class PaperWriter:
                 # 跳过内部技术引用
                 if any(kw in lim for kw in ["Phase", "题型验证待", "待 Phase"]):
                     continue
-                # 跳过代码级细节
-                if any(kw in lim for kw in ["确定性代码", "可复现"]):
+                # 跳过代码级细节与流程状态标记
+                if any(kw in lim for kw in ["确定性代码", "可复现", "⚠", "计算状态"]):
                     continue
                 # 去重
                 lim_normalized = lim.replace("：", ":").strip()
@@ -1751,14 +1874,40 @@ class PaperWriter:
     def _write_references_text(
         self, question_results: dict[str, QuestionResult]
     ) -> str:
-        """生成参考文献章节文本。"""
-        refs = self._collect_references(question_results)
-        if not refs:
+        """生成参考文献章节文本。
+
+        优先由 LLM 依据各问实际模型描述著录 GB/T 7714 格式文献；
+        无可用方法材料或 LLM 失败时回退为待补充占位。
+        """
+        method_parts: list[str] = []
+        seen: set[str] = set()
+        for qid, result in sorted(question_results.items()):
+            formulation = _as_mapping(result.formulation, f"{qid}.formulation")
+            desc = str(formulation.get("description", "")).strip()
+            if desc and desc not in seen:
+                seen.add(desc)
+                method_parts.append(f"- 问题 {qid}：{desc[:200]}")
+        if not method_parts:
             return "（参考文献待补充）"
-        lines: list[str] = []
-        for i, ref in enumerate(refs, 1):
-            lines.append(f"[{i}] {ref}")
-        return "\n".join(lines)
+
+        refs_llm = self._llm_write_prompt(
+            "paper_references",
+            method_material="\n".join(method_parts),
+        )
+        if refs_llm:
+            import re as _re
+
+            entries: list[str] = []
+            for raw_line in refs_llm.splitlines():
+                line = raw_line.strip()
+                # 去掉 LLM 可能自带的 bullet 与编号，编号由系统统一添加
+                line = _re.sub(r"^[-•*\s]+", "", line)
+                line = _re.sub(r"^\[\d+\]\s*", "", line)
+                if line:
+                    entries.append(line)
+            if entries:
+                return "\n".join(f"[{i}] {e}" for i, e in enumerate(entries, 1))
+        return "（参考文献待补充）"
 
     # ------------------------------------------------------------------
     # 附录
@@ -1997,14 +2146,20 @@ class PaperWriter:
         return "数学建模报告"
 
     def _collect_references(
-        self, question_results: dict[str, QuestionResult]
+        self, references_text: str
     ) -> list[str]:
-        """收集参考文献。
+        """从参考文献章节文本中解析文献条目（去掉 [n] 编号）。"""
+        import re as _re
 
-        方法名→文献的固定映射已随预设方法目录移除，参考文献不再按方法名
-        自动拼接；引用以正文实际出现的建模产物与检索证据为准。
-        """
-        return []
+        entries: list[str] = []
+        for raw_line in references_text.splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("（"):
+                continue
+            line = _re.sub(r"^\[\d+\]\s*", "", line)
+            if line:
+                entries.append(line)
+        return entries
 
     def _collect_keywords(
         self, question_results: dict[str, QuestionResult]

@@ -25,10 +25,13 @@ class MockTextLLM:
     def __init__(self, responses: list[str]) -> None:
         self._responses = list(responses)
         self.calls = 0
+        self.prompts: list[str] = []
+        self.last_prompt = ""
 
     def invoke(self, prompt: str) -> _Msg:
         idx = min(self.calls, len(self._responses) - 1)
         self.calls += 1
+        self.prompts.append(prompt)
         self.last_prompt = prompt
         return _Msg(self._responses[idx])
 
@@ -211,11 +214,14 @@ def test_write_tolerates_vector_metrics(tmp_path):
     )
 
     assert paper.full_text
-    assert "[0.0000, 1.2500, 2.5000]" in paper.full_text
+    # 向量指标不中断写作；原始向量值不再倾倒进论文
+    assert "[0.0000, 1.2500, 2.5000]" not in paper.full_text
+    # 可翻译的标量指标仍以中文标签保留
+    assert "模拟次数" in paper.full_text
 
 
 def test_write_tolerates_nested_metric_evidence(tmp_path):
-    """嵌套边界检查记录不会阻断整篇报告，并会以证据摘要保留。"""
+    """嵌套边界检查记录不会阻断整篇报告，原始结构键不再进入论文。"""
     result = _question_result()
     result.computation["metrics"] = {
         "effective_duration_s": 1.435,
@@ -234,8 +240,62 @@ def test_write_tolerates_nested_metric_evidence(tmp_path):
     )
 
     assert paper.full_text
-    assert "结构化计算证据摘要" in paper.full_text
-    assert "boundary_checks" in paper.full_text
+    # 内部结构键与原始 snake_case 键名不得出现在论文中
+    assert "boundary_checks" not in paper.full_text
+    assert "constraint_checks" not in paper.full_text
+    assert "effective_duration_s" not in paper.full_text
+    # 可翻译标量以中文标签保留
+    assert "1.4350" in paper.full_text
+
+
+def test_paper_does_not_leak_internal_evidence_keys(tmp_path):
+    """回归：内部键值对、原始结果键与本地路径不得进入论文（烟幕弹案例）。
+
+    泄漏模式来自真实运行反馈：
+      model_name=烟幕干扰弹有效遮蔽时长计算模型
+      figures=[D:\\MM\\artifacts\\...\\q1_1_smoke_shielding_distance.png]
+      effective_shielding_duration_seconds=0.0000
+      cloud_start_time=5.1000
+      missile_initial_position=[20000.0000, 0.0000, 2000.0000]
+    """
+    result = _question_result()
+    result.computation["model_name"] = "烟幕干扰弹有效遮蔽时长计算模型"
+    result.computation["results"] = {
+        "effective_shielding_duration_seconds": 0.0,
+        "cloud_start_time": 5.1,
+        "cloud_end_time": 25.1,
+        "start_time": 5.1,
+        "end_time": 25.1,
+        "missile_initial_position": [20000.0, 0.0, 2000.0],
+    }
+    result.computation["figures"] = [
+        r"D:\MM\artifacts\06441b9e\figures\q1_1_smoke_shielding_distance.png",
+    ]
+    result.findings["key_result"] = (
+        "figures: [D:\\06441b9e_1_smoke_shielding_distance.png]"
+    )
+
+    paper = PaperWriter().write(
+        {
+            "question_results": {"q1": result},
+            "project_context": _project_context(),
+            "data_profile": None,
+            "output_dir": str(tmp_path),
+        },
+        output_dir=str(tmp_path),
+    )
+
+    full = paper.full_text
+    assert "model_name" not in full
+    assert "D:\\MM" not in full
+    assert "artifacts" not in full
+    assert "smoke_shielding_distance" not in full
+    assert "missile_initial_position" not in full
+    assert "cloud_start_time" not in full
+    assert "effective_shielding_duration_seconds" not in full
+    # 可翻译的标量结论仍以中文标签进入论文
+    assert "起始时间为5.1000" in full
+    assert "结束时间为25.1000" in full
 
 
 def test_llm_receives_compact_result_material(tmp_path):
@@ -267,5 +327,5 @@ def test_llm_receives_compact_result_material(tmp_path):
         output_dir=str(tmp_path),
     )
 
-    assert "20项，首值=0.0000，末值=19.0000" in llm.last_prompt
-    assert "0, 1, 2, 3, 4, 5, 6, 7, 8, 9" not in llm.last_prompt
+    assert any("20项，首值=0.0000，末值=19.0000" in p for p in llm.prompts)
+    assert not any("0, 1, 2, 3, 4, 5, 6, 7, 8, 9" in p for p in llm.prompts)

@@ -17,6 +17,7 @@ from ..schemas.question import (
     QuestionResult,
     ReusableSummary,
 )
+from ..tools.table_tools import public_evidence_pairs
 from .base import BaseAgent
 from .model_builder import ModelBuilder
 
@@ -185,8 +186,10 @@ class QuestionSolver(BaseAgent):
             interpretation.objective_function = intermediate["objective"]
 
         # 步骤 4: 提取假设（统一规范化为 list[dict]，兼容 LLM list[str] 与 heuristic list[dict]）
+        # 假设以回填后的 interpretation 为准（LLM 模型设计输出 assumptions）
+        decision_record["assumptions"] = interpretation.necessary_assumptions
         assumptions = self._normalize_assumptions(
-            decision_record.get("assumptions", [])
+            interpretation.necessary_assumptions
         )
 
         # 步骤 5: 生成可复用摘要（包含实际计算结果）
@@ -275,22 +278,12 @@ class QuestionSolver(BaseAgent):
             if "data_summary" in results:
                 findings["key_result"] = "描述统计完成"
             else:
-                scalar_items = [
-                    f"{key}={value:.4f}" if isinstance(value, float) else f"{key}={value}"
-                    for key, value in results.items()
-                    if isinstance(value, (int, float, str))
-                    and not isinstance(value, bool)
-                    and key != "method"
-                ]
-                if not scalar_items:
-                    scalar_items = [
-                        f"{key}={value:.4f}" if isinstance(value, float) else f"{key}={value}"
-                        for key, value in metrics.items()
-                        if isinstance(value, (int, float, str))
-                        and not isinstance(value, bool)
-                    ]
+                # 只保留可中文化的公共数值结论，内部流程键一律不进入 key_result
+                pairs = public_evidence_pairs(results, max_items=3) or \
+                    public_evidence_pairs(metrics, max_items=3)
                 findings["key_result"] = (
-                    "；".join(scalar_items[:3]) if scalar_items else "计算成功"
+                    "；".join(f"{label}为{value}" for label, value in pairs)
+                    if pairs else "计算成功"
                 )
 
             # 记录关键指标
@@ -352,13 +345,20 @@ class QuestionSolver(BaseAgent):
         model_name = computation.get("model_name", "") or selected_method
 
         conclusions = [
-            f"小问 {qid} 建模完成: {model_name}",
-            f"计算状态: {comp_status}",
+            f"问题 {qid} 已建立“{model_name}”并完成求解",
         ]
 
-        # 关键数值结论：只回显标量形式的计算产物，不按预设方法键名提取
+        # 关键数值结论：只回显标量形式的计算产物，跳过内部流程键
+        # （原始键名保留供后续小问的 LLM 继承使用；论文展示端会做中文化过滤）
         if comp_status == "success":
+            internal_keys = {
+                "model_name", "model", "method", "status", "figures",
+                "tables", "validation_details", "note", "code",
+                "artifacts_dir", "error",
+            }
             for key, value in list(results.items()) + list(metrics.items()):
+                if key in internal_keys:
+                    continue
                 if isinstance(value, bool) or not isinstance(value, (int, float)):
                     continue
                 if isinstance(value, float):
@@ -418,7 +418,7 @@ class QuestionSolver(BaseAgent):
         comp_status = computation.get("status", "unknown")
 
         if comp_status == "success":
-            limitations.append("数值结果已由确定性代码生成，可复现")
+            limitations.append("数值结果在题设条件与已声明假设下可复现")
         elif comp_status == "no_data":
             limitations.append("⚠ 无可用数据，计算未执行，结果为占位")
         elif comp_status == "insufficient_data":

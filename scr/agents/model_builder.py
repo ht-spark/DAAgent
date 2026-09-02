@@ -84,6 +84,14 @@ class ModelBuilder:
             method_key, output_dir, feedback, modeling_context=modeling_context,
         )
 
+        # 步骤 3.5: 用 LLM 模型设计产物回填 formulation 与假设
+        # （formulation 在执行前以中性结构创建；模型设计 JSON 是 LLM-only
+        # 建模的权威产物，回填后供报告写作与审查使用）
+        self._backfill_formulation(
+            formulation, computation, interpretation, context,
+            selected_method, math_task, method_key,
+        )
+
         # 步骤 4: 生成输出
         tables = self._generate_tables(
             selected_method, math_task, computation, data_preparation, context
@@ -139,6 +147,92 @@ class ModelBuilder:
         if len(text) > 6000:
             return text[:6000] + "\n...（建模上下文已截断）"
         return text
+
+    # ------------------------------------------------------------------
+    # 模型设计产物回填
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _normalize_variable_records(raw: Any) -> list[str]:
+        """把 LLM 变量记录（dict 或 str）统一为 "符号: 含义" 字符串。"""
+        if not isinstance(raw, (list, tuple)):
+            raw = [raw]
+        normalized: list[str] = []
+        for item in raw:
+            if isinstance(item, dict):
+                symbol = str(item.get("symbol") or item.get("name") or "").strip()
+                meaning = str(item.get("meaning") or item.get("description") or "").strip()
+                domain = str(item.get("domain") or "").strip()
+                details = "；".join(p for p in (meaning, domain) if p)
+                text = f"{symbol}: {details}" if symbol and details else (symbol or details)
+            else:
+                text = str(item).strip()
+            if text:
+                normalized.append(text)
+        return normalized
+
+    def _backfill_formulation(
+        self,
+        formulation: dict,
+        computation: dict,
+        interpretation: ProblemInterpretation,
+        context: CurrentQuestionContext,
+        method_name: str,
+        math_task: str,
+        method_key: str,
+    ) -> None:
+        """用 LLM 模型设计产物回填 formulation 与问题理解中的空缺字段。
+
+        formulation 在代码执行前以中性结构创建（变量、目标、约束均为空）；
+        执行成功后，模型设计 JSON 中的 model_summary/variables/objective/
+        constraints/key_parameters/assumptions 是唯一权威来源，回填后
+        报告的模型章节、符号表与假设表才有真实内容。
+        """
+        if not isinstance(computation, dict):
+            return
+        intermediate = computation.get("intermediate_values")
+        if not isinstance(intermediate, dict):
+            intermediate = {}
+
+        if not formulation.get("description") and computation.get("model_summary"):
+            formulation["description"] = str(computation["model_summary"]).strip()
+
+        if not formulation.get("decision_variables") and intermediate.get("variables"):
+            variables = self._normalize_variable_records(intermediate["variables"])
+            if variables:
+                formulation["decision_variables"] = variables
+
+        if not formulation.get("objective_function") and intermediate.get("objective"):
+            objective = str(intermediate["objective"]).strip()
+            if objective:
+                formulation["objective_function"] = objective
+
+        if not formulation.get("constraints") and intermediate.get("constraints"):
+            raw_constraints = intermediate["constraints"]
+            if isinstance(raw_constraints, (list, tuple)):
+                constraints = [str(c).strip() for c in raw_constraints if str(c).strip()]
+                if constraints:
+                    formulation["constraints"] = constraints
+
+        if not formulation.get("parameters") and computation.get("parameters_used"):
+            if isinstance(computation["parameters_used"], dict):
+                # FormulationIR.parameters 要求 dict[str, str]，
+                # LLM 的 key_parameters 可能给出数值，统一转为字符串
+                formulation["parameters"] = {
+                    str(k): str(v) for k, v in computation["parameters_used"].items()
+                }
+
+        if not interpretation.necessary_assumptions and intermediate.get("assumptions"):
+            raw = intermediate["assumptions"]
+            if isinstance(raw, (list, tuple)):
+                assumptions = [str(a).strip() for a in raw if str(a).strip()]
+                if assumptions:
+                    interpretation.necessary_assumptions = assumptions
+
+        # 重建 IR，使其反映回填后的模型要素
+        self._attach_ir(
+            formulation, method_name, math_task, interpretation, context, method_key
+        )
 
     # ------------------------------------------------------------------
     # 模型表述构建
@@ -600,6 +694,7 @@ class ModelBuilder:
                     "variables": model_json.get("variables", []),
                     "objective": model_json.get("objective", ""),
                     "constraints": model_json.get("constraints", []),
+                    "assumptions": model_json.get("assumptions", []),
                 },
                 "artifacts_dir": str(artifacts_dir) if artifacts_dir else "",
                 "error": "",
