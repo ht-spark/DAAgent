@@ -79,3 +79,4 @@ server/api_settings.json.tmp
 #聊天记录json文件
 server/discussion_history.json
 examples/
+server/runs.db
