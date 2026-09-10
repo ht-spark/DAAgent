@@ -1,118 +1,149 @@
+import { useEffect, useState } from 'react'
+
+import { fetchBrainstormDiscussions, type BrainstormDiscussionSummary } from '../api'
+
 type Props = {
   section: string
   collapsed: boolean
-  onToggleCollapse: () => void
+  activeDiscussionId: string | null
   onHome: () => void
   onModeling: () => void
   onBrainstorm: () => void
+  onOpenDiscussion: (id: string) => void
   onApi: () => void
   onDocs: () => void
 }
 
 const LOGO = (
-  <img className="sidebar-logo-img" src="/logo.png" alt="MMAgent 数学建模智能体" />
+  <div className="sidebar-brand-mark" aria-hidden="true">
+    DA
+  </div>
 )
 
-const COLLAPSE_ICON = (
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-    <path d="M15 18l-6-6 6-6" />
+const CHAT_ICON = (
+  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+    <path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z" />
   </svg>
 )
 
-const EXPAND_ICON = (
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-    <path d="M9 18l6-6-6-6" />
-  </svg>
-)
+function formatRelativeTime(iso: string) {
+  const time = new Date(iso).getTime()
+  if (Number.isNaN(time)) return ''
+  const diff = Date.now() - time
+  if (diff < 60_000) return '刚刚'
+  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m`
+  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h`
+  return `${Math.floor(diff / 86_400_000)}d`
+}
 
 export default function Sidebar({
   section,
   collapsed,
-  onToggleCollapse,
+  activeDiscussionId,
   onHome,
   onModeling,
   onBrainstorm,
+  onOpenDiscussion,
   onApi,
   onDocs,
 }: Props) {
+  const [discussions, setDiscussions] = useState<BrainstormDiscussionSummary[]>([])
+
+  useEffect(() => {
+    void fetchBrainstormDiscussions()
+      .then(setDiscussions)
+      .catch(() => setDiscussions([]))
+  }, [section, activeDiscussionId])
+
   return (
     <aside className={`sidebar ${collapsed ? 'sidebar--collapsed' : ''}`}>
       <div className="sidebar-top">
-        <div className="sidebar-logo" onClick={onHome} title={collapsed ? 'MMAgent 数学建模智能体' : undefined}>
+        <div className="sidebar-logo" onClick={onHome} title="DAAgent 数据分析智能体">
           {LOGO}
-          {!collapsed && (
-            <div className="logo-text">
-              <span className="logo-name sidebar-brand">MMAgent</span>
-              <span className="logo-sub sidebar-sub">数学建模智能体</span>
-            </div>
-          )}
+          <div className="logo-text sidebar-collapse-hide">
+            <span className="logo-name sidebar-brand">DAAgent</span>
+            <span className="logo-sub sidebar-sub">数据分析智能体</span>
+          </div>
         </div>
-        <button
-          className="sidebar-toggle"
-          onClick={onToggleCollapse}
-          title={collapsed ? '展开侧边栏' : '收起侧边栏'}
-          aria-label={collapsed ? '展开侧边栏' : '收起侧边栏'}
-        >
-          {collapsed ? EXPAND_ICON : COLLAPSE_ICON}
-        </button>
       </div>
 
-      <nav className="sidebar-nav">
+      <div className="rail-section">
+        <div className="rail-label sidebar-collapse-hide">工作区</div>
         <button
           className={`nav-item ${section === 'modeling' ? 'active' : ''}`}
           onClick={onModeling}
-          title={collapsed ? '建模任务' : undefined}
+          title={collapsed ? '新建任务' : undefined}
         >
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <path d="M12 5v14M5 12h14" strokeLinecap="round" />
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+            <path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z" />
           </svg>
-          {!collapsed && '建模任务'}
+          <span className="nav-text sidebar-collapse-hide">新建任务</span>
         </button>
         <button
           className={`nav-item ${section === 'brainstorm' ? 'active' : ''}`}
           onClick={onBrainstorm}
-          title={collapsed ? '头脑风暴' : undefined}
+          title={collapsed ? '知识库' : undefined}
         >
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M9 18h6" />
-            <path d="M10 22h4" />
-            <path d="M8.2 14.5A6 6 0 1 1 15.8 14.5c-.8.65-1.3 1.4-1.45 2.2h-2.7c-.15-.8-.65-1.55-1.45-2.2Z" />
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+            <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
+            <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
           </svg>
-          {!collapsed && '头脑风暴'}
+          <span className="nav-text sidebar-collapse-hide">知识库</span>
         </button>
+      </div>
+
+      <div className="rail-section rail-recent">
+        <div className="rail-label sidebar-collapse-hide">最近</div>
+        {discussions.length === 0 ? (
+          <p className="rail-recent-empty sidebar-collapse-hide">暂无聊天记录</p>
+        ) : (
+          discussions.map((item) => (
+            <button
+              key={item.id}
+              className={`session-item ${activeDiscussionId === item.id ? 'active' : ''}`}
+              onClick={() => onOpenDiscussion(item.id)}
+              title={item.title}
+            >
+              {CHAT_ICON}
+              <span className="session-text sidebar-collapse-hide">{item.title || '未命名讨论'}</span>
+              <small className="sidebar-collapse-hide">{formatRelativeTime(item.updated_at)}</small>
+            </button>
+          ))
+        )}
+      </div>
+
+      <div className="rail-section rail-secondary">
         <button
           className={`nav-item ${section === 'api' ? 'active' : ''}`}
           onClick={onApi}
           title={collapsed ? 'API 管理' : undefined}
         >
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
             <circle cx="12" cy="12" r="9" />
-            <path
-              d="M14.5 9.5 10 12.5 14 15.5"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
+            <path d="M14.5 9.5 10 12.5 14 15.5" strokeLinecap="round" strokeLinejoin="round" />
             <path d="M12 3v3M12 18v3M3 12h3M18 12h3" strokeLinecap="round" />
           </svg>
-          {!collapsed && 'API 管理'}
+          <span className="nav-text sidebar-collapse-hide">API 管理</span>
         </button>
         <button
           className={`nav-item ${section === 'docs' ? 'active' : ''}`}
           onClick={onDocs}
           title={collapsed ? '项目文档' : undefined}
         >
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
             <path d="M4 4h11l5 5v11a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1z" />
             <path d="M14 4v5h5" strokeLinecap="round" strokeLinejoin="round" />
             <path d="M8 13h8M8 17h8" strokeLinecap="round" />
           </svg>
-          {!collapsed && '项目文档'}
+          <span className="nav-text sidebar-collapse-hide">项目文档</span>
         </button>
-      </nav>
+      </div>
 
-      <div className="sidebar-status" title={collapsed ? 'Agent Online' : undefined}>
-        <span className="status-dot" />
-        {!collapsed && 'Agent Online'}
+      <div className="rail-foot">
+        <div className="agent-status" title={collapsed ? 'Agent Online' : undefined}>
+          <span className="pulse" />
+          <span className="sidebar-collapse-hide">Agent Online</span>
+        </div>
       </div>
     </aside>
   )

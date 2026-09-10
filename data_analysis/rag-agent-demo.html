@@ -1,0 +1,1067 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>RAG Agent · 淡黄工作台</title>
+<style>
+  :root {
+    /* Light butter / soft paper yellow */
+    --bg: #faf6e8;
+    --bg-elevated: #fffcf3;
+    --bg-panel: #fffdf8;
+    --bg-hover: #f3ecd8;
+    --bg-active: #ebe2c4;
+    --border: rgba(92, 72, 28, 0.12);
+    --border-strong: rgba(92, 72, 28, 0.2);
+    --text: #2a2416;
+    --text-secondary: #5c5340;
+    --text-muted: #8a7f68;
+    --accent: #b8892d;
+    --accent-soft: rgba(184, 137, 45, 0.14);
+    --accent-border: rgba(184, 137, 45, 0.38);
+    --cite: #3f7d6e;
+    --cite-soft: rgba(63, 125, 110, 0.12);
+    --cite-border: rgba(63, 125, 110, 0.32);
+    --warn: #c47a2c;
+    --danger: #c45c4a;
+    --success: #4f9a68;
+    --radius-sm: 8px;
+    --radius-md: 12px;
+    --radius-lg: 16px;
+    --shadow: 0 16px 40px rgba(92, 72, 28, 0.12);
+    --font: "Inter", "SF Pro Text", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+    --mono: "JetBrains Mono", "SF Mono", "Cascadia Code", ui-monospace, monospace;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    font-family: var(--font);
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.55;
+    overflow: hidden;
+    -webkit-font-smoothing: antialiased;
+  }
+  button, input, textarea { font: inherit; color: inherit; }
+  button { background: none; border: none; cursor: pointer; }
+
+  .app {
+    display: grid;
+    grid-template-columns: 260px minmax(0, 1fr) 320px;
+    height: 100dvh;
+  }
+
+  /* ========== Left rail ========== */
+  .rail {
+    background: var(--bg-elevated);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 18px 16px 14px;
+  }
+  .brand-mark {
+    width: 32px;
+    height: 32px;
+    border-radius: 9px;
+    background: linear-gradient(145deg, #e0c16a, #b8892d);
+    display: grid;
+    place-items: center;
+    font-weight: 700;
+    font-size: 13px;
+    letter-spacing: -0.02em;
+    color: #fffdf6;
+    box-shadow: 0 0 0 1px rgba(92,72,28,0.08), 0 8px 20px rgba(184, 137, 45, 0.28);
+  }
+  .brand-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+  .brand-name { font-size: 14px; font-weight: 650; letter-spacing: -0.01em; }
+  .brand-sub { font-size: 11px; color: var(--text-muted); }
+
+  .rail-section { padding: 8px 12px; }
+  .rail-label {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    padding: 8px 8px 6px;
+  }
+  .nav-item, .session-item {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 9px 10px;
+    border-radius: var(--radius-sm);
+    color: var(--text-secondary);
+    text-align: left;
+    transition: background 0.15s ease, color 0.15s ease;
+  }
+  .nav-item:hover, .session-item:hover { background: var(--bg-hover); color: var(--text); }
+  .nav-item.active, .session-item.active {
+    background: var(--accent-soft);
+    color: var(--text);
+    box-shadow: inset 0 0 0 1px var(--accent-border);
+  }
+  .nav-item svg, .session-item svg { flex-shrink: 0; opacity: 0.85; }
+  .nav-item span, .session-item span {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 13px;
+  }
+  .session-item small {
+    font-size: 11px;
+    color: var(--text-muted);
+    flex-shrink: 0;
+  }
+
+  .kb-chip {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 10px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border);
+    background: rgba(255,255,255,0.55);
+    margin-bottom: 6px;
+    width: 100%;
+    text-align: left;
+  }
+  .kb-chip:hover { background: var(--bg-hover); border-color: var(--border-strong); }
+  .kb-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--success);
+    box-shadow: 0 0 0 3px rgba(79, 154, 104, 0.14);
+  }
+  .kb-dot.off { background: var(--text-muted); box-shadow: none; }
+  .kb-meta { min-width: 0; flex: 1; }
+  .kb-meta strong { display: block; font-size: 12.5px; font-weight: 550; }
+  .kb-meta span { font-size: 11px; color: var(--text-muted); }
+
+  .rail-foot {
+    margin-top: auto;
+    padding: 12px;
+    border-top: 1px solid var(--border);
+  }
+  .agent-status {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 12px;
+    border-radius: var(--radius-sm);
+    background: rgba(255,253,246,0.7);
+    border: 1px solid var(--border);
+    font-size: 12px;
+    color: var(--text-secondary);
+  }
+  .pulse {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--success);
+    position: relative;
+  }
+  .pulse::after {
+    content: "";
+    position: absolute;
+    inset: -3px;
+    border-radius: 50%;
+    border: 1px solid var(--success);
+    animation: pulse 2s ease-out infinite;
+  }
+  @keyframes pulse {
+    0% { transform: scale(0.6); opacity: 0.9; }
+    100% { transform: scale(1.5); opacity: 0; }
+  }
+
+  /* ========== Chat column ========== */
+  .chat-col {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+    background:
+      radial-gradient(80% 40% at 50% -10%, rgba(184, 137, 45, 0.12), transparent 62%),
+      var(--bg);
+  }
+  .chat-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--border);
+    backdrop-filter: blur(12px);
+  }
+  .chat-title { min-width: 0; }
+  .chat-title h1 {
+    font-size: 15px;
+    font-weight: 620;
+    letter-spacing: -0.01em;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .chat-title p {
+    font-size: 12px;
+    color: var(--text-muted);
+    margin-top: 2px;
+  }
+  .top-actions { display: flex; gap: 8px; flex-shrink: 0; }
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 7px 11px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: rgba(255,253,246,0.7);
+    color: var(--text-secondary);
+    font-size: 12.5px;
+    transition: 0.15s ease;
+  }
+  .btn:hover { background: var(--bg-hover); color: var(--text); border-color: var(--border-strong); }
+  .btn.primary {
+    background: var(--accent);
+    border-color: transparent;
+    color: #fffdf6;
+    font-weight: 550;
+  }
+  .btn.primary:hover { filter: brightness(1.05); color: #fffdf6; }
+
+  .messages {
+    flex: 1;
+    overflow-y: auto;
+    padding: 28px 24px 12px;
+    scroll-behavior: smooth;
+  }
+  .messages-inner {
+    max-width: 760px;
+    margin: 0 auto;
+    display: flex;
+    flex-direction: column;
+    gap: 22px;
+  }
+
+  .msg { display: flex; gap: 12px; }
+  .msg.user { justify-content: flex-end; }
+  .msg.user .bubble {
+    background: var(--bg-active);
+    border: 1px solid var(--border-strong);
+    border-radius: 14px 14px 4px 14px;
+    padding: 12px 14px;
+    max-width: min(560px, 88%);
+    font-size: 14px;
+  }
+
+  .avatar {
+    width: 28px;
+    height: 28px;
+    border-radius: 8px;
+    flex-shrink: 0;
+    display: grid;
+    place-items: center;
+    font-size: 11px;
+    font-weight: 700;
+    margin-top: 2px;
+  }
+  .avatar.agent {
+    background: linear-gradient(145deg, rgba(184,137,45,0.22), rgba(63,125,110,0.14));
+    color: #7a5a1a;
+    box-shadow: inset 0 0 0 1px rgba(184,137,45,0.28);
+  }
+
+  .agent-body { min-width: 0; flex: 1; max-width: 100%; }
+
+  .trace {
+    border: 1px solid var(--border);
+    background: rgba(255,253,246,0.55);
+    border-radius: var(--radius-md);
+    overflow: hidden;
+    margin-bottom: 12px;
+  }
+  .trace-head {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 12px;
+    color: var(--text-secondary);
+    font-size: 12.5px;
+    text-align: left;
+  }
+  .trace-head:hover { background: rgba(255,255,255,0.45); }
+  .trace-head strong { color: var(--text); font-weight: 550; }
+  .trace-head .chev {
+    margin-left: auto;
+    transition: transform 0.18s ease;
+    color: var(--text-muted);
+  }
+  .trace.open .chev { transform: rotate(180deg); }
+  .trace-body {
+    display: none;
+    border-top: 1px solid var(--border);
+    padding: 4px 0;
+  }
+  .trace.open .trace-body { display: block; }
+
+  .step {
+    display: grid;
+    grid-template-columns: 18px 1fr;
+    gap: 10px;
+    padding: 10px 14px;
+    position: relative;
+  }
+  .step:not(:last-child)::before {
+    content: "";
+    position: absolute;
+    left: 22px;
+    top: 30px;
+    bottom: 0;
+    width: 1px;
+    background: var(--border);
+  }
+  .step-icon {
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    display: grid;
+    place-items: center;
+    font-size: 10px;
+    margin-top: 1px;
+    background: var(--bg-active);
+    border: 1px solid var(--border-strong);
+    color: var(--text-muted);
+    z-index: 1;
+  }
+  .step.think .step-icon { color: #7a5a1a; border-color: rgba(184,137,45,0.4); background: rgba(184,137,45,0.14); }
+  .step.tool .step-icon { color: #2f6a5c; border-color: rgba(63,125,110,0.4); background: rgba(63,125,110,0.12); }
+  .step.observe .step-icon { color: var(--warn); border-color: rgba(196,122,44,0.35); background: rgba(196,122,44,0.12); }
+  .step-kicker {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    margin-bottom: 3px;
+  }
+  .step-text { font-size: 13px; color: var(--text-secondary); }
+  .step-text code {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    background: rgba(255,255,255,0.65);
+    border: 1px solid var(--border);
+    padding: 1px 5px;
+    border-radius: 4px;
+    color: #7a5a1a;
+  }
+  .hit-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 8px;
+  }
+  .hit {
+    font-size: 11px;
+    padding: 3px 8px;
+    border-radius: 999px;
+    background: var(--cite-soft);
+    border: 1px solid var(--cite-border);
+    color: #2f6a5c;
+    font-family: var(--mono);
+  }
+
+  .answer {
+    font-size: 14.5px;
+    color: var(--text);
+    line-height: 1.7;
+  }
+  .answer p + p { margin-top: 10px; }
+  .answer ul { margin: 10px 0 0 1.1em; }
+  .answer li { margin: 6px 0; color: var(--text-secondary); }
+  .answer strong { color: var(--text); font-weight: 600; }
+
+  .cite {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 18px;
+    height: 18px;
+    padding: 0 5px;
+    margin: 0 1px;
+    border-radius: 5px;
+    background: var(--cite-soft);
+    border: 1px solid var(--cite-border);
+    color: var(--cite);
+    font-size: 11px;
+    font-weight: 650;
+    font-family: var(--mono);
+    vertical-align: 1px;
+    cursor: pointer;
+    transition: 0.15s ease;
+  }
+  .cite:hover, .cite.active {
+    background: rgba(63, 125, 110, 0.2);
+    color: #1f4f44;
+  }
+
+  .composer-wrap {
+    padding: 12px 24px 20px;
+    background: linear-gradient(180deg, transparent, rgba(250,246,232,0.96) 28%);
+  }
+  .composer {
+    max-width: 760px;
+    margin: 0 auto;
+    border: 1px solid var(--border-strong);
+    background: var(--bg-panel);
+    border-radius: 14px;
+    box-shadow: var(--shadow);
+    overflow: hidden;
+  }
+  .composer textarea {
+    width: 100%;
+    resize: none;
+    border: none;
+    outline: none;
+    background: transparent;
+    padding: 14px 14px 8px;
+    min-height: 56px;
+    max-height: 140px;
+    color: var(--text);
+  }
+  .composer textarea::placeholder { color: var(--text-muted); }
+  .composer-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 10px 10px;
+  }
+  .composer-hint {
+    font-size: 11.5px;
+    color: var(--text-muted);
+    margin-left: 4px;
+    flex: 1;
+  }
+  .send {
+    width: 34px;
+    height: 34px;
+    border-radius: 10px;
+    background: var(--accent);
+    color: #fffdf6;
+    display: grid;
+    place-items: center;
+    transition: 0.15s ease;
+  }
+  .send:hover { filter: brightness(1.05); transform: translateY(-1px); }
+  .send:disabled { opacity: 0.45; transform: none; filter: none; cursor: not-allowed; }
+
+  /* ========== Sources panel ========== */
+  .sources {
+    background: var(--bg-elevated);
+    border-left: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+  .sources-head {
+    padding: 16px 16px 12px;
+    border-bottom: 1px solid var(--border);
+  }
+  .sources-head h2 {
+    font-size: 13px;
+    font-weight: 620;
+    letter-spacing: -0.01em;
+  }
+  .sources-head p {
+    font-size: 11.5px;
+    color: var(--text-muted);
+    margin-top: 3px;
+  }
+  .sources-list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .source-card {
+    border: 1px solid var(--border);
+    background: rgba(255,253,246,0.55);
+    border-radius: var(--radius-md);
+    padding: 12px;
+    transition: 0.18s ease;
+    cursor: pointer;
+  }
+  .source-card:hover { border-color: var(--border-strong); background: var(--bg-hover); }
+  .source-card.active {
+    border-color: var(--cite-border);
+    background: var(--cite-soft);
+    box-shadow: 0 0 0 1px var(--cite-border);
+  }
+  .source-top {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    margin-bottom: 8px;
+  }
+  .source-id {
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--cite);
+    background: var(--cite-soft);
+    border: 1px solid var(--cite-border);
+    border-radius: 5px;
+    padding: 1px 6px;
+    flex-shrink: 0;
+  }
+  .source-name {
+    font-size: 12.5px;
+    font-weight: 560;
+    min-width: 0;
+    flex: 1;
+  }
+  .source-score {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    color: var(--text-muted);
+    flex-shrink: 0;
+  }
+  .source-snippet {
+    font-size: 12px;
+    color: var(--text-secondary);
+    line-height: 1.55;
+    display: -webkit-box;
+    -webkit-line-clamp: 4;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .source-card.active .source-snippet {
+    -webkit-line-clamp: unset;
+    display: block;
+  }
+  .source-meta {
+    display: flex;
+    gap: 8px;
+    margin-top: 8px;
+    font-size: 11px;
+    color: var(--text-muted);
+    font-family: var(--mono);
+  }
+
+  .metrics {
+    border-top: 1px solid var(--border);
+    padding: 12px 14px;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+  }
+  .metric {
+    background: rgba(255,253,246,0.55);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 8px 10px;
+  }
+  .metric b {
+    display: block;
+    font-size: 13px;
+    font-family: var(--mono);
+    font-weight: 600;
+    letter-spacing: -0.02em;
+  }
+  .metric span {
+    font-size: 10.5px;
+    color: var(--text-muted);
+  }
+
+  /* empty / streaming */
+  .typing {
+    display: inline-flex;
+    gap: 4px;
+    padding: 4px 0;
+  }
+  .typing i {
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: var(--text-muted);
+    animation: blink 1.2s ease-in-out infinite;
+  }
+  .typing i:nth-child(2) { animation-delay: 0.15s; }
+  .typing i:nth-child(3) { animation-delay: 0.3s; }
+  @keyframes blink {
+    0%, 80%, 100% { opacity: 0.25; transform: translateY(0); }
+    40% { opacity: 1; transform: translateY(-2px); }
+  }
+
+  .empty-state {
+    text-align: center;
+    padding: 48px 20px;
+    color: var(--text-muted);
+    font-size: 13px;
+  }
+
+  @media (max-width: 1100px) {
+    .app { grid-template-columns: 220px minmax(0, 1fr); }
+    .sources { display: none; }
+  }
+  @media (max-width: 760px) {
+    .app { grid-template-columns: 1fr; }
+    .rail { display: none; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <!-- Left rail -->
+  <aside class="rail">
+    <div class="brand">
+      <div class="brand-mark">RA</div>
+      <div class="brand-text">
+        <div class="brand-name">RAG Agent</div>
+        <div class="brand-sub">私有知识库智能体</div>
+      </div>
+    </div>
+
+    <div class="rail-section">
+      <div class="rail-label">工作区</div>
+      <button class="nav-item active" data-nav="chat">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z"/></svg>
+        <span>智能问答</span>
+      </button>
+      <button class="nav-item" data-nav="kb">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+        <span>知识库</span>
+      </button>
+      <button class="nav-item" data-nav="trace">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 2v4M12 18v4M4.9 4.9l2.8 2.8M16.3 16.3l2.8 2.8M2 12h4M18 12h4M4.9 19.1l2.8-2.8M16.3 7.7l2.8-2.8"/></svg>
+        <span>运行轨迹</span>
+      </button>
+    </div>
+
+    <div class="rail-section" style="flex:1;min-height:0;overflow:auto;">
+      <div class="rail-label">最近会话</div>
+      <button class="session-item active">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z"/></svg>
+        <span>退款政策竞品对比</span>
+        <small>刚刚</small>
+      </button>
+      <button class="session-item">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z"/></svg>
+        <span>Q3 定价策略依据</span>
+        <small>2h</small>
+      </button>
+      <button class="session-item">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z"/></svg>
+        <span>客户成功 SLA 解读</span>
+        <small>昨天</small>
+      </button>
+
+      <div class="rail-label" style="margin-top:14px;">知识库</div>
+      <button class="kb-chip" data-kb="internal">
+        <span class="kb-dot"></span>
+        <span class="kb-meta">
+          <strong>产品内部文档</strong>
+          <span>1,284 chunks · 就绪</span>
+        </span>
+      </button>
+      <button class="kb-chip" data-kb="market">
+        <span class="kb-dot"></span>
+        <span class="kb-meta">
+          <strong>市场与竞品资料</strong>
+          <span>642 chunks · 就绪</span>
+        </span>
+      </button>
+      <button class="kb-chip" data-kb="policy">
+        <span class="kb-dot off"></span>
+        <span class="kb-meta">
+          <strong>法务与合规</strong>
+          <span>索引更新中</span>
+        </span>
+      </button>
+    </div>
+
+    <div class="rail-foot">
+      <div class="agent-status">
+        <span class="pulse"></span>
+        <span>Agent Online · ReAct</span>
+      </div>
+    </div>
+  </aside>
+
+  <!-- Chat -->
+  <section class="chat-col">
+    <header class="chat-top">
+      <div class="chat-title">
+        <h1>退款政策竞品对比</h1>
+        <p>混合检索 · 多跳推理 · 引用可追溯</p>
+      </div>
+      <div class="top-actions">
+        <button class="btn" id="toggleTraceBtn">展开轨迹</button>
+        <button class="btn primary" id="newChatBtn">新会话</button>
+      </div>
+    </header>
+
+    <div class="messages" id="messages">
+      <div class="messages-inner" id="messagesInner">
+        <!-- seeded by JS -->
+      </div>
+    </div>
+
+    <div class="composer-wrap">
+      <div class="composer">
+        <textarea id="input" rows="2" placeholder="基于知识库提问，例如：我们的退款政策和竞品相比有什么优势？"></textarea>
+        <div class="composer-bar">
+          <button class="btn" type="button" title="选择知识库">知识库 · 2</button>
+          <span class="composer-hint">回答仅基于已索引文档，结论附引用</span>
+          <button class="send" id="sendBtn" aria-label="发送">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M13 6l6 6-6 6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Sources -->
+  <aside class="sources">
+    <div class="sources-head">
+      <h2>引用来源</h2>
+      <p>点击正文中的引用编号定位片段</p>
+    </div>
+    <div class="sources-list" id="sourcesList"></div>
+    <div class="metrics">
+      <div class="metric"><b>2</b><span>检索轮次</span></div>
+      <div class="metric"><b>8</b><span>命中片段</span></div>
+      <div class="metric"><b>4</b><span>最终引用</span></div>
+      <div class="metric"><b>1.8s</b><span>端到端耗时</span></div>
+    </div>
+  </aside>
+</div>
+
+<script>
+const SOURCES = [
+  {
+    id: 1,
+    file: "产品服务条款_v3.2.md",
+    page: "§4.1",
+    score: 0.91,
+    snippet: "自购买之日起 30 日内，若产品未激活且未产生用量，用户可申请全额退款。激活后 7 日内可按剩余价值比例退款。",
+    kb: "internal"
+  },
+  {
+    id: 2,
+    file: "售后政策内部说明.docx",
+    page: "第 2 节",
+    score: 0.87,
+    snippet: "企业客户可约定 45 天冷静期；连续订阅年付方案支持按月折算退还，违约金不超过未履行部分的 15%。",
+    kb: "internal"
+  },
+  {
+    id: 3,
+    file: "竞品A_服务协议摘录.pdf",
+    page: "p.12",
+    score: 0.84,
+    snippet: "竞品 A 仅支持 14 日内未使用退款，且不支持年付按月折算；超额部分需人工工单审核，平均处理 5–7 个工作日。",
+    kb: "market"
+  },
+  {
+    id: 4,
+    file: "市场调研_退款体验对比.pdf",
+    page: "表 3",
+    score: 0.79,
+    snippet: "在 6 家主流竞品中，仅 2 家提供 30 日退款窗口。我方在窗口长度、企业条款灵活度与自动化处理速度上均位于第一梯队。",
+    kb: "market"
+  }
+];
+
+const SEED = [
+  { role: "user", content: "我们产品的退款政策和竞品相比有什么优势？" },
+  {
+    role: "assistant",
+    traceOpen: false,
+    steps: [
+      {
+        kind: "think",
+        kicker: "Thought",
+        text: "问题需要对比「我方退款政策」与「竞品退款政策」。先检索内部政策，再查市场资料。"
+      },
+      {
+        kind: "tool",
+        kicker: "Action · retrieve",
+        text: "query=<code>产品退款政策 窗口期 企业客户</code> kb=<code>internal</code> top_k=5"
+      },
+      {
+        kind: "observe",
+        kicker: "Observation",
+        text: "命中 5 个片段：服务条款 30 日窗口、企业 45 天冷静期等。",
+        hits: ["产品服务条款_v3.2", "售后政策内部说明"]
+      },
+      {
+        kind: "think",
+        kicker: "Thought",
+        text: "已有我方政策，但缺竞品信息。信息不充分，继续检索市场库。"
+      },
+      {
+        kind: "tool",
+        kicker: "Action · retrieve",
+        text: "query=<code>竞品退款政策 对比 窗口 年付</code> kb=<code>market</code> top_k=4"
+      },
+      {
+        kind: "observe",
+        kicker: "Observation",
+        text: "命中竞品协议摘录与体验对比表。信息充分，可作答。",
+        hits: ["竞品A_服务协议摘录", "市场调研_退款体验对比"]
+      },
+      {
+        kind: "think",
+        kicker: "Thought",
+        text: "综合两轮检索：窗口更长、企业条款更灵活、处理更快。输出带引用回答。"
+      }
+    ],
+    answer: `
+      <p>相对主流竞品，我方退款政策在<strong>三个维度</strong>更占优：</p>
+      <ul>
+        <li><strong>窗口更长</strong>：标准用户 30 日内可退<span class="cite" data-id="1">1</span>，明显长于竞品常见的 14 日<span class="cite" data-id="3">3</span>。</li>
+        <li><strong>企业条款更灵活</strong>：可约定 45 天冷静期，年付支持按月折算退还<span class="cite" data-id="2">2</span>；竞品 A 不支持年付折算，需人工审核 5–7 天<span class="cite" data-id="3">3</span>。</li>
+        <li><strong>行业位置靠前</strong>：在 6 家主流竞品样本中，我方窗口长度与自动化处理速度均处于第一梯队<span class="cite" data-id="4">4</span>。</li>
+      </ul>
+      <p style="margin-top:12px;color:var(--text-secondary)">若需要，我可以继续拆解「法务风险点」或输出对外对比话术。</p>
+    `
+  }
+];
+
+const DEPTH_ANSWER = `
+  <p>从法务与对外表述角度，建议强调<strong>可验证的窗口期与自动化时效</strong>，避免绝对化承诺：</p>
+  <ul>
+    <li>可对外表述：「30 日内未激活可全额退款」<span class="cite" data-id="1">1</span>；企业场景引用冷静期与折算规则<span class="cite" data-id="2">2</span>。</li>
+    <li>对比竞品时使用「样本调研」口径，而非「全行业唯一」<span class="cite" data-id="4">4</span>。</li>
+    <li>避免承诺「秒退」；内部 SLA 以自动化工单为准。</li>
+  </ul>
+`;
+
+const $ = (sel) => document.querySelector(sel);
+const messagesInner = $("#messagesInner");
+const sourcesList = $("#sourcesList");
+const input = $("#input");
+const sendBtn = $("#sendBtn");
+const messagesEl = $("#messages");
+
+function renderSources() {
+  sourcesList.innerHTML = SOURCES.map((s) => `
+    <article class="source-card" data-id="${s.id}" id="source-${s.id}">
+      <div class="source-top">
+        <span class="source-id">[${s.id}]</span>
+        <span class="source-name">${s.file}</span>
+        <span class="source-score">${s.score.toFixed(2)}</span>
+      </div>
+      <div class="source-snippet">${s.snippet}</div>
+      <div class="source-meta">
+        <span>${s.page}</span>
+        <span>${s.kb}</span>
+      </div>
+    </article>
+  `).join("");
+}
+
+function bindCites(root = document) {
+  root.querySelectorAll(".cite").forEach((el) => {
+    el.addEventListener("click", () => {
+      const id = el.dataset.id;
+      document.querySelectorAll(".cite.active").forEach((c) => c.classList.remove("active"));
+      document.querySelectorAll(".source-card.active").forEach((c) => c.classList.remove("active"));
+      el.classList.add("active");
+      const card = document.getElementById(`source-${id}`);
+      if (card) {
+        card.classList.add("active");
+        card.scrollIntoView({ block: "nearest", behavior: "smooth" });
+      }
+    });
+  });
+}
+
+function renderTraceSteps(steps) {
+  return steps.map((s) => {
+    const icon = s.kind === "think" ? "T" : s.kind === "tool" ? "⚡" : "i";
+    return `
+      <div class="step ${s.kind}">
+        <div class="step-icon">${icon}</div>
+        <div>
+          <div class="step-kicker">${s.kicker}</div>
+          <div class="step-text">${s.text}</div>
+          ${s.hits ? `<div class="hit-row">${s.hits.map((h) => `<span class="hit">${h}</span>`).join("")}</div>` : ""}
+        </div>
+      </div>
+    `;
+  }).join("");
+}
+
+function assistantShell({ steps, answer, traceOpen = false }) {
+  return `
+    <div class="msg assistant">
+      <div class="avatar agent">RA</div>
+      <div class="agent-body">
+        <div class="trace ${traceOpen ? "open" : ""}">
+          <button class="trace-head" type="button">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3v18M5 8l7-5 7 5M5 16l7 5 7-5"/></svg>
+            <strong>Agent 轨迹</strong>
+            <span>${steps.length} 步 · 多跳检索</span>
+            <svg class="chev" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m6 9 6 6 6-6"/></svg>
+          </button>
+          <div class="trace-body">${renderTraceSteps(steps)}</div>
+        </div>
+        <div class="answer">${answer}</div>
+      </div>
+    </div>
+  `;
+}
+
+function seedConversation() {
+  messagesInner.innerHTML = SEED.map((m) => {
+    if (m.role === "user") {
+      return `<div class="msg user"><div class="bubble">${m.content}</div></div>`;
+    }
+    return assistantShell(m);
+  }).join("");
+  bindTraces();
+  bindCites();
+}
+
+function bindTraces() {
+  messagesInner.querySelectorAll(".trace-head").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      btn.closest(".trace").classList.toggle("open");
+    });
+  });
+}
+
+function scrollBottom() {
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+function appendUser(text) {
+  const el = document.createElement("div");
+  el.className = "msg user";
+  el.innerHTML = `<div class="bubble"></div>`;
+  el.querySelector(".bubble").textContent = text;
+  messagesInner.appendChild(el);
+  scrollBottom();
+}
+
+function appendPending() {
+  const el = document.createElement("div");
+  el.className = "msg assistant";
+  el.innerHTML = `
+    <div class="avatar agent">RA</div>
+    <div class="agent-body">
+      <div class="trace open">
+        <button class="trace-head" type="button">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3v18M5 8l7-5 7 5M5 16l7 5 7-5"/></svg>
+          <strong>Agent 轨迹</strong>
+          <span>检索中…</span>
+          <svg class="chev" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m6 9 6 6 6-6"/></svg>
+        </button>
+        <div class="trace-body">
+          <div class="step think">
+            <div class="step-icon">T</div>
+            <div>
+              <div class="step-kicker">Thought</div>
+              <div class="step-text">解析问题意图，规划检索路径…</div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="answer"><span class="typing"><i></i><i></i><i></i></span></div>
+    </div>
+  `;
+  messagesInner.appendChild(el);
+  bindTraces();
+  scrollBottom();
+  return el;
+}
+
+function finishPending(el) {
+  const body = el.querySelector(".agent-body");
+  const steps = [
+    { kind: "think", kicker: "Thought", text: "延续上文退款优势，给出可执行的对外表述与风险边界。" },
+    { kind: "tool", kicker: "Action · retrieve", text: "query=<code>退款 对外表述 法务 风险</code> kb=<code>internal+market</code>" },
+    { kind: "observe", kicker: "Observation", text: "复用已命中片段，信息充分。", hits: ["产品服务条款_v3.2", "市场调研_退款体验对比"] }
+  ];
+  body.innerHTML = `
+    <div class="trace">
+      <button class="trace-head" type="button">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3v18M5 8l7-5 7 5M5 16l7 5 7-5"/></svg>
+        <strong>Agent 轨迹</strong>
+        <span>3 步 · 复用上下文</span>
+        <svg class="chev" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m6 9 6 6 6-6"/></svg>
+      </button>
+      <div class="trace-body">${renderTraceSteps(steps)}</div>
+    </div>
+    <div class="answer">${DEPTH_ANSWER}</div>
+  `;
+  bindTraces();
+  bindCites(body);
+  scrollBottom();
+}
+
+async function send() {
+  const text = input.value.trim();
+  if (!text || sendBtn.disabled) return;
+  input.value = "";
+  sendBtn.disabled = true;
+  appendUser(text);
+  const pending = appendPending();
+  await new Promise((r) => setTimeout(r, 1400));
+  finishPending(pending);
+  sendBtn.disabled = false;
+}
+
+sendBtn.addEventListener("click", () => void send());
+input.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    void send();
+  }
+});
+
+$("#newChatBtn").addEventListener("click", () => {
+  messagesInner.innerHTML = `
+    <div class="empty-state">
+      开始一个新会话。提问后，Agent 会自主决定检索次数，并给出带引用的回答。
+    </div>
+  `;
+  document.querySelector(".chat-title h1").textContent = "新会话";
+});
+
+$("#toggleTraceBtn").addEventListener("click", () => {
+  const traces = messagesInner.querySelectorAll(".trace");
+  const anyClosed = [...traces].some((t) => !t.classList.contains("open"));
+  traces.forEach((t) => t.classList.toggle("open", anyClosed));
+  $("#toggleTraceBtn").textContent = anyClosed ? "收起轨迹" : "展开轨迹";
+});
+
+renderSources();
+seedConversation();
+</script>
+</body>
+</html>

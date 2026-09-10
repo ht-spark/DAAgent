@@ -1,15 +1,11 @@
 import { useCallback, useEffect, useState } from 'react'
 import Sidebar from './components/Sidebar'
 import { syncApiSettingsCache } from './api'
-import Home from './pages/Home'
 import NewTask from './pages/NewTask'
 import History from './pages/History'
 import ApiManager from './pages/ApiManager'
-import Brainstorm from './pages/Brainstorm'
-import DiscussionHub from './pages/DiscussionHub'
 import DiscussionHistory from './pages/DiscussionHistory'
 import Docs from './pages/Docs'
-import ModelingTasks from './pages/ModelingTasks'
 import BrainstormHub from './pages/BrainstormHub'
 import KnowledgeBaseHub from './pages/KnowledgeBaseHub'
 import KnowledgeBase from './pages/KnowledgeBase'
@@ -19,16 +15,17 @@ import ChunkEmbeddingProgress from './pages/ChunkEmbeddingProgress'
 import VectorRetrievalReady from './pages/VectorRetrievalReady'
 import KnowledgeBaseHistory from './pages/KnowledgeBaseHistory'
 
-type Section = 'home' | 'modeling' | 'brainstorm' | 'api' | 'docs'
+type Section = 'modeling' | 'brainstorm' | 'api' | 'docs'
 type TaskStep = 'submit' | 'progress' | 'result'
-type ModelingView = 'overview' | 'new' | 'history'
-type BrainstormView = 'overview' | 'knowledge-hub' | 'knowledge' | 'knowledge-history' | 'stats' | 'chunking' | 'chunking-progress' | 'retrieval-ready' | 'discussion-hub' | 'inspiration' | 'discussion-history'
+type ModelingView = 'overview' | 'new' | 'history' | 'discussion-history'
+type BrainstormView = 'overview' | 'knowledge-hub' | 'knowledge' | 'knowledge-history' | 'stats' | 'chunking' | 'chunking-progress' | 'retrieval-ready'
 
 const SYMBOLS = ['∫', '∑', '∏', '∂', '∇', '∞', 'π', 'σ', 'μ', 'λ', 'α', 'β', 'γ', 'θ', 'Δ', 'Ω']
 
 export default function App() {
-  const [section, setSection] = useState<Section>('home')
-  const [modelingView, setModelingView] = useState<ModelingView>('overview')
+  // 入口直接进入新建聊天；历史讨论在侧边栏「最近」中打开
+  const [section, setSection] = useState<Section>('modeling')
+  const [modelingView, setModelingView] = useState<ModelingView>('new')
   const [brainstormView, setBrainstormView] = useState<BrainstormView>('overview')
   const [discussionId, setDiscussionId] = useState<string | null>(null)
   // 知识库上传页的进入方式：新批次（空表开始）或回看历史某次上传批次。
@@ -60,13 +57,8 @@ export default function App() {
     setKbEntry((entry) => (entry ? { ...entry, filterIds: documentIds } : entry))
   }, [])
 
-  function enterModeling() {
-    // 落地页“开始建模”：先进入建模任务总览（新建任务 / 历史任务）
-    setSection('modeling')
-    setModelingView('overview')
-  }
-
   function startNew() {
+    setDiscussionId(null)
     setTask({ step: 'submit', runId: null })
     setSection('modeling')
     setModelingView('new')
@@ -77,40 +69,6 @@ export default function App() {
     setTask({ step: 'progress', runId })
     setSection('modeling')
     setModelingView('new')
-  }
-
-  function goBack() {
-    if (section === 'modeling' && modelingView !== 'overview') {
-      setModelingView('overview')
-      return
-    }
-    if (section === 'brainstorm' && brainstormView !== 'overview') {
-      // 资料统计页返回知识库维护页；分块设置页返回资料统计页；执行页返回设置页。
-      if (brainstormView === 'knowledge-hub') {
-        setBrainstormView('overview')
-      } else if (brainstormView === 'knowledge' && kbEntry?.from === 'knowledge-history') {
-        // 从历史记录进入的上传批次页，返回时回到历史列表。
-        setKbEntry(null)
-        setBrainstormView('knowledge-history')
-      } else if (brainstormView === 'knowledge' || brainstormView === 'knowledge-history') {
-        setKbEntry(null)
-        setBrainstormView('knowledge-hub')
-      } else if (brainstormView === 'stats') {
-        setBrainstormView('knowledge')
-      } else if (brainstormView === 'chunking') {
-        setBrainstormView('stats')
-      } else if (brainstormView === 'chunking-progress') {
-        setBrainstormView('chunking')
-      } else if (brainstormView === 'retrieval-ready') {
-        setBrainstormView('chunking-progress')
-      } else if (brainstormView === 'inspiration' || brainstormView === 'discussion-history') {
-        setBrainstormView('discussion-hub')
-      } else {
-        setBrainstormView('overview')
-      }
-      return
-    }
-    setSection('home')
   }
 
   return (
@@ -124,58 +82,62 @@ export default function App() {
         ))}
       </div>
 
-      {/* 侧边导航栏：仅在非首页展示（首页是落地页，不显示导航） */}
-      {section !== 'home' && (
-        <Sidebar
-          section={section}
-          collapsed={sidebarCollapsed}
-          onToggleCollapse={() => setSidebarCollapsed((c) => !c)}
-          onHome={() => setSection('home')}
-          onModeling={() => {
-            setSection('modeling')
-            setModelingView('overview')
-          }}
-          onBrainstorm={() => {
-            setSection('brainstorm')
-            setBrainstormView('overview')
-          }}
-          onApi={() => setSection('api')}
-          onDocs={() => setSection('docs')}
-        />
-      )}
-
-      <main
-        className={`content ${
-          section === 'home'
-            ? 'content--full'
-            : sidebarCollapsed
-              ? 'content--collapsed'
-              : ''
-        }`}
-      >
-        {section !== 'home' && (
-          <button className="page-back-button" onClick={goBack} aria-label="返回上一级" title="返回上一级">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-              <path d="M19 12H5" />
-              <path d="m12 19-7-7 7-7" />
-            </svg>
-          </button>
-        )}
-        {section === 'home' && <Home onStart={enterModeling} onBrainstorm={() => {
+      <Sidebar
+        section={section}
+        collapsed={sidebarCollapsed}
+        activeDiscussionId={discussionId}
+        onHome={() => startNew()}
+        onModeling={() => startNew()}
+        onBrainstorm={() => {
           setSection('brainstorm')
           setBrainstormView('overview')
-        }} onDocs={() => setSection('docs')} />}
-        {section === 'modeling' && modelingView === 'overview' && (
-          <ModelingTasks onNew={startNew} onHistory={() => setModelingView('history')} />
-        )}
+        }}
+        onOpenDiscussion={(id) => {
+          setDiscussionId(id)
+          setTask({ step: 'submit', runId: null })
+          setSection('modeling')
+          setModelingView('new')
+        }}
+        onApi={() => setSection('api')}
+        onDocs={() => setSection('docs')}
+      />
+
+      <main className={`content ${sidebarCollapsed ? 'content--collapsed' : ''}`}>
+        <div className="content-top-actions">
+          <button
+            className="page-back-button"
+            onClick={() => setSidebarCollapsed((c) => !c)}
+            aria-label={sidebarCollapsed ? '展开侧边栏' : '收起侧边栏'}
+            title={sidebarCollapsed ? '展开侧边栏' : '收起侧边栏'}
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M3 7h13" />
+              <path d="M3 12h18" />
+              <path d="M3 17h13" />
+            </svg>
+          </button>
+        </div>
         {section === 'modeling' && modelingView === 'new' && (
-          <NewTask task={task} setTask={setTask} onHistory={() => setModelingView('history')} />
+          <NewTask
+            task={task}
+            setTask={setTask}
+            onHistory={() => setModelingView('history')}
+            discussionId={discussionId}
+            onDiscussionId={setDiscussionId}
+            onOpenDiscussionHistory={() => setModelingView('discussion-history')}
+            onNewDiscussion={() => setDiscussionId(null)}
+          />
+        )}
+        {section === 'modeling' && modelingView === 'discussion-history' && (
+          <DiscussionHistory
+            onOpen={(id) => {
+              setDiscussionId(id)
+              setModelingView('new')
+            }}
+          />
         )}
         {section === 'brainstorm' && brainstormView === 'overview' && (
-          <BrainstormHub
-            onKnowledge={() => setBrainstormView('knowledge-hub')}
-            onInspiration={() => setBrainstormView('discussion-hub')}
-          />
+          <BrainstormHub onKnowledge={() => setBrainstormView('knowledge-hub')} />
         )}
         {section === 'brainstorm' && brainstormView === 'knowledge-hub' && (
           <KnowledgeBaseHub
@@ -231,26 +193,6 @@ export default function App() {
         )}
         {section === 'brainstorm' && brainstormView === 'retrieval-ready' && (
           <VectorRetrievalReady onBack={() => setBrainstormView('chunking-progress')} />
-        )}
-        {section === 'brainstorm' && brainstormView === 'discussion-hub' && (
-          <DiscussionHub
-            onNew={() => {
-              setDiscussionId(null)
-              setBrainstormView('inspiration')
-            }}
-            onHistory={() => setBrainstormView('discussion-history')}
-          />
-        )}
-        {section === 'brainstorm' && brainstormView === 'inspiration' && (
-          <Brainstorm discussionId={discussionId} onDiscussionId={setDiscussionId} />
-        )}
-        {section === 'brainstorm' && brainstormView === 'discussion-history' && (
-          <DiscussionHistory
-            onOpen={(id) => {
-              setDiscussionId(id)
-              setBrainstormView('inspiration')
-            }}
-          />
         )}
         {section === 'modeling' && modelingView === 'history' && <History onOpen={openFromHistory} />}
         {section === 'api' && <ApiManager onUsed={() => startNew()} />}

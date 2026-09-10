@@ -1,5 +1,5 @@
 import Result from './Result'
-import ChatModeling from './ChatModeling'
+import NewChat from './NewChat'
 
 type TaskStep = 'submit' | 'progress' | 'result'
 
@@ -7,9 +7,21 @@ type Props = {
   task: { step: TaskStep; runId: string | null }
   setTask: (t: { step: TaskStep; runId: string | null }) => void
   onHistory: () => void
+  discussionId: string | null
+  onDiscussionId: (id: string) => void
+  onOpenDiscussionHistory: () => void
+  onNewDiscussion: () => void
 }
 
-export default function NewTask({ task, setTask, onHistory }: Props) {
+export default function NewTask({
+  task,
+  setTask,
+  onHistory,
+  discussionId,
+  onDiscussionId,
+  onOpenDiscussionHistory,
+  onNewDiscussion,
+}: Props) {
   // 结果页保留原有查看体验
   if (task.step === 'result' && task.runId) {
     return (
@@ -23,15 +35,15 @@ export default function NewTask({ task, setTask, onHistory }: Props) {
     )
   }
 
-  // 提交 + 进度 两步合并为聊天式界面：
-  // - submit：聊天框 + 上传任务/数据，点开始建模
-  // - progress：实时把建模进度以聊天消息输出（resumeRunId 接管进行中任务）
+  // 新建聊天：灵感迸发 RAG 对话 + 可切换到建模任务
   return (
-    <div className="page page-fill chat-page">
-      <ChatModeling
-        resumeRunId={task.step === 'progress' ? task.runId : null}
-        onViewResult={(id) => setTask({ step: 'result', runId: id })}
-      />
-    </div>
+    <NewChat
+      discussionId={discussionId}
+      onDiscussionId={onDiscussionId}
+      resumeRunId={task.step === 'progress' ? task.runId : null}
+      onViewResult={(id) => setTask({ step: 'result', runId: id })}
+      onOpenHistory={onOpenDiscussionHistory}
+      onNewChat={onNewDiscussion}
+    />
   )
 }

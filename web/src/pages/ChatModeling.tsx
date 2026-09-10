@@ -458,14 +458,16 @@ type Props = {
   resumeRunId?: string | null
   /** 建模完成后跳转到结果页 */
   onViewResult: (runId: string) => void
+  /** 从灵感讨论带入的预填任务文本 */
+  initialProblem?: string
 }
 
 let _seq = 1
 const nextId = () => _seq++
 
-export default function ChatModeling({ resumeRunId, onViewResult }: Props) {
+export default function ChatModeling({ resumeRunId, onViewResult, initialProblem = '' }: Props) {
   const [messages, setMessages] = useState<ChatMsg[]>([])
-  const [problemText, setProblemText] = useState('')
+  const [problemText, setProblemText] = useState(initialProblem)
   const [problemFile, setProblemFile] = useState<File | null>(null)
   const [dataFiles, setDataFiles] = useState<File[]>([])
   const [phase, setPhase] = useState<Phase>(resumeRunId ? 'running' : 'compose')
