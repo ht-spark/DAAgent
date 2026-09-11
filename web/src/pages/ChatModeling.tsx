@@ -354,6 +354,11 @@ function TaskWorkflow({
   currentStep,
   activeName,
   model,
+  budgetReq,
+  budgetDraft,
+  budgetBusy,
+  onBudgetDraftChange,
+  onBudgetSubmit,
   onViewResult,
 }: {
   runId: string
@@ -365,6 +370,11 @@ function TaskWorkflow({
   currentStep: string
   activeName: string
   model?: string
+  budgetReq: BudgetReq | null
+  budgetDraft: Record<string, number>
+  budgetBusy: boolean
+  onBudgetDraftChange: (key: string, value: number) => void
+  onBudgetSubmit: (useDefaults: boolean) => void
   onViewResult: () => void
 }) {
   const timeline = buildTimeline(run?.progress || [], phase, currentStep)
@@ -449,6 +459,55 @@ function TaskWorkflow({
           </div>
         </section>
       </div>
+
+      {budgetReq && (
+        <div className="workflow-budget-backdrop" role="presentation">
+          <section
+            className="workflow-budget-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="workflow-budget-title"
+          >
+            <p className="workflow-budget-kicker">预算配置</p>
+            <h2 id="workflow-budget-title">
+              {budgetReq.phase === 'initial'
+                ? '设置输入信息质量检查预算'
+                : budgetReq.phase === 'delivery'
+                  ? '设置最后交付前质量检查预算'
+                  : `设置${fmtQid(budgetReq.question_id)}预算`}
+            </h2>
+            <p className="workflow-budget-copy">
+              {budgetReq.phase === 'initial'
+                ? '输入信息质量检查未通过时，系统最多按此次数重做任务理解与输入检查。'
+                : budgetReq.phase === 'delivery'
+                  ? '最后交付前质量检查未通过时，系统最多按此次数修订报告。'
+                  : '当前子任务将按此预算执行联网检索、质量检查迭代与代码修复。'}
+            </p>
+            <div className="workflow-budget-fields">
+              {BUDGET_FIELDS[budgetReq.phase].map((field) => (
+                <label key={field.key}>
+                  <span>{field.label}</span>
+                  <input
+                    type="number"
+                    min={1}
+                    value={budgetDraft[field.key] ?? 1}
+                    disabled={budgetBusy}
+                    onChange={(event) => onBudgetDraftChange(field.key, Number(event.target.value))}
+                  />
+                </label>
+              ))}
+            </div>
+            <div className="workflow-budget-actions">
+              <button type="button" onClick={() => onBudgetSubmit(true)} disabled={budgetBusy}>
+                使用默认
+              </button>
+              <button type="button" onClick={() => onBudgetSubmit(false)} disabled={budgetBusy}>
+                {budgetBusy ? '提交中…' : '确认覆盖'}
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
     </main>
   )
 }
@@ -502,7 +561,6 @@ export default function ChatModeling({ resumeRunId, onViewResult }: Props) {
   const progressQueueRef = useRef<any[]>([])
   const progressTimerRef = useRef<number | null>(null)
   const currentQuestionIdRef = useRef('')
-  const autoConfirmedBudgetRef = useRef(new Set<string>())
 
   function push(role: 'user' | 'assistant', text: string, kind: MsgKind = 'info', result?: ResultData) {
     setMessages((m) => [...m, { id: nextId(), role, text, kind, ts: Date.now(), result }])
@@ -575,30 +633,35 @@ export default function ChatModeling({ resumeRunId, onViewResult }: Props) {
     }
   }, [runId])
 
-  // 纯工作流模式不展示旧聊天界面的预算确认卡，因此默认放行每个预算关卡，
-  // 防止任务在 initial / question / delivery 阶段无限等待人工确认。
+  // SSE 断线、页面刷新或前端热更新后，仍可从运行快照恢复待确认的预算弹窗。
+  // 此处只同步界面状态，绝不自动提交默认预算。
   useEffect(() => {
-    if (!runId || phase !== 'running' || !runSnapshot?.progress) return
+    if (!runId || phase !== 'running' || budgetReq || !runSnapshot?.progress) return
     const events: any[] = runSnapshot.progress
-    const request = [...events].reverse().find((event) => event?.type === 'budget_request')
-    if (!request) return
-    const confirmed = events.some((event) =>
+    const requestIndex = events.map((event) => event?.type).lastIndexOf('budget_request')
+    if (requestIndex < 0) return
+
+    const request = events[requestIndex]
+    const confirmed = events.slice(requestIndex + 1).some((event) =>
       event?.type === 'budget_confirmed'
       && event.phase === request.phase
       && (event.question_id || '') === (request.question_id || ''),
     )
-    const requestKey = `${request.phase || 'question'}:${request.question_id || ''}:${request.timestamp || ''}`
-    if (confirmed || autoConfirmedBudgetRef.current.has(requestKey)) return
+    if (confirmed) return
 
-    autoConfirmedBudgetRef.current.add(requestKey)
-    void confirmBudget(runId, {
-      question_id: request.question_id || undefined,
-      use_defaults: true,
-    }).catch((error) => {
-      autoConfirmedBudgetRef.current.delete(requestKey)
-      setSubmitError(`无法确认默认预算：${error instanceof Error ? error.message : String(error)}`)
-    })
-  }, [phase, runId, runSnapshot])
+    const requestPhase: BudgetPhase = request.phase === 'initial'
+      ? 'initial'
+      : request.phase === 'delivery'
+        ? 'delivery'
+        : 'question'
+    const pending = {
+      question_id: request.question_id || '',
+      proposed: request.proposed || {},
+      phase: requestPhase,
+    }
+    setBudgetReq(pending)
+    setBudgetDraft({ ...pending.proposed })
+  }, [budgetReq, phase, runId, runSnapshot])
 
   /** 追加一行进度到合并进度消息（不存在则创建） */
   function ensureProgressMessage(): number {
@@ -1106,6 +1169,11 @@ export default function ChatModeling({ resumeRunId, onViewResult }: Props) {
         currentStep={currentStep}
         activeName={activeName}
         model={activeCfg?.model}
+        budgetReq={budgetReq}
+        budgetDraft={budgetDraft}
+        budgetBusy={budgetBusy}
+        onBudgetDraftChange={(key, value) => setBudgetDraft((draft) => ({ ...draft, [key]: value }))}
+        onBudgetSubmit={submitBudget}
         onViewResult={() => onViewResult(runId)}
       />
     )
