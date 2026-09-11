@@ -182,6 +182,17 @@ export type KnowledgeDocument = {
   is_conversion: boolean
   embedding_status: 'pending' | 'embedded'
   indexed_chunks: number
+  knowledge_base_id: string
+}
+
+export type KnowledgeBaseSummary = {
+  id: string
+  name: string
+  description: string
+  created_at: string
+  is_default: boolean
+  document_count: number
+  indexed_chunks: number
 }
 
 export type RunMonitor = {
@@ -209,15 +220,65 @@ export type KnowledgeStatus = {
   documents: KnowledgeDocument[]
 }
 
-export async function getKnowledgeStatus(): Promise<KnowledgeStatus> {
-  const res = await fetch('/api/knowledge/status')
+export async function getKnowledgeBases(): Promise<KnowledgeBaseSummary[]> {
+  const res = await fetch('/api/knowledge/bases')
+  if (!res.ok) throw new Error(await extractDetail(res, '获取知识库列表失败'))
+  return res.json()
+}
+
+export async function createKnowledgeBase(
+  name: string,
+  description = '',
+): Promise<KnowledgeBaseSummary> {
+  const res = await fetch('/api/knowledge/bases', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, description }),
+  })
+  if (!res.ok) throw new Error(await extractDetail(res, '创建知识库失败'))
+  return res.json()
+}
+
+export async function updateKnowledgeBase(
+  knowledgeBaseId: string,
+  name: string,
+  description = '',
+): Promise<KnowledgeBaseSummary> {
+  const res = await fetch(`/api/knowledge/bases/${encodeURIComponent(knowledgeBaseId)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, description }),
+  })
+  if (!res.ok) throw new Error(await extractDetail(res, '修改知识库失败'))
+  return res.json()
+}
+
+export async function deleteKnowledgeBase(
+  knowledgeBaseId: string,
+): Promise<{ deleted_id: string; deleted_document_ids: string[] }> {
+  const res = await fetch(`/api/knowledge/bases/${encodeURIComponent(knowledgeBaseId)}`, {
+    method: 'DELETE',
+  })
+  if (!res.ok) throw new Error(await extractDetail(res, '删除知识库失败'))
+  return res.json()
+}
+
+export async function getKnowledgeStatus(knowledgeBaseId?: string): Promise<KnowledgeStatus> {
+  const path = knowledgeBaseId
+    ? `/api/knowledge/status?${new URLSearchParams({ knowledge_base_id: knowledgeBaseId })}`
+    : '/api/knowledge/status'
+  const res = await fetch(path)
   if (!res.ok) throw new Error(await extractDetail(res, '获取知识库状态失败'))
   return res.json()
 }
 
-export async function uploadKnowledgeDocument(file: File): Promise<KnowledgeDocument[]> {
+export async function uploadKnowledgeDocument(
+  file: File,
+  knowledgeBaseId = 'default',
+): Promise<KnowledgeDocument[]> {
   const form = new FormData()
   form.append('document', file)
+  form.append('knowledge_base_id', knowledgeBaseId)
   form.append('mineru_config', JSON.stringify(loadExternalServiceConfigs().mineru))
   const res = await fetch('/api/knowledge/documents', { method: 'POST', body: form })
   if (!res.ok) throw new Error(await extractDetail(res, '文档上传失败'))
@@ -290,6 +351,7 @@ export type BrainstormDiscussion = BrainstormDiscussionSummary & {
     role: 'assistant' | 'user'
     content: string
     sources: BrainstormSource[]
+    metadata?: { knowledge_base_id?: string; knowledge_base_ids?: string[] }
   }>
 }
 
@@ -304,6 +366,7 @@ export async function streamBrainstormMessage(
     onDone: (discussionId: string) => void
   },
   configId?: string | null,
+  knowledgeBaseIds?: string[],
 ): Promise<void> {
   let res: Response
   const form = new FormData()
@@ -311,6 +374,7 @@ export async function streamBrainstormMessage(
   form.append('title', title)
   if (discussionId) form.append('discussion_id', discussionId)
   if (configId) form.append('config_id', configId)
+  knowledgeBaseIds?.forEach((id) => form.append('knowledge_base_ids', id))
   files.forEach((file) => form.append('files', file))
   try {
     res = await fetch('/api/knowledge/brainstorm/stream', {

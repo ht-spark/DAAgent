@@ -40,6 +40,8 @@ def test_create_llm_uses_explicit_generation_settings(monkeypatch):
 def test_modeling_run_forwards_generation_settings(monkeypatch, tmp_path):
     """建模执行器必须把表单已校验的生成参数传给 LLM 工厂。"""
     captured: dict[str, object] = {}
+    retrieval_kwargs: dict[str, object] = {}
+    graph_kwargs: dict[str, object] = {}
     budget_event = threading.Event()
     budget_event.set()
 
@@ -53,7 +55,16 @@ def test_modeling_run_forwards_generation_settings(monkeypatch, tmp_path):
     monkeypatch.setattr(runs, "request_budget_confirmation", lambda *_args: budget_event)
     monkeypatch.setattr(runs, "take_budget_decision", lambda _run_id: None)
     monkeypatch.setattr(runs, "clear_budget_pending", lambda _run_id: None)
-    monkeypatch.setattr(runs, "run_graph", lambda **_kwargs: {})
+    monkeypatch.setattr(
+        runs,
+        "retrieve_knowledge",
+        lambda *_args, **kwargs: retrieval_kwargs.update(kwargs) or [],
+    )
+    monkeypatch.setattr(
+        runs,
+        "run_graph",
+        lambda **kwargs: graph_kwargs.update(kwargs) or {},
+    )
     monkeypatch.setattr(runs, "set_result", lambda *_args: None)
 
     asyncio.run(
@@ -70,8 +81,11 @@ def test_modeling_run_forwards_generation_settings(monkeypatch, tmp_path):
                 "max_tokens": 4096,
                 "temperature": 0.25,
             },
+            knowledge_base_ids=["market-kb", "metric-kb"],
         )
     )
 
     assert captured["max_tokens"] == 4096
     assert captured["temperature"] == 0.25
+    assert retrieval_kwargs["knowledge_base_ids"] == ["market-kb", "metric-kb"]
+    assert graph_kwargs["problem_text"] == "test problem"

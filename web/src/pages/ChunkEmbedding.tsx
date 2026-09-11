@@ -25,13 +25,12 @@ export default function ChunkEmbedding({
   onBack,
   onNext,
   initialOptions,
-  visibleDocumentIds,
+  knowledgeBaseId,
 }: {
   onBack: () => void
   onNext: (options: ChunkEmbeddingOptions) => void
   initialOptions: ChunkEmbeddingOptions
-  /** 只统计这些文档 ID（当前上传批次）；缺省时统计全库。 */
-  visibleDocumentIds?: string[]
+  knowledgeBaseId?: string
 }) {
   const [documents, setDocuments] = useState<KnowledgeDocument[]>([])
   const [loading, setLoading] = useState(true)
@@ -42,18 +41,11 @@ export default function ChunkEmbedding({
   const [windowSize, setWindowSize] = useState(initialOptions.windowSize)
 
   useEffect(() => {
-    getKnowledgeStatus()
-      .then((status) =>
-        setDocuments(
-          status.documents.filter(
-            (doc) => !visibleDocumentIds || visibleDocumentIds.includes(doc.id),
-          ),
-        ),
-      )
+    getKnowledgeStatus(knowledgeBaseId)
+      .then((status) => setDocuments(status.documents))
       .catch((reason: unknown) => setError(reason instanceof Error ? reason.message : '无法连接知识库服务。'))
       .finally(() => setLoading(false))
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [knowledgeBaseId])
 
   function estimateChunks(doc: KnowledgeDocument): number {
     const step = Math.max(chunkSize - overlap, 1)

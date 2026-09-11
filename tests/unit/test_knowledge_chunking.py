@@ -23,6 +23,7 @@ def test_sentence_window_chunking_loads_only_markdown(tmp_path):
         documents_root,
         window_size=1,
         document_ids_by_source={"reference.md": "document-uuid"},
+        knowledge_base_ids_by_source={"reference.md": "market-kb"},
     )
 
     assert len(nodes) == 3
@@ -30,6 +31,7 @@ def test_sentence_window_chunking_loads_only_markdown(tmp_path):
     assert all("window" in node.metadata for node in nodes)
     assert all("original_text" in node.metadata for node in nodes)
     assert all(node.metadata["document_id"] == "document-uuid" for node in nodes)
+    assert all(node.metadata["knowledge_base_id"] == "market-kb" for node in nodes)
     assert [node.metadata["chunk_index"] for node in nodes] == [1, 2, 3]
     assert all(node.metadata["embedding_text"].endswith(node.text) for node in nodes)
 

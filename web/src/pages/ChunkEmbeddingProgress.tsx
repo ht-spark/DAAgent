@@ -38,13 +38,12 @@ export default function ChunkEmbeddingProgress({
   options,
   onBack,
   onNext,
-  visibleDocumentIds,
+  knowledgeBaseId,
 }: {
   options: ChunkEmbeddingOptions
   onBack: () => void
   onNext: () => void
-  /** 只展示这些文档 ID（当前上传批次）；缺省时展示全库。 */
-  visibleDocumentIds?: string[]
+  knowledgeBaseId?: string
 }) {
   const [documents, setDocuments] = useState<KnowledgeDocument[]>([])
   const [loading, setLoading] = useState(true)
@@ -54,15 +53,12 @@ export default function ChunkEmbeddingProgress({
   const [currentPage, setCurrentPage] = useState(1)
 
   useEffect(() => {
-    getKnowledgeStatus()
+    getKnowledgeStatus(knowledgeBaseId)
       .then((status) => {
-        const visibleDocuments = status.documents.filter(
-          (doc) => !visibleDocumentIds || visibleDocumentIds.includes(doc.id),
-        )
-        setDocuments(visibleDocuments)
+        setDocuments(status.documents)
         setProgressMap(
           Object.fromEntries(
-            visibleDocuments
+            status.documents
               .filter((doc) => doc.embedding_status === 'embedded')
               .map((doc) => [doc.id, { stage: 'done', chunks: doc.indexed_chunks }]),
           ),
@@ -70,8 +66,7 @@ export default function ChunkEmbeddingProgress({
       })
       .catch((reason: unknown) => setError(reason instanceof Error ? reason.message : '无法连接知识库服务。'))
       .finally(() => setLoading(false))
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [knowledgeBaseId])
 
   function estimateChunks(doc: KnowledgeDocument): number {
     const step = Math.max(options.chunkSize - options.overlap, 1)

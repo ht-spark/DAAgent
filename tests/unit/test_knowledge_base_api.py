@@ -3,11 +3,16 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+from types import SimpleNamespace
 
 from fastapi import UploadFile
 from KnowledgeBase import upload_file
 from server import main
-from server.schemas import KnowledgeChunkEmbedRequest, KnowledgeDocumentsDeleteBody
+from server.schemas import (
+    KnowledgeBaseUpdateBody,
+    KnowledgeChunkEmbedRequest,
+    KnowledgeDocumentsDeleteBody,
+)
 from KnowledgeBase.embedding import IndexBuildResult
 
 
@@ -95,6 +100,57 @@ def test_delete_knowledge_documents_endpoint_removes_selected_record(monkeypatch
     assert refreshed_metadata == {}
 
 
+def test_update_knowledge_base_endpoint_returns_current_totals(monkeypatch):
+    base = SimpleNamespace(
+        id="default",
+        name="通用资料",
+        description="已修改",
+        created_at="",
+        is_default=False,
+    )
+    records = [
+        type("Record", (), {"knowledge_base_id": "default", "indexed_chunks": 3})(),
+        type("Record", (), {"knowledge_base_id": "other", "indexed_chunks": 9})(),
+    ]
+    monkeypatch.setattr(main, "update_knowledge_base", lambda *_args: base)
+    monkeypatch.setattr(main, "list_upload_records", lambda: records)
+
+    result = asyncio.run(
+        main.update_knowledge_base_endpoint(
+            "default",
+            KnowledgeBaseUpdateBody(name="通用资料", description="已修改"),
+        )
+    )
+
+    assert result.name == "通用资料"
+    assert result.document_count == 1
+    assert result.indexed_chunks == 3
+
+
+def test_delete_knowledge_base_endpoint_cascades_documents_and_vectors(monkeypatch):
+    base = type("Base", (), {"id": "default"})()
+    records = [
+        type("Record", (), {"document_id": "doc-a", "knowledge_base_id": "default"})(),
+        type("Record", (), {"document_id": "doc-b", "knowledge_base_id": "other"})(),
+    ]
+    calls: dict[str, object] = {}
+    monkeypatch.setattr(main, "require_knowledge_base", lambda _id: base)
+    monkeypatch.setattr(main, "list_upload_records", lambda: records)
+    monkeypatch.setattr(main, "delete_document_vectors", lambda ids: calls.update(vectors=ids))
+    monkeypatch.setattr(main, "delete_upload_records", lambda ids: calls.update(files=ids))
+    monkeypatch.setattr(main, "chunk_knowledge_documents", lambda **kwargs: calls.update(chunks=kwargs))
+    monkeypatch.setattr(main, "delete_knowledge_base", lambda base_id: calls.update(base=base_id))
+    monkeypatch.setattr(main, "_document_ids_by_source", lambda: {})
+    monkeypatch.setattr(main, "_knowledge_base_ids_by_source", lambda: {})
+
+    result = asyncio.run(main.delete_knowledge_base_endpoint("default"))
+
+    assert result == {"deleted_id": "default", "deleted_document_ids": ["doc-a"]}
+    assert calls["vectors"] == {"doc-a"}
+    assert calls["files"] == {"doc-a"}
+    assert calls["base"] == "default"
+
+
 def test_chunk_embed_endpoint_returns_actual_index_counts(monkeypatch, tmp_path):
     documents_root = tmp_path / "documents"
     documents_root.mkdir()
@@ -147,7 +203,11 @@ def test_brainstorm_stream_endpoint_yields_tokens_and_saves_on_completion(monkey
     monkeypatch.setattr(main, "retrieve_knowledge", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(main, "_stream_discussion_answer", lambda *_args: iter(["逐段", "回答"]))
     saved: list[object] = []
-    monkeypatch.setattr(main, "save_discussion_message", lambda *args: saved.append(args) or "discussion-uuid")
+    monkeypatch.setattr(
+        main,
+        "save_discussion_message",
+        lambda *args, **kwargs: saved.append((args, kwargs)) or "discussion-uuid",
+    )
 
     response = asyncio.run(
         main.brainstorm_stream_endpoint(
@@ -170,7 +230,46 @@ def test_brainstorm_stream_endpoint_yields_tokens_and_saves_on_completion(monkey
         {"type": "token", "content": "回答"},
         {"type": "done", "discussion_id": "discussion-uuid"},
     ]
-    assert saved[0][2] == "逐段回答"
+    assert saved[0][0][2] == "逐段回答"
+
+
+def test_brainstorm_routes_retrieval_to_selected_knowledge_base(monkeypatch):
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(main, "_active_discussion_llm", lambda: object())
+
+    def retrieve(*_args, **kwargs):
+        captured.update(kwargs)
+        return []
+
+    monkeypatch.setattr(main, "retrieve_knowledge", retrieve)
+    monkeypatch.setattr(main, "_stream_discussion_answer", lambda *_args: iter(["回答"]))
+    monkeypatch.setattr(main, "save_discussion_message", lambda *args, **kwargs: "discussion-uuid")
+    monkeypatch.setattr(
+        main,
+        "require_knowledge_bases",
+        lambda knowledge_base_ids: [
+            type("Base", (), {"id": knowledge_base_id})()
+            for knowledge_base_id in knowledge_base_ids
+        ],
+    )
+
+    response = asyncio.run(
+        main.brainstorm_stream_endpoint(
+            message="如何建模？",
+            discussion_id=None,
+            title=None,
+            files=None,
+            config_id=None,
+            knowledge_base_ids=["market-kb", "metric-kb"],
+        )
+    )
+
+    async def consume() -> None:
+        async for _ in response.body_iterator:
+            pass
+
+    asyncio.run(consume())
+    assert captured["knowledge_base_ids"] == ["market-kb", "metric-kb"]
 
 
 def test_streaming_discussion_prompt_sets_material_and_format_boundaries():

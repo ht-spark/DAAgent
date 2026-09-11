@@ -14,6 +14,11 @@ from llama_index.core import Document
 from llama_index.core.node_parser import SentenceWindowNodeParser
 from llama_index.core.schema import BaseNode
 
+try:
+    from .catalog import DEFAULT_KNOWLEDGE_BASE_ID
+except ImportError:  # Allows ``python KnowledgeBase/chunk.py`` as well.
+    from catalog import DEFAULT_KNOWLEDGE_BASE_ID
+
 
 KNOWLEDGE_ROOT = Path(__file__).resolve().parent
 DOCUMENTS_ROOT = KNOWLEDGE_ROOT / "documents"
@@ -28,6 +33,7 @@ def load_markdown_documents(
     documents_root: Path = DOCUMENTS_ROOT,
     *,
     document_ids_by_source: dict[str, str] | None = None,
+    knowledge_base_ids_by_source: dict[str, str] | None = None,
 ) -> list[Document]:
     """Load prepared Markdown files from the knowledge-base documents folder.
 
@@ -52,6 +58,10 @@ def load_markdown_documents(
         document_id = (document_ids_by_source or {}).get(path.name)
         if document_id:
             metadata["document_id"] = document_id
+        metadata["knowledge_base_id"] = (knowledge_base_ids_by_source or {}).get(
+            path.name,
+            DEFAULT_KNOWLEDGE_BASE_ID,
+        )
         documents.extend(
             _split_markdown_sections(
                 path.read_text(encoding="utf-8"),
@@ -110,6 +120,7 @@ def build_sentence_window_nodes(
     *,
     window_size: int = DEFAULT_WINDOW_SIZE,
     document_ids_by_source: dict[str, str] | None = None,
+    knowledge_base_ids_by_source: dict[str, str] | None = None,
 ) -> list[BaseNode]:
     """Split prepared Markdown with LlamaIndex ``SentenceWindowNodeParser``.
 
@@ -130,6 +141,7 @@ def build_sentence_window_nodes(
     documents = load_markdown_documents(
         documents_root,
         document_ids_by_source=document_ids_by_source,
+        knowledge_base_ids_by_source=knowledge_base_ids_by_source,
     )
     if not documents:
         return []
@@ -189,6 +201,7 @@ def chunk_knowledge_documents(
     *,
     window_size: int = DEFAULT_WINDOW_SIZE,
     document_ids_by_source: dict[str, str] | None = None,
+    knowledge_base_ids_by_source: dict[str, str] | None = None,
 ) -> Path:
     """Build and persist sentence-window nodes for all prepared documents.
 
@@ -205,6 +218,7 @@ def chunk_knowledge_documents(
         documents_root,
         window_size=window_size,
         document_ids_by_source=document_ids_by_source,
+        knowledge_base_ids_by_source=knowledge_base_ids_by_source,
     )
     return write_sentence_window_nodes(nodes, chunks_root)
 

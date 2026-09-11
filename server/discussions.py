@@ -63,6 +63,8 @@ def save_discussion_message(
     sources: list[dict[str, str]],
     title: str | None = None,
     attachments: list[dict[str, str]] | None = None,
+    knowledge_base_id: str = "default",
+    knowledge_base_ids: list[str] | None = None,
 ) -> str:
     """追加一轮 user/assistant 消息，返回会话 id。"""
     session_id = discussion_id or store.create_session(
@@ -71,7 +73,12 @@ def save_discussion_message(
     if title and title.strip():
         store.rename_session(session_id, title)
 
-    user_meta: dict[str, Any] = {"sources": []}
+    selected_base_ids = knowledge_base_ids or [knowledge_base_id]
+    user_meta: dict[str, Any] = {
+        "sources": [],
+        "knowledge_base_id": selected_base_ids[0],
+        "knowledge_base_ids": selected_base_ids,
+    }
     if attachments:
         user_meta["attachments"] = attachments
     store.append_message(
@@ -84,6 +91,10 @@ def save_discussion_message(
         session_id,
         store.ROLE_ASSISTANT,
         assistant_message,
-        metadata={"sources": sources or []},
+        metadata={
+            "sources": sources or [],
+            "knowledge_base_id": selected_base_ids[0],
+            "knowledge_base_ids": selected_base_ids,
+        },
     )
     return session_id

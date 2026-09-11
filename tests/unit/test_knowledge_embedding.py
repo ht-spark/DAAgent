@@ -30,6 +30,7 @@ def test_build_local_qdrant_index_uses_local_chunks(monkeypatch, tmp_path):
                         "source_file": "reference.md",
                         "source_path": "C:/example/reference.md",
                         "document_id": "document-uuid",
+                        "knowledge_base_id": "market-kb",
                         "document_title": "参考资料",
                         "section_title": "模型假设",
                         "heading_path": ["参考资料", "模型假设"],
@@ -65,6 +66,7 @@ def test_build_local_qdrant_index_uses_local_chunks(monkeypatch, tmp_path):
     assert collection.config.params.vectors.size == 3
     assert points[0].payload["source_file"] == "reference.md"
     assert points[0].payload["document_id"] == "document-uuid"
+    assert points[0].payload["knowledge_base_id"] == "market-kb"
     assert points[0].payload["heading_path"] == ["参考资料", "模型假设"]
     assert points[0].payload["chunk_index"] == 1
     assert points[0].payload["embedding_text"] == model.texts[0]

@@ -1,0 +1,19 @@
+{
+  "version": 2,
+  "bases": [
+    {
+      "id": "default",
+      "name": "默认知识库",
+      "description": "兼容已有文档的知识库",
+      "created_at": "",
+      "is_default": false
+    },
+    {
+      "id": "98a0e0d7-4f21-4974-9cb5-d45088d9adf2",
+      "name": "测试1",
+      "description": "",
+      "created_at": "2026-09-11T09:02:03.780747+00:00",
+      "is_default": false
+    }
+  ]
+}

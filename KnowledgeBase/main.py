@@ -14,6 +14,14 @@ from pathlib import Path
 from typing import Any
 
 from qdrant_client import QdrantClient
+from qdrant_client.models import (
+    FieldCondition,
+    Filter,
+    IsEmptyCondition,
+    MatchAny,
+    MatchValue,
+    PayloadField,
+)
 
 try:
     from .embedding import COLLECTION_NAME, MODEL_PATH, QDRANT_PATH, _load_huggingface_embedding_model
@@ -25,6 +33,7 @@ RECALL_LIMIT = 50
 FINAL_LIMIT = 5
 RRF_K = 60
 COMPRESSION_PREVIEW_LENGTH = 6000   #限制每个候选 chunk 在交给 LLMChainFilter 做压缩筛选时的文本长度
+DEFAULT_KNOWLEDGE_BASE_ID = "default"
 
 
 @dataclass(frozen=True)
@@ -40,6 +49,7 @@ class RetrievedChunk:
     dense_rank: int | None
     bm25_rank: int | None
     rrf_score: float
+    knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID
 
 
 def retrieve(
@@ -49,6 +59,8 @@ def retrieve(
     llm: Any | None = None,
     qdrant_path: Path = QDRANT_PATH,
     collection_name: str = COLLECTION_NAME,
+    knowledge_base_id: str | None = None,
+    knowledge_base_ids: list[str] | None = None,
 ) -> list[RetrievedChunk]:
     """Retrieve relevant chunks for a user question without HyDE.
 
@@ -77,10 +89,35 @@ def retrieve(
     try:
         if not client.collection_exists(collection_name):
             raise ValueError("知识库尚未建立向量索引")
-        dense_hits = _dense_recall(client, collection_name, query_vector)
+        selected_base_ids = list(dict.fromkeys(
+            item.strip()
+            for item in (knowledge_base_ids or [])
+            if isinstance(item, str) and item.strip()
+        ))
+        if not selected_base_ids:
+            selected_base_ids = [knowledge_base_id or DEFAULT_KNOWLEDGE_BASE_ID]
+        route_condition = FieldCondition(
+            key="knowledge_base_id",
+            match=(
+                MatchValue(value=selected_base_ids[0])
+                if len(selected_base_ids) == 1
+                else MatchAny(any=selected_base_ids)
+            ),
+        )
+        route_filter = Filter(
+            should=[
+                route_condition,
+                *(
+                    [IsEmptyCondition(is_empty=PayloadField(key="knowledge_base_id"))]
+                    if DEFAULT_KNOWLEDGE_BASE_ID in selected_base_ids
+                    else []
+                ),
+            ],
+        )
+        dense_hits = _dense_recall(client, collection_name, query_vector, route_filter)
         bm25_hits = _bm25_recall(
             normalized_question,
-            _scroll_payloads(client, collection_name),
+            _scroll_payloads(client, collection_name, route_filter),
         )
     finally:
         client.close()
@@ -104,6 +141,7 @@ def _dense_recall(
     client: QdrantClient,
     collection_name: str,
     query_vector: list[float],
+    route_filter: Filter | None = None,
 ) -> list[tuple[str | int, dict[str, Any]]]:
     """Recall the top dense candidates from Qdrant."""
     try:
@@ -112,6 +150,7 @@ def _dense_recall(
             query=query_vector,
             limit=RECALL_LIMIT,
             with_payload=True,
+            query_filter=route_filter,
         )
         points = response.points
     except AttributeError:
@@ -120,6 +159,7 @@ def _dense_recall(
             query_vector=query_vector,
             limit=RECALL_LIMIT,
             with_payload=True,
+            query_filter=route_filter,
         )
     return [
         (point.id, dict(point.payload or {}))
@@ -130,6 +170,7 @@ def _dense_recall(
 def _scroll_payloads(
     client: QdrantClient,
     collection_name: str,
+    route_filter: Filter | None = None,
 ) -> list[tuple[str | int, dict[str, Any]]]:
     """Read payloads from Qdrant for the BM25 branch."""
     offset: str | int | None = None
@@ -141,6 +182,7 @@ def _scroll_payloads(
             limit=RECALL_LIMIT,
             with_payload=True,
             with_vectors=False,
+            scroll_filter=route_filter,
         )
         records.extend((point.id, dict(point.payload or {})) for point in points)
         if offset is None:
@@ -223,6 +265,9 @@ def _fuse_by_rrf(
                 dense_rank=dense_rank,
                 bm25_rank=bm25_rank,
                 rrf_score=score,
+                knowledge_base_id=str(
+                    payload.get("knowledge_base_id") or DEFAULT_KNOWLEDGE_BASE_ID
+                ),
             )
         )
     return sorted(chunks, key=lambda chunk: (-chunk.rrf_score, str(chunk.point_id)))[:FINAL_LIMIT]

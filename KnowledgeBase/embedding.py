@@ -217,6 +217,9 @@ def _node_payload(record: dict[str, Any]) -> dict[str, Any]:
     return {
         "node_id": str(record.get("id_") or ""),
         "document_id": str(metadata.get("document_id") or ""),
+        "knowledge_base_id": str(
+            metadata.get("knowledge_base_id") or "default"
+        ),
         "text": record["text"],
         "window": str(metadata.get("window") or ""),
         "original_text": str(metadata.get("original_text") or ""),

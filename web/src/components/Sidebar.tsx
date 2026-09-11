@@ -23,9 +23,7 @@ type Props = {
 }
 
 const LOGO = (
-  <div className="sidebar-brand-mark" aria-hidden="true">
-    DA
-  </div>
+  <img className="sidebar-logo-img" src="/logo.png" alt="" aria-hidden="true" />
 )
 
 const CHAT_ICON = (

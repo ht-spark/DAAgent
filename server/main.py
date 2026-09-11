@@ -28,6 +28,15 @@ from fastapi.staticfiles import StaticFiles
 from server.files import list_figures, resolve_artifact
 from server.discussions import delete_discussion, get_discussion, list_discussions, rename_discussion, save_discussion_message
 from KnowledgeBase.chunk import DEFAULT_WINDOW_SIZE, chunk_knowledge_documents
+from KnowledgeBase.catalog import (
+    KnowledgeBaseCatalogError,
+    create_knowledge_base,
+    delete_knowledge_base,
+    list_knowledge_bases,
+    require_knowledge_base,
+    require_knowledge_bases,
+    update_knowledge_base,
+)
 from KnowledgeBase.embedding import build_local_qdrant_index, delete_document_vectors
 from KnowledgeBase.main import retrieve as retrieve_knowledge
 from KnowledgeBase.upload_file import (
@@ -67,6 +76,9 @@ from server.schemas import (
     BrainstormSource,
     CreateRunResponse,
     KnowledgeDocument,
+    KnowledgeBaseCreateBody,
+    KnowledgeBaseSummary,
+    KnowledgeBaseUpdateBody,
     KnowledgeChunkEmbedRequest,
     KnowledgeChunkEmbedResponse,
     KnowledgeChunkEmbedProgress,
@@ -129,7 +141,9 @@ def _get_knowledge_processing_progress() -> KnowledgeChunkEmbedProgress:
         return KnowledgeChunkEmbedProgress(**_knowledge_processing_progress)
 
 
-def _list_knowledge_documents() -> list[KnowledgeDocument]:
+def _list_knowledge_documents(
+    knowledge_base_id: str | None = None,
+) -> list[KnowledgeDocument]:
     """Return locally archived source documents for the knowledge-base MVP."""
     records = reconcile_conversion_records()
     if records:
@@ -144,8 +158,10 @@ def _list_knowledge_documents() -> list[KnowledgeDocument]:
                 is_conversion=record.is_conversion,
                 embedding_status=record.embedding_status,
                 indexed_chunks=record.indexed_chunks,
+                knowledge_base_id=record.knowledge_base_id,
             )
             for record in records
+            if knowledge_base_id is None or record.knowledge_base_id == knowledge_base_id
         ]
     if not KNOWLEDGE_DOCUMENTS_ROOT.exists():
         return []
@@ -165,8 +181,10 @@ def _list_knowledge_documents() -> list[KnowledgeDocument]:
             upload_success=True,
             is_markdown=path.suffix.lower() in {".md", ".markdown", ".mdown"},
             is_conversion=True,
+            knowledge_base_id="default",
         )
         for index, path in enumerate(files)
+        if knowledge_base_id in {None, "default"}
     ]
 
 
@@ -224,24 +242,114 @@ async def save_api_settings_endpoint(body: dict) -> dict:
     return {"ok": True}
 
 
+@app.get("/api/knowledge/bases", response_model=list[KnowledgeBaseSummary])
+async def list_knowledge_bases_endpoint() -> list[KnowledgeBaseSummary]:
+    """List selectable knowledge bases with their current document totals."""
+    records = list_upload_records()
+    return [
+        KnowledgeBaseSummary(
+            **base.__dict__,
+            document_count=sum(1 for item in records if item.knowledge_base_id == base.id),
+            indexed_chunks=sum(
+                item.indexed_chunks for item in records if item.knowledge_base_id == base.id
+            ),
+        )
+        for base in list_knowledge_bases()
+    ]
+
+
+@app.post("/api/knowledge/bases", response_model=KnowledgeBaseSummary)
+async def create_knowledge_base_endpoint(
+    body: KnowledgeBaseCreateBody,
+) -> KnowledgeBaseSummary:
+    """Create a knowledge base that can be selected for upload and retrieval."""
+    try:
+        base = create_knowledge_base(body.name, body.description)
+    except KnowledgeBaseCatalogError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return KnowledgeBaseSummary(**base.__dict__)
+
+
+@app.put("/api/knowledge/bases/{knowledge_base_id}", response_model=KnowledgeBaseSummary)
+async def update_knowledge_base_endpoint(
+    knowledge_base_id: str,
+    body: KnowledgeBaseUpdateBody,
+) -> KnowledgeBaseSummary:
+    """Rename or describe any knowledge base, including the legacy default route."""
+    try:
+        base = update_knowledge_base(knowledge_base_id, body.name, body.description)
+    except KnowledgeBaseCatalogError as exc:
+        raise HTTPException(status_code=404 if "不存在" in str(exc) else 400, detail=str(exc)) from exc
+    records = list_upload_records()
+    matching = [item for item in records if item.knowledge_base_id == base.id]
+    return KnowledgeBaseSummary(
+        **base.__dict__,
+        document_count=len(matching),
+        indexed_chunks=sum(item.indexed_chunks for item in matching),
+    )
+
+
+@app.delete("/api/knowledge/bases/{knowledge_base_id}")
+async def delete_knowledge_base_endpoint(knowledge_base_id: str) -> dict[str, Any]:
+    """Delete one knowledge base together with its files and indexed vectors."""
+    try:
+        base = require_knowledge_base(knowledge_base_id)
+    except KnowledgeBaseCatalogError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    document_ids = {
+        record.document_id
+        for record in list_upload_records()
+        if record.knowledge_base_id == base.id
+    }
+    try:
+        if document_ids:
+            delete_document_vectors(document_ids)
+            delete_upload_records(document_ids)
+            chunk_knowledge_documents(
+                document_ids_by_source=_document_ids_by_source(),
+                knowledge_base_ids_by_source=_knowledge_base_ids_by_source(),
+            )
+        delete_knowledge_base(base.id)
+    except (KnowledgeBaseCatalogError, KnowledgePreparationError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "deleted_id": base.id,
+        "deleted_document_ids": sorted(document_ids),
+    }
+
+
 @app.get("/api/knowledge/status", response_model=KnowledgeStatus)
-async def knowledge_status_endpoint() -> KnowledgeStatus:
+async def knowledge_status_endpoint(
+    knowledge_base_id: str | None = None,
+) -> KnowledgeStatus:
     """Expose the knowledge-base MVP state without claiming retrieval is ready."""
-    return KnowledgeStatus(documents=_list_knowledge_documents())
+    if knowledge_base_id is None:
+        return KnowledgeStatus(documents=_list_knowledge_documents())
+    try:
+        base = require_knowledge_base(knowledge_base_id)
+    except KnowledgeBaseCatalogError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return KnowledgeStatus(documents=_list_knowledge_documents(base.id))
 
 
 @app.post("/api/knowledge/documents", response_model=list[KnowledgeDocument])
 async def upload_knowledge_document_endpoint(
     document: UploadFile = File(..., description="知识库原始文档"),
+    knowledge_base_id: str | None = Form(None, description="目标知识库 ID"),
 ) -> list[KnowledgeDocument]:
     """Archive one uploaded document or ZIP; Markdown conversion is triggered separately."""
     filename = Path(document.filename or "knowledge-document").name
     if not filename:
         raise HTTPException(status_code=400, detail="文档名称不能为空")
 
+    try:
+        base = require_knowledge_base(knowledge_base_id)
+    except KnowledgeBaseCatalogError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     content = await document.read()
     try:
-        prepared = prepare_upload(filename, content)
+        prepared = prepare_upload(filename, content, knowledge_base_id=base.id)
     except (ValueError, KnowledgePreparationError) as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -256,6 +364,7 @@ async def upload_knowledge_document_endpoint(
             is_conversion=item.is_conversion,
             embedding_status="pending",
             indexed_chunks=0,
+            knowledge_base_id=base.id,
         )
         for item in prepared
     ]
@@ -276,7 +385,10 @@ async def delete_knowledge_documents_endpoint(
     try:
         delete_document_vectors(selected_ids)
         deleted_ids = delete_upload_records(selected_ids)
-        chunk_knowledge_documents(document_ids_by_source=_document_ids_by_source())
+        chunk_knowledge_documents(
+            document_ids_by_source=_document_ids_by_source(),
+            knowledge_base_ids_by_source=_knowledge_base_ids_by_source(),
+        )
     except KnowledgePreparationError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return {"deleted_ids": deleted_ids}
@@ -343,6 +455,7 @@ def _build_knowledge_vector_index(window_size: int = DEFAULT_WINDOW_SIZE):
     chunk_knowledge_documents(
         window_size=window_size,
         document_ids_by_source=_document_ids_by_source(),
+        knowledge_base_ids_by_source=_knowledge_base_ids_by_source(),
     )
     _set_knowledge_processing_progress("embedding")
     return build_local_qdrant_index()
@@ -352,6 +465,14 @@ def _document_ids_by_source() -> dict[str, str]:
     """Map generated Markdown filenames to stable upload UUIDs."""
     return {
         record.output_name: record.document_id
+        for record in list_upload_records()
+    }
+
+
+def _knowledge_base_ids_by_source() -> dict[str, str]:
+    """Map generated Markdown filenames to their retrieval route."""
+    return {
+        record.output_name: record.knowledge_base_id
         for record in list_upload_records()
     }
 
@@ -561,6 +682,8 @@ async def brainstorm_stream_endpoint(
     title: str | None = Form(None),
     files: list[UploadFile] | None = File(None),
     config_id: str | None = Form(None),
+    knowledge_base_id: str | None = Form(None),
+    knowledge_base_ids: list[str] | None = Form(None),
 ) -> StreamingResponse:
     """Stream a brainstorm reply as newline-delimited JSON events."""
     message = message.strip()
@@ -570,10 +693,25 @@ async def brainstorm_stream_endpoint(
     llm = _discussion_llm_by_id(config_id)
     if llm is None:
         raise HTTPException(status_code=400, detail="尚未配置可用的当前 API 模型")
+    try:
+        requested_base_ids = (
+            knowledge_base_ids
+            if isinstance(knowledge_base_ids, list)
+            else [knowledge_base_id] if isinstance(knowledge_base_id, str) else None
+        )
+        bases = require_knowledge_bases(requested_base_ids)
+    except KnowledgeBaseCatalogError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    selected_base_ids = [base.id for base in bases]
 
     try:
         chunks = await asyncio.wait_for(
-            asyncio.to_thread(retrieve_knowledge, message, llm=llm),
+            asyncio.to_thread(
+                retrieve_knowledge,
+                message,
+                llm=llm,
+                knowledge_base_ids=selected_base_ids,
+            ),
             timeout=BRAINSTORM_RETRIEVAL_TIMEOUT_SECONDS,
         )
     except TimeoutError as exc:
@@ -610,6 +748,7 @@ async def brainstorm_stream_endpoint(
             source_file=chunk.source_file or "未命名文档",
             document_id=chunk.document_id,
             content=chunk.context or chunk.text,
+            knowledge_base_id=chunk.knowledge_base_id,
         )
         for chunk in chunks
     ]
@@ -640,6 +779,7 @@ async def brainstorm_stream_endpoint(
             [source.model_dump() for source in sources],
             title,
             attachments,
+            knowledge_base_ids=selected_base_ids,
         )
         yield json.dumps({"type": "done", "discussion_id": saved_discussion_id}, ensure_ascii=False) + "\n"
 
@@ -720,6 +860,11 @@ async def create_run_endpoint(
         "{}", description="JSON: provider/api_key/base_url/model/max_tokens/temperature"
     ),
     task_name: str | None = Form(None, description="任务名称（用户自定义）"),
+    knowledge_base_id: str | None = Form(None, description="任务检索使用的知识库 ID"),
+    knowledge_base_ids: list[str] | None = Form(
+        None,
+        description="任务检索使用的一个或多个知识库 ID",
+    ),
 ):
     """提交一次解题任务（后台异步执行）。"""
     try:
@@ -729,6 +874,17 @@ async def create_run_endpoint(
                 cfg = ModelConfig(**cfg).model_dump(exclude_none=True)
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=400, detail=f"llm_config 解析失败: {exc}")
+
+        try:
+            requested_base_ids = (
+                knowledge_base_ids
+                if isinstance(knowledge_base_ids, list)
+                else [knowledge_base_id] if isinstance(knowledge_base_id, str) else None
+            )
+            bases = require_knowledge_bases(requested_base_ids)
+        except KnowledgeBaseCatalogError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        selected_base_ids = [base.id for base in bases]
 
         # 任务：文本优先；其次读取文本文件
         problem = problem_text
@@ -767,7 +923,13 @@ async def create_run_endpoint(
                 data_paths.append(str(dest))
 
         preview = problem.strip()[:200].replace("\n", " ")
-        create_run(run_id, preview, cfg, task_name=task_name)
+        create_run(
+            run_id,
+            preview,
+            cfg,
+            task_name=task_name,
+            knowledge_base_ids=selected_base_ids,
+        )
 
         task = asyncio.create_task(
             execute_run(
@@ -776,6 +938,7 @@ async def create_run_endpoint(
                 data_paths=data_paths,
                 output_dir=str(output_dir),
                 model_config=cfg,
+                knowledge_base_ids=selected_base_ids,
             )
         )
         _BACKGROUND_TASKS.add(task)

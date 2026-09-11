@@ -38,6 +38,8 @@ class RunSummary(BaseModel):
     error: str | None = None
     problem_preview: str | None = None
     task_name: str | None = None
+    knowledge_base_id: str = "default"
+    knowledge_base_ids: list[str] = Field(default_factory=lambda: ["default"])
 
     @classmethod
     def from_row(cls, row: dict[str, Any]) -> "RunSummary":
@@ -54,6 +56,9 @@ class RunSummary(BaseModel):
             error=row.get("error"),
             problem_preview=row.get("problem_preview"),
             task_name=row.get("task_name"),
+            knowledge_base_id=row.get("knowledge_base_id", "default"),
+            knowledge_base_ids=row.get("knowledge_base_ids")
+            or [row.get("knowledge_base_id", "default")],
         )
 
 
@@ -112,6 +117,33 @@ class KnowledgeDocument(BaseModel):
     is_conversion: bool = False
     embedding_status: str = "pending"
     indexed_chunks: int = 0
+    knowledge_base_id: str = "default"
+
+
+class KnowledgeBaseSummary(BaseModel):
+    """One selectable knowledge base and its current document totals."""
+
+    id: str
+    name: str
+    description: str = ""
+    created_at: str = ""
+    is_default: bool = False
+    document_count: int = 0
+    indexed_chunks: int = 0
+
+
+class KnowledgeBaseCreateBody(BaseModel):
+    """Fields accepted when creating a knowledge base."""
+
+    name: str = Field(min_length=1, max_length=80)
+    description: str = Field(default="", max_length=300)
+
+
+class KnowledgeBaseUpdateBody(BaseModel):
+    """Editable fields of an existing knowledge base."""
+
+    name: str = Field(min_length=1, max_length=80)
+    description: str = Field(default="", max_length=300)
 
 
 class KnowledgeStatus(BaseModel):
@@ -161,6 +193,7 @@ class BrainstormSource(BaseModel):
     source_file: str
     document_id: str
     content: str
+    knowledge_base_id: str = "default"
 
 
 class BrainstormDiscussionSummary(BaseModel):

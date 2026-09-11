@@ -102,6 +102,19 @@ def test_prepare_markdown_upload(monkeypatch, tmp_path):
     assert upload_file.list_upload_records()[0].name == "reference.md"
 
 
+def test_upload_record_keeps_target_knowledge_base(monkeypatch, tmp_path):
+    monkeypatch.setattr(upload_file, "RAW_ROOT", tmp_path / "raw")
+    monkeypatch.setattr(upload_file, "DOCUMENTS_ROOT", tmp_path / "documents")
+
+    upload_file.prepare_upload(
+        "reference.md",
+        b"# Reference\n",
+        knowledge_base_id="market-kb",
+    )
+
+    assert upload_file.list_upload_records()[0].knowledge_base_id == "market-kb"
+
+
 def test_prepare_zip_upload_expands_each_source(monkeypatch, tmp_path):
     raw_root = tmp_path / "raw"
     documents_root = tmp_path / "documents"

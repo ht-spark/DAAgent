@@ -2,10 +2,12 @@ import { memo, useEffect, useRef, useState } from 'react'
 
 import {
   fetchBrainstormDiscussion,
+  getKnowledgeBases,
   renameBrainstormDiscussion,
   streamBrainstormMessage,
   syncApiSettingsCache,
   type BrainstormSource,
+  type KnowledgeBaseSummary,
 } from '../api'
 import { loadActiveId, loadConfigs, type ApiConfig } from '../apiConfigs'
 import MarkdownContent from '../components/MarkdownContent'
@@ -94,6 +96,8 @@ export default function NewChat({
   const [sourcesCollapsed, setSourcesCollapsed] = useState(false)
   const [apiConfigs, setApiConfigs] = useState<ApiConfig[]>([])
   const [selectedConfigId, setSelectedConfigId] = useState<string>('')
+  const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBaseSummary[]>([])
+  const [knowledgeBaseIds, setKnowledgeBaseIds] = useState<string[]>(['default'])
   const fileInputRef = useRef<HTMLInputElement>(null)
   const listRef = useRef<HTMLDivElement>(null)
 
@@ -122,6 +126,16 @@ export default function NewChat({
   }, [])
 
   useEffect(() => {
+    void getKnowledgeBases().then((bases) => {
+      setKnowledgeBases(bases)
+      setKnowledgeBaseIds((current) => {
+        const available = current.filter((id) => bases.some((base) => base.id === id))
+        return available.length ? available : [bases[0]?.id ?? 'default']
+      })
+    })
+  }, [])
+
+  useEffect(() => {
     if (!discussionId) {
       setMessages([])
       setTitle('新讨论')
@@ -131,6 +145,13 @@ export default function NewChat({
     }
     void fetchBrainstormDiscussion(discussionId)
       .then((discussion) => {
+        const savedMetadata = [...discussion.messages]
+          .reverse()
+          .find((message) => message.metadata?.knowledge_base_ids?.length || message.metadata?.knowledge_base_id)
+          ?.metadata
+        const savedRoutes = savedMetadata?.knowledge_base_ids
+          ?? (savedMetadata?.knowledge_base_id ? [savedMetadata.knowledge_base_id] : [])
+        if (savedRoutes.length) setKnowledgeBaseIds(savedRoutes)
         setMessages(
           discussion.messages.map((m) => ({
             role: m.role,
@@ -199,6 +220,7 @@ export default function NewChat({
           onDone: onDiscussionId,
         },
         selectedConfigId || null,
+        knowledgeBaseIds,
       )
     } catch (error) {
       setMessages((current) => [
@@ -238,6 +260,9 @@ export default function NewChat({
           resumeRunId={resumeRunId}
           initialProblem={initialProblem}
           onViewResult={onViewResult}
+          knowledgeBases={knowledgeBases}
+          knowledgeBaseIds={knowledgeBaseIds}
+          onKnowledgeBaseIdsChange={setKnowledgeBaseIds}
         />
       </div>
     )
@@ -331,15 +356,35 @@ export default function NewChat({
                 rows={2}
               />
               <div className="rag-composer-bar">
-                <button
-                  type="button"
-                  className="rag-btn"
-                  title="多知识库选择接口尚未接入"
-                  onClick={() => fileInputRef.current?.click()}
-                  disabled={isSubmitting}
-                >
-                  知识库
-                </button>
+                <details className="rag-kb-picker">
+                  <summary title="选择本轮检索使用的知识库">
+                    {knowledgeBaseIds.length === 1
+                      ? knowledgeBases.find((base) => base.id === knowledgeBaseIds[0])?.name ?? '选择知识库'
+                      : `已选 ${knowledgeBaseIds.length} 个知识库`}
+                    <span className="rag-kb-chevron" aria-hidden="true" />
+                  </summary>
+                  <div className="rag-kb-menu">
+                    {knowledgeBases.map((base) => (
+                      <label key={base.id}>
+                        <input
+                          type="checkbox"
+                          checked={knowledgeBaseIds.includes(base.id)}
+                          disabled={isSubmitting}
+                          onChange={() => setKnowledgeBaseIds((current) => {
+                            if (current.includes(base.id)) {
+                              return current.length === 1
+                                ? current
+                                : current.filter((id) => id !== base.id)
+                            }
+                            return [...current, base.id]
+                          })}
+                        />
+                        <span>{base.name}</span>
+                        <small>{base.document_count}</small>
+                      </label>
+                    ))}
+                  </div>
+                </details>
                 <button
                   type="button"
                   className="rag-btn"

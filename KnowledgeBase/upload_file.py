@@ -19,6 +19,11 @@ from uuid import UUID, uuid4
 
 import httpx
 
+try:
+    from .catalog import DEFAULT_KNOWLEDGE_BASE_ID
+except ImportError:  # Allows ``python KnowledgeBase/upload_file.py`` as well.
+    from catalog import DEFAULT_KNOWLEDGE_BASE_ID
+
 
 KNOWLEDGE_ROOT = Path(__file__).resolve().parent
 RAW_ROOT = KNOWLEDGE_ROOT / "raw"
@@ -66,6 +71,7 @@ class UploadRecord:
     is_conversion: bool
     embedding_status: str
     indexed_chunks: int
+    knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID
 
 
 def list_upload_records() -> list[UploadRecord]:
@@ -112,6 +118,9 @@ def list_upload_records() -> list[UploadRecord]:
                         else "pending"
                     ),
                     indexed_chunks=max(0, int(item.get("indexed_chunks", 0))),
+                    knowledge_base_id=str(
+                        item.get("knowledge_base_id") or DEFAULT_KNOWLEDGE_BASE_ID
+                    ),
                 )
             )
         except (KeyError, TypeError, ValueError):
@@ -287,7 +296,12 @@ class MinerUClient:
             return archive.read(markdown_files[0]).decode("utf-8")
 
 
-def prepare_upload(filename: str, content: bytes) -> list[PreparedDocument]:
+def prepare_upload(
+    filename: str,
+    content: bytes,
+    *,
+    knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID,
+) -> list[PreparedDocument]:
     """Archive one uploaded file or ZIP; Markdown conversion happens separately.
 
     Args:
@@ -308,7 +322,7 @@ def prepare_upload(filename: str, content: bytes) -> list[PreparedDocument]:
         prepared = _prepare_archive(raw_path)
     else:
         prepared = [_prepare_file(raw_path, safe_name)]
-    return _persist_upload_records(prepared, uploaded_at)
+    return _persist_upload_records(prepared, uploaded_at, knowledge_base_id)
 
 
 def _prepare_archive(archive_path: Path) -> list[PreparedDocument]:
@@ -382,7 +396,9 @@ def _available_path(path: Path) -> Path:
 
 
 def _persist_upload_records(
-    prepared_documents: list[PreparedDocument], uploaded_at: str
+    prepared_documents: list[PreparedDocument],
+    uploaded_at: str,
+    knowledge_base_id: str,
 ) -> list[PreparedDocument]:
     """Assign permanent UUIDs and append metadata after conversion succeeds."""
     migrate_legacy_document_ids()
@@ -403,6 +419,7 @@ def _persist_upload_records(
             "is_conversion": record.is_conversion,
             "embedding_status": record.embedding_status,
             "indexed_chunks": record.indexed_chunks,
+            "knowledge_base_id": record.knowledge_base_id,
         }
         for record in existing
     ] + [
@@ -418,6 +435,7 @@ def _persist_upload_records(
             "is_conversion": document.is_conversion,
             "embedding_status": "pending",
             "indexed_chunks": 0,
+            "knowledge_base_id": knowledge_base_id,
         }
         for document in assigned
     ]
@@ -519,6 +537,7 @@ def _write_upload_records(records: list[UploadRecord]) -> None:
                 "is_conversion": record.is_conversion,
                 "embedding_status": record.embedding_status,
                 "indexed_chunks": record.indexed_chunks,
+                "knowledge_base_id": record.knowledge_base_id,
             }
             for record in records
         ]

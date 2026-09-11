@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { confirmBudget, createRun, checkBackendOnline, getRun, getRunMonitor, getPaper, getFigures, renameRun, submitClarification, type RunMonitor } from '../api'
+import { confirmBudget, createRun, checkBackendOnline, getRun, getRunMonitor, getPaper, getFigures, renameRun, submitClarification, type KnowledgeBaseSummary, type RunMonitor } from '../api'
 import { loadConfigs, loadActiveId, ApiConfig } from '../apiConfigs'
 import { NODE_CN, fmtQid, formatCurrentStep, formatProgressLine, nextProgressQuestionId } from '../progressFormat'
 
@@ -519,12 +519,22 @@ type Props = {
   onViewResult: (runId: string) => void
   /** 从灵感讨论带入的预填任务文本 */
   initialProblem?: string
+  knowledgeBases?: KnowledgeBaseSummary[]
+  knowledgeBaseIds?: string[]
+  onKnowledgeBaseIdsChange?: (knowledgeBaseIds: string[]) => void
 }
 
 let _seq = 1
 const nextId = () => _seq++
 
-export default function ChatModeling({ resumeRunId, onViewResult, initialProblem = '' }: Props) {
+export default function ChatModeling({
+  resumeRunId,
+  onViewResult,
+  initialProblem = '',
+  knowledgeBases = [],
+  knowledgeBaseIds = ['default'],
+  onKnowledgeBaseIdsChange,
+}: Props) {
   const [messages, setMessages] = useState<ChatMsg[]>([])
   const [problemText, setProblemText] = useState(initialProblem)
   const [problemFile, setProblemFile] = useState<File | null>(null)
@@ -1046,6 +1056,7 @@ export default function ChatModeling({ resumeRunId, onViewResult, initialProblem
     }
     fd.append('llm_config', JSON.stringify(cfg))
     if (taskName.trim()) fd.append('task_name', taskName.trim())
+    knowledgeBaseIds.forEach((id) => fd.append('knowledge_base_ids', id))
 
     try {
       const r = await createRun(fd)
@@ -1134,6 +1145,27 @@ export default function ChatModeling({ resumeRunId, onViewResult, initialProblem
         <section className="task-setup-form">
           <label className="task-setup-label" htmlFor="task-name">任务名称</label>
           <input id="task-name" className="task-setup-input" value={taskName} onChange={(event) => { setTaskName(event.target.value); setTaskNameDraft(event.target.value) }} placeholder="" />
+          <span className="task-setup-label">检索知识库（可多选）</span>
+          <div className="task-kb-options">
+            {knowledgeBases.map((base) => (
+              <label key={base.id}>
+                <input
+                  type="checkbox"
+                  checked={knowledgeBaseIds.includes(base.id)}
+                  disabled={busy}
+                  onChange={() => onKnowledgeBaseIdsChange?.(
+                    knowledgeBaseIds.includes(base.id)
+                      ? knowledgeBaseIds.length === 1
+                        ? knowledgeBaseIds
+                        : knowledgeBaseIds.filter((id) => id !== base.id)
+                      : [...knowledgeBaseIds, base.id],
+                  )}
+                />
+                <span>{base.name}</span>
+                <small>{base.document_count} 份文档</small>
+              </label>
+            ))}
+          </div>
           <div className="task-upload-grid">
             <label className="task-upload-slot">
               <span>任务文件</span><strong>{problemFile?.name || '选择 Markdown 或 TXT 文件'}</strong>

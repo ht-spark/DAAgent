@@ -2,31 +2,30 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 
 import {
   convertKnowledgeDocuments,
+  createKnowledgeBase,
   deleteKnowledgeDocuments,
+  getKnowledgeBases,
   getKnowledgeStatus,
+  type KnowledgeBaseSummary,
   type KnowledgeDocument,
   uploadKnowledgeDocument,
 } from '../api'
-import { appendKnowledgeHistory } from '../knowledgeHistory'
 import { formatKnowledgeDocumentId } from '../knowledgeDocumentId'
 
 const PAGE_SIZE = 10
 
 export default function KnowledgeBase({
   onNext,
-  startEmpty = false,
-  visibleDocumentIds,
-  onVisibleIdsChange,
+  initialKnowledgeBaseId,
+  onKnowledgeBaseIdChange,
 }: {
   onNext: () => void
-  /** 新批次模式：初始不加载已有文件，表格从空白开始，仅展示本次上传。 */
-  startEmpty?: boolean
-  /** 历史批次模式：只展示这些文档 ID（用于从历史记录回看某次上传）。 */
-  visibleDocumentIds?: string[]
-  /** 当前展示的文档 ID 变化时上报，供后续统计页保持同一批次作用域。 */
-  onVisibleIdsChange?: (documentIds: string[]) => void
+  initialKnowledgeBaseId?: string
+  onKnowledgeBaseIdChange?: (knowledgeBaseId: string) => void
 }) {
   const [documents, setDocuments] = useState<KnowledgeDocument[]>([])
+  const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBaseSummary[]>([])
+  const [knowledgeBaseId, setKnowledgeBaseId] = useState(initialKnowledgeBaseId ?? '')
   const [currentPage, setCurrentPage] = useState(1)
   const [loading, setLoading] = useState(true)
   const [uploadProgress, setUploadProgress] = useState<{ total: number; done: number; currentName: string } | null>(null)
@@ -37,17 +36,36 @@ export default function KnowledgeBase({
   const [deleting, setDeleting] = useState(false)
   const fileInput = useRef<HTMLInputElement>(null)
   const uploading = uploadProgress !== null
+  useEffect(() => {
+    void getKnowledgeBases()
+      .then((bases) => {
+        setKnowledgeBases(bases)
+        setKnowledgeBaseId((current) => {
+          const requested = initialKnowledgeBaseId && bases.some((base) => base.id === initialKnowledgeBaseId)
+            ? initialKnowledgeBaseId
+            : current
+          const next = bases.some((base) => base.id === requested) ? requested : bases[0]?.id ?? ''
+          if (next) onKnowledgeBaseIdChange?.(next)
+          return next
+        })
+      })
+      .catch((reason: unknown) => setError(
+        reason instanceof Error ? reason.message : '无法读取知识库列表。',
+      ))
+  }, [initialKnowledgeBaseId, onKnowledgeBaseIdChange])
 
   useEffect(() => {
-    if (startEmpty && (!visibleDocumentIds || visibleDocumentIds.length === 0)) {
+    if (!knowledgeBaseId) {
+      setDocuments([])
       setLoading(false)
       return
     }
-    getKnowledgeStatus()
+    setLoading(true)
+    setSelectedIds(new Set())
+    getKnowledgeStatus(knowledgeBaseId)
       .then((status) =>
         setDocuments(
           status.documents
-            .filter((doc) => !visibleDocumentIds || visibleDocumentIds.includes(doc.id))
             .map((doc) => ({
               ...doc,
               id: doc.id || crypto.randomUUID(),
@@ -59,15 +77,7 @@ export default function KnowledgeBase({
       )
       .catch((reason: unknown) => setError(reason instanceof Error ? reason.message : '无法连接知识库服务。'))
       .finally(() => setLoading(false))
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
-
-  // 当前批次文件清单变化时同步给父级，保证后续统计页展示同一批数据。
-  useEffect(() => {
-    if (!onVisibleIdsChange) return
-    onVisibleIdsChange(documents.map((doc) => doc.id))
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [documents])
+  }, [knowledgeBaseId])
 
   const uploadFiles = useCallback(async (files: FileList | null | undefined) => {
     if (!files || files.length === 0) return
@@ -79,7 +89,7 @@ export default function KnowledgeBase({
       const file = fileList[i]
       setUploadProgress((prev) => (prev ? { ...prev, currentName: file.name } : prev))
       try {
-        const prepared = await uploadKnowledgeDocument(file)
+        const prepared = await uploadKnowledgeDocument(file, knowledgeBaseId)
         setDocuments((current) => [
           ...current.filter((item) => !prepared.some((document) => document.name === item.name)),
           ...prepared.map((doc) => ({
@@ -90,19 +100,8 @@ export default function KnowledgeBase({
             is_conversion: doc.is_conversion ?? false,
           })),
         ])
-        appendKnowledgeHistory({
-          action: 'upload',
-          detail: prepared.map((doc) => doc.name).join('、') || file.name,
-          status: 'success',
-          documentIds: prepared.map((doc) => doc.id),
-        })
       } catch (reason) {
         failedNames.push(file.name)
-        appendKnowledgeHistory({
-          action: 'upload',
-          detail: file.name,
-          status: 'failure',
-        })
       } finally {
         setUploadProgress((prev) => (prev ? { ...prev, done: i + 1 } : prev))
       }
@@ -113,7 +112,22 @@ export default function KnowledgeBase({
     setCurrentPage(1)
     setUploadProgress(null)
     if (fileInput.current) fileInput.current.value = ''
-  }, [])
+  }, [knowledgeBaseId])
+
+  async function addKnowledgeBase() {
+    const name = window.prompt('请输入新知识库名称')?.trim()
+    if (!name) return
+    setError('')
+    try {
+      const created = await createKnowledgeBase(name)
+      setKnowledgeBases((current) => [...current, created])
+      setKnowledgeBaseId(created.id)
+      onKnowledgeBaseIdChange?.(created.id)
+      setDocuments([])
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '创建知识库失败。')
+    }
+  }
 
   function handleDrop(event: React.DragEvent) {
     event.preventDefault()
@@ -153,26 +167,11 @@ export default function KnowledgeBase({
       )
       if (failed.length > 0) {
         setError(`${failed.length} 个文件转换失败：${failed.join('、')}`)
-        appendKnowledgeHistory({
-          action: 'convert',
-          detail: `成功 ${convertedIds.length} 个，失败 ${failed.length} 个`,
-          status: 'failure',
-        })
       } else {
         setSelectedIds(new Set())
-        appendKnowledgeHistory({
-          action: 'convert',
-          detail: `已转换 ${convertedIds.length} 个文件`,
-          status: 'success',
-        })
       }
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : '格式转换失败。')
-      appendKnowledgeHistory({
-        action: 'convert',
-        detail: `尝试转换 ${documentIds.length} 个文件`,
-        status: 'failure',
-      })
     } finally {
       setConverting(false)
     }
@@ -191,18 +190,8 @@ export default function KnowledgeBase({
       setDocuments((current) => current.filter((document) => !deletedSet.has(document.id)))
       setSelectedIds(new Set())
       setCurrentPage(1)
-      appendKnowledgeHistory({
-        action: 'delete',
-        detail: `已删除 ${deletedIds.length} 个文件`,
-        status: 'success',
-      })
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : '删除知识库文件失败。')
-      appendKnowledgeHistory({
-        action: 'delete',
-        detail: `尝试删除 ${documentIds.length} 个文件`,
-        status: 'failure',
-      })
     } finally {
       setDeleting(false)
     }
@@ -226,6 +215,28 @@ export default function KnowledgeBase({
           <h1 className="page-title">知识库维护</h1>
           <p className="page-sub">上传并管理领域资料，为 RAG 检索提供上下文。</p>
         </div>
+        <div className="kb-route-controls">
+          <label>
+            <span>当前知识库</span>
+            <select
+              value={knowledgeBaseId}
+              onChange={(event) => {
+                setKnowledgeBaseId(event.target.value)
+                onKnowledgeBaseIdChange?.(event.target.value)
+              }}
+              disabled={uploading || converting || deleting}
+            >
+              {knowledgeBases.map((base) => (
+                <option key={base.id} value={base.id}>
+                  {base.name} · {base.document_count} 份
+                </option>
+              ))}
+            </select>
+          </label>
+          <button type="button" className="api-btn" onClick={() => void addKnowledgeBase()}>
+            新建知识库
+          </button>
+        </div>
       </div>
 
       {error && <div className="err-box">{error}</div>}
@@ -241,7 +252,7 @@ export default function KnowledgeBase({
             }}
             onDragLeave={() => setDragOver(false)}
             onDrop={handleDrop}
-            onClick={() => !uploading && fileInput.current?.click()}
+            onClick={() => knowledgeBaseId && !uploading && fileInput.current?.click()}
           >
             <input
               ref={fileInput}
