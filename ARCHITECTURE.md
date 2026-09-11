@@ -26,24 +26,12 @@
 data_analysis/
 ├── ARCHITECTURE.md          ← 本文件
 │
-├── agent/                   # Agent 决策编排层（大脑）
+├── agent/                   #   Agent 决策编排层（大脑）
 │   ├── graph.py             #   驱动循环：串联 loop（决策）与 harness（执行）
 │   ├── loop.py              #   决策循环：LLM 推理 → 输出 Action（不执行）
 │   ├── state.py             #   Agent 状态：对话历史 + 检索结果 + 工具结果
-│   ├── planner.py           #   复杂问题分解：将大问题拆成多跳检索子问题
-│   ├── prompts/             #   Agent System Prompt 与工具描述模板
-│   │   ├── system.md        #     系统提示词（角色、检索策略、引用规范）
-│   │   ├── tool_descriptions.md  # 工具描述（供 LLM 选择工具时参考）
-│   │   ├── query_rewrite.md #     查询改写提示词（同义扩展、多跳拆解）
-│   │   └── reflection.md    #     信息充分性自评（够不够？要不要再查？）
-│   └── tools/               #   Agent 可调用的工具定义（schema + 描述，不含执行逻辑）
-│       ├── registry.py      #     工具注册与发现机制
-│       ├── retrieval_tools.py   # 知识库检索（核心工具）
-│       ├── data_tools.py    #     数据加载、画像、探索
-│       ├── viz_tools.py     #     图表生成
-│       ├── modeling_tool.py #     触发建模工作流（包装 scr/math_modeling_agent）
-│       └── export_tools.py  #     导出报告（带引用的 Markdown / DOCX）
-│
+│   └── planner.py           #   复杂问题分解：将大问题拆成多跳检索子问题
+
 ├── rag/                     # RAG 管线层（检索基础设施）
 │   ├── ingest/              #   文档摄入管线
 │   │   ├── loader.py        #     文档加载：PDF/DOCX/PPTX/MD/TXT/图片
@@ -96,6 +84,20 @@ data_analysis/
 │   ├── output_guard.py      #   输出审查：防泄露、防幻觉标记
 │   ├── permissions.py       #   权限：知识库级访问控制（不同用户看不同库）
 │   └── audit.py             #   操作审计
+│
+├── prompts/             #   Agent System Prompt 与工具描述模板
+│     ├── system.md        #     系统提示词（角色、检索策略、引用规范）
+│     ├── tool_descriptions.md  # 工具描述（供 LLM 选择工具时参考）
+│     ├── query_rewrite.md   #     查询改写提示词（同义扩展、多跳拆解）
+│     └── reflection.md    #     信息充分性自评（够不够？要不要再查？）
+│
+├── tools/                     # Agent 可调用的工具定义（schema + 描述，不含执行逻辑）
+│     ├── registry.py          # 工具注册与发现机制
+│     ├── retrieval_tools.py   # 知识库检索（核心工具）
+│     ├── data_tools.py        # 数据加载、画像、探索
+│     ├── viz_tools.py         # 图表生成
+│     ├── modeling_tool.py     # 触发建模工作流（包装 scr/math_modeling_agent）
+│     └── export_tools.py      # 导出报告（带引用的 Markdown / DOCX）
 │
 ├── evaluation/              # 评测与质量
 │   ├── test_cases/          #   固定测试集：问题 + 期望引用 + 期望答案

@@ -1,4 +1,4 @@
-"""Decision orchestration for the RAG agent."""
+"""Agent 决策编排层。"""
 
 from .loop import (
     Action,
@@ -12,16 +12,20 @@ from .loop import (
     ToolSpec,
     UnknownToolError,
 )
+from .state import AgentMessage, AgentState, Observation
 
 __all__ = [
     "Action",
     "AgentLoop",
     "AgentLoopError",
+    "AgentMessage",
+    "AgentState",
     "AgentStateView",
     "Decision",
     "DecisionParseError",
     "Finish",
     "IterationLimitError",
+    "Observation",
     "ToolSpec",
     "UnknownToolError",
 ]

@@ -64,10 +64,11 @@ F1: rag/ 检索管线（地基）
 - `agent/state.py` — Agent 状态模型（对话历史 + 检索结果 + 工具结果）
 - `agent/loop.py` — ReAct 决策循环（Thought → Action → Observation）
 - `agent/graph.py` — 驱动循环（串联 loop 与 harness）
-- `agent/prompts/system.md` — 系统提示词（角色、检索策略、引用规范）
-- `agent/prompts/reflection.md` — 信息充分性自评
-- `agent/tools/registry.py` — 工具注册与发现
-- `agent/tools/retrieval_tools.py` — 检索工具（包装 F1 的 rag/）
+- `prompts/system.md` — 系统提示词（角色、检索策略、引用规范）
+- `prompts/tool_descriptions.md` — 工具描述模板（供 LLM 选择工具时参考）
+- `prompts/reflection.md` — 信息充分性自评
+- `tools/registry.py` — 工具注册与发现
+- `tools/retrieval_tools.py` — 检索工具（包装 F1 的 rag/）
 - `runtime/harness.py` — 执行框架（超时、错误捕获、日志）
 
 **验收标准**：
@@ -156,8 +157,8 @@ F1: rag/ 检索管线（地基）
 
 - `agent/planner.py` — 复杂问题分解为多跳检索子问题
 - `rag/retrieve/query_rewrite.py` — 查询改写（同义扩展、指代消解）
-- `agent/prompts/query_rewrite.md` — 查询改写提示词
-- `agent/tools/registry.py` 更新 — 注册新工具
+- `prompts/query_rewrite.md` — 查询改写提示词
+- `tools/registry.py` 更新 — 注册新工具
 
 **验收标准**：
 
@@ -175,11 +176,11 @@ F1: rag/ 检索管线（地基）
 
 **交付物**：
 
-- `agent/tools/data_tools.py` — 数据加载、画像、探索
-- `agent/tools/code_tools.py` — 执行 Python 分析代码
-- `agent/tools/viz_tools.py` — 图表生成
-- `agent/tools/modeling_tool.py` — 包装 scr/math_modeling_agent
-- `agent/tools/export_tools.py` — 导出报告
+- `tools/data_tools.py` — 数据加载、画像、探索
+- `tools/code_tools.py` — 执行 Python 分析代码
+- `tools/viz_tools.py` — 图表生成
+- `tools/modeling_tool.py` — 包装 scr/math_modeling_agent
+- `tools/export_tools.py` — 导出报告
 - `runtime/sandbox.py` — 代码执行沙箱
 
 **验收标准**：

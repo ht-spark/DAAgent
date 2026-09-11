@@ -248,6 +248,13 @@ def _response_text(response: Any) -> str:
 
 def _json_text(value: Any) -> str:
     try:
-        return json.dumps(value, ensure_ascii=False, indent=2, default=str)
+        return json.dumps(value, ensure_ascii=False, indent=2, default=_json_default)
     except (TypeError, ValueError) as exc:
         raise AgentLoopError("Agent 状态无法序列化为决策上下文") from exc
+
+
+def _json_default(value: Any) -> Any:
+    """将状态模型转换为 LLM 可读取的 JSON 结构。"""
+    if isinstance(value, BaseModel):
+        return value.model_dump(mode="json")
+    return str(value)
