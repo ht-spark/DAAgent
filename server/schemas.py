@@ -177,6 +177,7 @@ class BrainstormDiscussionMessage(BaseModel):
     role: str
     content: str
     sources: list[BrainstormSource] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class BrainstormDiscussion(BaseModel):

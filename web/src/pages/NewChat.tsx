@@ -4,8 +4,10 @@ import {
   fetchBrainstormDiscussion,
   renameBrainstormDiscussion,
   streamBrainstormMessage,
+  syncApiSettingsCache,
   type BrainstormSource,
 } from '../api'
+import { loadActiveId, loadConfigs, type ApiConfig } from '../apiConfigs'
 import MarkdownContent from '../components/MarkdownContent'
 import ChatModeling from './ChatModeling'
 
@@ -15,12 +17,6 @@ type Message = {
   role: 'assistant' | 'user'
   content: string
   sources?: BrainstormSource[]
-}
-
-const WELCOME_MESSAGE: Message = {
-  role: 'assistant',
-  content:
-    '你好，我是 MMAgent 灵感助手。请输入建模问题、已有假设或分析方向，我会从知识库检索相关片段并附引用。',
 }
 
 const ChatMessage = memo(function ChatMessage({
@@ -89,19 +85,45 @@ export default function NewChat({
 }: Props) {
   const [mode, setMode] = useState<Mode>(resumeRunId ? 'modeling' : initialMode)
   const [draft, setDraft] = useState('')
-  const [messages, setMessages] = useState<Message[]>([WELCOME_MESSAGE])
+  const [messages, setMessages] = useState<Message[]>([])
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [files, setFiles] = useState<File[]>([])
   const [title, setTitle] = useState('新讨论')
   const [activeSourceKey, setActiveSourceKey] = useState<string | null>(null)
   const [activeSources, setActiveSources] = useState<BrainstormSource[]>([])
   const [sourcesCollapsed, setSourcesCollapsed] = useState(false)
+  const [apiConfigs, setApiConfigs] = useState<ApiConfig[]>([])
+  const [selectedConfigId, setSelectedConfigId] = useState<string>('')
   const fileInputRef = useRef<HTMLInputElement>(null)
   const listRef = useRef<HTMLDivElement>(null)
 
+  function applyApiConfigs(configs: ApiConfig[], activeId: string | null) {
+    setApiConfigs(configs)
+    if (configs.length === 0) {
+      setSelectedConfigId('')
+      return
+    }
+    const preferred = configs.find((c) => c.id === activeId) ?? configs[0]
+    setSelectedConfigId((current) =>
+      configs.some((c) => c.id === current) ? current : preferred.id,
+    )
+  }
+
+  useEffect(() => {
+    let cancelled = false
+    applyApiConfigs(loadConfigs(), loadActiveId())
+    void syncApiSettingsCache().then((synced) => {
+      if (!synced || cancelled) return
+      applyApiConfigs(loadConfigs(), loadActiveId())
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
   useEffect(() => {
     if (!discussionId) {
-      setMessages([WELCOME_MESSAGE])
+      setMessages([])
       setTitle('新讨论')
       setActiveSources([])
       setActiveSourceKey(null)
@@ -123,7 +145,6 @@ export default function NewChat({
       })
       .catch((error) =>
         setMessages([
-          WELCOME_MESSAGE,
           {
             role: 'assistant',
             content: error instanceof Error ? error.message : '加载讨论记录失败。',
@@ -151,27 +172,34 @@ export default function NewChat({
       { role: 'assistant', content: '' },
     ])
     try {
-      await streamBrainstormMessage(message, discussionId, title, attachedFiles, {
-        onSources: (sources) => {
-          setActiveSources(sources)
-          setActiveSourceKey(null)
-          setMessages((current) =>
-            current.map((item, index) =>
-              index === current.length - 1 ? { ...item, sources } : item,
-            ),
-          )
+      await streamBrainstormMessage(
+        message,
+        discussionId,
+        title,
+        attachedFiles,
+        {
+          onSources: (sources) => {
+            setActiveSources(sources)
+            setActiveSourceKey(null)
+            setMessages((current) =>
+              current.map((item, index) =>
+                index === current.length - 1 ? { ...item, sources } : item,
+              ),
+            )
+          },
+          onToken: (content) => {
+            setMessages((current) =>
+              current.map((item, index) =>
+                index === current.length - 1
+                  ? { ...item, content: `${item.content}${content}` }
+                  : item,
+              ),
+            )
+          },
+          onDone: onDiscussionId,
         },
-        onToken: (content) => {
-          setMessages((current) =>
-            current.map((item, index) =>
-              index === current.length - 1
-                ? { ...item, content: `${item.content}${content}` }
-                : item,
-            ),
-          )
-        },
-        onDone: onDiscussionId,
-      })
+        selectedConfigId || null,
+      )
     } catch (error) {
       setMessages((current) => [
         ...current.slice(0, -1),
@@ -300,7 +328,6 @@ export default function NewChat({
                     void submit()
                   }
                 }}
-                placeholder="基于知识库提问，例如：我们的退款政策和竞品相比有什么优势？"
                 rows={2}
               />
               <div className="rag-composer-bar">
@@ -329,7 +356,38 @@ export default function NewChat({
                   accept=".md,.markdown,.txt,.json,.csv,.xlsx,.xlsm,.png,.jpg,.jpeg,.webp,.gif"
                   onChange={(event) => setFiles(Array.from(event.target.files ?? []))}
                 />
-                <span className="rag-composer-hint">回答仅基于已索引文档，结论附引用</span>
+                {apiConfigs.length > 0 ? (
+                  <label className="rag-model-select" title="选择对话使用的模型（来自 API 设置）">
+                    <select
+                      value={selectedConfigId}
+                      onChange={(event) => setSelectedConfigId(event.target.value)}
+                      disabled={isSubmitting}
+                      aria-label="选择模型"
+                    >
+                      {apiConfigs.map((config) => (
+                        <option key={config.id} value={config.id}>
+                          {config.model || config.name || '未命名模型'}
+                        </option>
+                      ))}
+                    </select>
+                    <svg
+                      className="rag-model-chevron"
+                      width="12"
+                      height="12"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2.2"
+                      aria-hidden="true"
+                    >
+                      <path d="M6 9l6 6 6-6" strokeLinecap="round" strokeLinejoin="round" />
+                    </svg>
+                  </label>
+                ) : (
+                  <span className="rag-model-empty" title="尚未在 API 管理中配置模型">
+                    未配置模型
+                  </span>
+                )}
                 <button
                   type="button"
                   className="rag-send"

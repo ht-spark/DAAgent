@@ -303,12 +303,14 @@ export async function streamBrainstormMessage(
     onToken: (content: string) => void
     onDone: (discussionId: string) => void
   },
+  configId?: string | null,
 ): Promise<void> {
   let res: Response
   const form = new FormData()
   form.append('message', message)
   form.append('title', title)
   if (discussionId) form.append('discussion_id', discussionId)
+  if (configId) form.append('config_id', configId)
   files.forEach((file) => form.append('files', file))
   try {
     res = await fetch('/api/knowledge/brainstorm/stream', {

@@ -14,10 +14,6 @@ import {
 } from '../apiConfigs'
 import { persistApiSettings, syncApiSettingsCache } from '../api'
 
-type Props = {
-  onUsed?: () => void
-}
-
 const EMPTY: Omit<ApiConfig, 'id' | 'createdAt'> = {
   name: '',
   provider: 'openai',
@@ -41,7 +37,7 @@ const SERVICE_META: Record<ExternalService, { name: string; keyLabel: string; hi
   },
 }
 
-export default function ApiManager({ onUsed }: Props) {
+export default function ApiManager() {
   const [configs, setConfigs] = useState<ApiConfig[]>([])
   const [activeId, setActiveId] = useState<string | null>(null)
   const [editing, setEditing] = useState<Partial<ApiConfig>>(EMPTY)
@@ -150,10 +146,6 @@ export default function ApiManager({ onUsed }: Props) {
     persist(configs, id)
   }
 
-  function useAndGo() {
-    if (onUsed) onUsed()
-  }
-
   /** 扩展服务输入防抖：停止输入 400ms 后才写后端文件 */
   function schedulePersist(snapshot: Parameters<typeof persistApiSettings>[0]) {
     if (persistDebounceRef.current !== null) window.clearTimeout(persistDebounceRef.current)
@@ -178,22 +170,26 @@ export default function ApiManager({ onUsed }: Props) {
   }
 
   return (
-    <div className="page">
-      <div className="page-head">
-        <div>
+    <div className="page api-page">
+      <div className="api-toolbar">
+        <div className="page-head-copy">
           <h1 className="page-title">API 管理</h1>
           <div className="page-sub">
-            管理 LLM、联网检索和文档转换服务。配置保存在本机（服务端本地文件），重新进入网页自动恢复。
+            管理 LLM、联网检索和文档转换服务。配置保存在本机，重新进入网页会自动恢复。
           </div>
         </div>
-        <button className="submit-btn" style={{ width: 'auto', marginTop: 0, padding: '10px 18px' }} onClick={startNew}>
-          + 新增配置
+        <button type="button" className="api-add-btn" onClick={startNew}>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" aria-hidden="true">
+            <path d="M12 5v14M5 12h14" strokeLinecap="round" />
+          </svg>
+          新增配置
         </button>
       </div>
 
       {(isNew || editing.id) && (
-        <div className="form-card" style={{ marginBottom: 22 }}>
+        <div className="api-editor">
           <h2>{isNew ? '新增 API 配置' : '编辑 API 配置'}</h2>
+          <p className="api-editor-lead">填写服务商与密钥信息，保存后可作为默认模型使用。</p>
 
           <div className="field">
             <label>配置名（用于区分多个 API）</label>
@@ -275,15 +271,11 @@ export default function ApiManager({ onUsed }: Props) {
             </div>
           </div>
 
-          <div style={{ display: 'flex', gap: 10, marginTop: 16 }}>
-            <button className="submit-btn" style={{ marginTop: 0 }} onClick={save}>
+          <div className="api-editor-actions">
+            <button type="button" className="api-save" onClick={save}>
               保存
             </button>
-            <button
-              className="back-link"
-              onClick={cancelEdit}
-              style={{ cursor: 'pointer', fontFamily: 'inherit' }}
-            >
+            <button type="button" className="api-cancel" onClick={cancelEdit}>
               取消
             </button>
           </div>
@@ -296,49 +288,76 @@ export default function ApiManager({ onUsed }: Props) {
           <p>选择默认配置后，新建任务会自动带入。</p>
         </div>
 
-      {configs.length === 0 ? (
-        <div className="form-card center muted">
-          还没有保存任何 API。点 <strong>新增配置</strong> 添加一个。
-        </div>
-      ) : (
-        <div className="api-grid">
-          {configs.map((c) => {
-            const isActive = c.id === activeId
-            return (
-              <div key={c.id} className={`api-card ${isActive ? 'active' : ''}`}>
-                <div className="api-card-head">
-                  <div className="api-name">{c.name}</div>
-                  {isActive && <span className="api-badge">当前使用</span>}
-                </div>
-                <div className="api-meta">
-                  <div><span className="k">服务商</span><span className="v">{c.provider}</span></div>
-                  <div><span className="k">模型</span><span className="v">{c.model || '—'}</span></div>
-                  <div><span className="k">Base URL</span><span className="v">{c.baseUrl || '默认'}</span></div>
-                  <div><span className="k">Key</span><span className="v mono">{c.apiKey ? maskKey(c.apiKey) : '未填'}</span></div>
-                  <div><span className="k">最大输出</span><span className="v">{c.maxTokens ?? 20000} tokens</span></div>
-                  <div><span className="k">Temperature</span><span className="v">{c.temperature ?? 0.3}</span></div>
-                </div>
-                <div className="api-actions">
-                  {!isActive && (
-                    <button className="api-btn primary" onClick={() => setActive(c.id)}>
-                      使用
+        {configs.length === 0 ? (
+          <div className="api-empty">
+            还没有保存任何 API。
+            <br />
+            点击右上角 <strong>新增配置</strong>，添加你的第一个模型服务。
+          </div>
+        ) : (
+          <div className="api-grid">
+            {configs.map((c) => {
+              const isActive = c.id === activeId
+              const mark = (c.name || c.provider || '?').trim().slice(0, 1).toUpperCase()
+              return (
+                <div key={c.id} className={`api-card ${isActive ? 'active' : ''}`}>
+                  <div className="api-card-head">
+                    <div className="api-name">
+                      <span className="api-name-mark" aria-hidden="true">{mark}</span>
+                      <span className="api-name-text">{c.name}</span>
+                    </div>
+                    {isActive && <span className="api-badge">当前使用</span>}
+                  </div>
+                  <div className="api-meta">
+                    <div>
+                      <span className="k">服务商</span>
+                      <span className="v">{c.provider}</span>
+                    </div>
+                    <div>
+                      <span className="k">模型</span>
+                      <span className="v">{c.model || '未填写'}</span>
+                    </div>
+                    <div>
+                      <span className="k">Base URL</span>
+                      <span className="v">{c.baseUrl || '默认'}</span>
+                    </div>
+                    <div>
+                      <span className="k">Key</span>
+                      <span className="v mono">{c.apiKey ? maskKey(c.apiKey) : '未填写'}</span>
+                    </div>
+                    <div>
+                      <span className="k">最大输出</span>
+                      <span className="v">{c.maxTokens ?? 20000} tokens</span>
+                    </div>
+                    <div>
+                      <span className="k">Temperature</span>
+                      <span className="v">{c.temperature ?? 0.3}</span>
+                    </div>
+                  </div>
+                  <div className="api-actions">
+                    {!isActive && (
+                      <button type="button" className="api-btn primary" onClick={() => setActive(c.id)}>
+                        设为默认
+                      </button>
+                    )}
+                    <button type="button" className="api-btn" onClick={() => startEdit(c)}>
+                      编辑
                     </button>
-                  )}
-                  <button className="api-btn" onClick={() => startEdit(c)}>编辑</button>
-                  <button className="api-btn danger" onClick={() => remove(c.id)}>删除</button>
+                    <button type="button" className="api-btn danger" onClick={() => remove(c.id)}>
+                      删除
+                    </button>
+                  </div>
                 </div>
-              </div>
-            )
-          })}
-        </div>
-      )}
-
+              )
+            })}
+          </div>
+        )}
       </section>
 
       <section className="api-section" aria-labelledby="external-api-heading">
         <div className="api-section-head">
           <h2 id="external-api-heading">扩展服务</h2>
-          <p>这些配置不参与 LLM 默认模型选择。</p>
+          <p>用于联网检索与文档转换，不参与默认模型选择。</p>
         </div>
         <div className="api-grid">
           {(Object.keys(SERVICE_META) as ExternalService[]).map((service) => {
@@ -347,7 +366,12 @@ export default function ApiManager({ onUsed }: Props) {
             return (
               <div className="api-card" key={service}>
                 <div className="api-card-head">
-                  <div className="api-name">{meta.name}</div>
+                  <div className="api-name">
+                    <span className="api-name-mark" aria-hidden="true">
+                      {service === 'tavily' ? 'T' : 'M'}
+                    </span>
+                    <span className="api-name-text">{meta.name}</span>
+                  </div>
                   <span className={`api-badge ${config.apiKey ? '' : 'muted-badge'}`}>
                     {config.apiKey ? '已配置' : '未配置'}
                   </span>
@@ -376,14 +400,6 @@ export default function ApiManager({ onUsed }: Props) {
           })}
         </div>
       </section>
-
-      {configs.length > 0 && (
-        <div className="center" style={{ marginTop: 24 }}>
-          <button className="submit-btn" style={{ width: 'auto', display: 'inline-flex' }} onClick={useAndGo}>
-            用当前默认 API 开始建模 →
-          </button>
-        </div>
-      )}
     </div>
   )
 }

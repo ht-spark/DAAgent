@@ -370,6 +370,19 @@ def _document_chunk_counts(source_chunk_counts: dict[str, int]) -> dict[str, int
     }
 
 
+def _create_llm_from_api_config(config: dict) -> object | None:
+    """Build an LLM client from one persisted API settings entry."""
+    return create_llm(
+        provider=config.get("provider"),
+        api_key=config.get("apiKey"),
+        base_url=config.get("baseUrl"),
+        model=config.get("model"),
+        max_tokens=config.get("maxTokens"),
+        temperature=config.get("temperature"),
+        fallback_env=False,
+    )
+
+
 def _active_discussion_llm():
     """Create the LLM selected in the persisted API settings."""
     settings = _read_api_settings() or {}
@@ -383,15 +396,24 @@ def _active_discussion_llm():
     )
     if config is None:
         return None
-    return create_llm(
-        provider=config.get("provider"),
-        api_key=config.get("apiKey"),
-        base_url=config.get("baseUrl"),
-        model=config.get("model"),
-        max_tokens=config.get("maxTokens"),
-        temperature=config.get("temperature"),
-        fallback_env=False,
+    return _create_llm_from_api_config(config)
+
+
+def _discussion_llm_by_id(config_id: str | None):
+    """Create the LLM for a requested API config id, falling back to the active one."""
+    if not isinstance(config_id, str) or not config_id:
+        return _active_discussion_llm()
+    settings = _read_api_settings() or {}
+    configs = settings.get("configs")
+    if not isinstance(configs, list):
+        return None
+    config = next(
+        (item for item in configs if isinstance(item, dict) and item.get("id") == config_id),
+        None,
     )
+    if config is None:
+        return None
+    return _create_llm_from_api_config(config)
 
 
 def _message_with_attachments(
@@ -538,13 +560,14 @@ async def brainstorm_stream_endpoint(
     discussion_id: str | None = Form(None),
     title: str | None = Form(None),
     files: list[UploadFile] | None = File(None),
+    config_id: str | None = Form(None),
 ) -> StreamingResponse:
     """Stream a brainstorm reply as newline-delimited JSON events."""
     message = message.strip()
     if not message and not files:
         raise HTTPException(status_code=400, detail="请输入讨论内容或上传附件")
     attachments = await _prepare_discussion_attachments(files)
-    llm = _active_discussion_llm()
+    llm = _discussion_llm_by_id(config_id)
     if llm is None:
         raise HTTPException(status_code=400, detail="尚未配置可用的当前 API 模型")
 
@@ -570,7 +593,18 @@ async def brainstorm_stream_endpoint(
         if discussion_id
         else None
     )
-    history = previous_discussion.get("messages", []) if previous_discussion else []
+    history: list[dict] = []
+    for m in (previous_discussion.get("messages", []) if previous_discussion else []):
+        if m.get("role") not in ("user", "assistant"):
+            continue
+        history.append(
+            {
+                "role": m.get("role"),
+                "content": m.get("content") or "",
+                "attachments": m.get("attachments"),
+                "sources": m.get("sources"),
+            }
+        )
     sources = [
         BrainstormSource(
             source_file=chunk.source_file or "未命名文档",
@@ -640,7 +674,12 @@ async def get_brainstorm_discussion_endpoint(
     if discussion is None:
         raise HTTPException(status_code=404, detail="未找到该讨论记录")
     messages = [
-        BrainstormDiscussionMessage(**message)
+        BrainstormDiscussionMessage(
+            role=message.get("role") or "user",
+            content=message.get("content") or "",
+            sources=message.get("sources") or [],
+            metadata=message.get("metadata") or {},
+        )
         for message in discussion.get("messages", [])
     ]
     return BrainstormDiscussion(

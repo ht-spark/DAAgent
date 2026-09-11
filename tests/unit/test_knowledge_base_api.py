@@ -149,7 +149,15 @@ def test_brainstorm_stream_endpoint_yields_tokens_and_saves_on_completion(monkey
     saved: list[object] = []
     monkeypatch.setattr(main, "save_discussion_message", lambda *args: saved.append(args) or "discussion-uuid")
 
-    response = asyncio.run(main.brainstorm_stream_endpoint(message="如何建模？", files=None))
+    response = asyncio.run(
+        main.brainstorm_stream_endpoint(
+            message="如何建模？",
+            discussion_id=None,
+            title=None,
+            files=None,
+            config_id=None,
+        )
+    )
 
     async def consume() -> list[str]:
         return [part async for part in response.body_iterator]

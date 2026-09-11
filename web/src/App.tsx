@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useState } from 'react'
 import Sidebar from './components/Sidebar'
+import SettingsModal from './components/SettingsModal'
 import { syncApiSettingsCache } from './api'
+import { applyUiSettings, loadUiSettings } from './settings'
 import NewTask from './pages/NewTask'
 import History from './pages/History'
 import ApiManager from './pages/ApiManager'
 import DiscussionHistory from './pages/DiscussionHistory'
 import Docs from './pages/Docs'
-import BrainstormHub from './pages/BrainstormHub'
 import KnowledgeBaseHub from './pages/KnowledgeBaseHub'
 import KnowledgeBase from './pages/KnowledgeBase'
 import KnowledgeBaseStats from './pages/KnowledgeBaseStats'
@@ -18,7 +19,7 @@ import KnowledgeBaseHistory from './pages/KnowledgeBaseHistory'
 type Section = 'modeling' | 'brainstorm' | 'api' | 'docs'
 type TaskStep = 'submit' | 'progress' | 'result'
 type ModelingView = 'overview' | 'new' | 'history' | 'discussion-history'
-type BrainstormView = 'overview' | 'knowledge-hub' | 'knowledge' | 'knowledge-history' | 'stats' | 'chunking' | 'chunking-progress' | 'retrieval-ready'
+type BrainstormView = 'knowledge-hub' | 'knowledge' | 'knowledge-history' | 'stats' | 'chunking' | 'chunking-progress' | 'retrieval-ready'
 
 const SYMBOLS = ['∫', '∑', '∏', '∂', '∇', '∞', 'π', 'σ', 'μ', 'λ', 'α', 'β', 'γ', 'θ', 'Δ', 'Ω']
 
@@ -26,7 +27,7 @@ export default function App() {
   // 入口直接进入新建聊天；历史讨论在侧边栏「最近」中打开
   const [section, setSection] = useState<Section>('modeling')
   const [modelingView, setModelingView] = useState<ModelingView>('new')
-  const [brainstormView, setBrainstormView] = useState<BrainstormView>('overview')
+  const [brainstormView, setBrainstormView] = useState<BrainstormView>('knowledge-hub')
   const [discussionId, setDiscussionId] = useState<string | null>(null)
   // 知识库上传页的进入方式：新批次（空表开始）或回看历史某次上传批次。
   const [kbEntry, setKbEntry] = useState<{
@@ -41,6 +42,7 @@ export default function App() {
     windowSize: 5,
   })
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const [settingsOpen, setSettingsOpen] = useState(false)
   const [task, setTask] = useState<{ step: TaskStep; runId: string | null }>({
     step: 'submit',
     runId: null,
@@ -50,6 +52,7 @@ export default function App() {
   // 换浏览器/端口或清缓存后无需重新设置。
   useEffect(() => {
     void syncApiSettingsCache()
+    applyUiSettings(loadUiSettings())
   }, [])
 
   // 知识库上传页展示的文档清单变化时，记录为当前批次的 ID 集合。
@@ -89,8 +92,10 @@ export default function App() {
         onHome={() => startNew()}
         onModeling={() => startNew()}
         onBrainstorm={() => {
+          // 侧边栏「知识库」直接进入维护总览（知识库更新 / 历史记录），
+          // 不再经过单卡片的中转页。
           setSection('brainstorm')
-          setBrainstormView('overview')
+          setBrainstormView('knowledge-hub')
         }}
         onOpenDiscussion={(id) => {
           setDiscussionId(id)
@@ -100,7 +105,12 @@ export default function App() {
         }}
         onApi={() => setSection('api')}
         onDocs={() => setSection('docs')}
+        onSettings={() => setSettingsOpen(true)}
+        onDiscussionDeleted={(id) => {
+          if (discussionId === id) setDiscussionId(null)
+        }}
       />
+      <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
 
       <main className={`content ${sidebarCollapsed ? 'content--collapsed' : ''}`}>
         <div className="content-top-actions">
@@ -135,9 +145,6 @@ export default function App() {
               setModelingView('new')
             }}
           />
-        )}
-        {section === 'brainstorm' && brainstormView === 'overview' && (
-          <BrainstormHub onKnowledge={() => setBrainstormView('knowledge-hub')} />
         )}
         {section === 'brainstorm' && brainstormView === 'knowledge-hub' && (
           <KnowledgeBaseHub
@@ -195,7 +202,7 @@ export default function App() {
           <VectorRetrievalReady onBack={() => setBrainstormView('chunking-progress')} />
         )}
         {section === 'modeling' && modelingView === 'history' && <History onOpen={openFromHistory} />}
-        {section === 'api' && <ApiManager onUsed={() => startNew()} />}
+        {section === 'api' && <ApiManager />}
         {section === 'docs' && <Docs />}
       </main>
     </div>

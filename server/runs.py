@@ -1,14 +1,14 @@
-"""运行注册表（SQLite）与后台执行管理。
+"""运行执行管理：内存态（取消/预算/澄清）+ 统一 store 持久化。
 
 本地单机单人：用 asyncio.to_thread 在后台线程跑同步的 run_graph，
-进度事件通过 progress_callback 写回注册表，供前端轮询。
+进度事件写入 tool 消息的 metadata，供前端 SSE 与历史回看。
 """
 from __future__ import annotations
 
 import asyncio
 import json
-import os
-import sqlite3
+import shutil
+import sys
 import threading
 import time
 from datetime import datetime, timezone
@@ -17,18 +17,18 @@ from typing import Any
 
 # 确保项目根目录在 sys.path，便于 import scr.math_modeling_agent
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in __import__("sys").path:
-    __import__("sys").path.insert(0, str(PROJECT_ROOT))
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from scr.math_modeling_agent.graph import run_graph  # noqa: E402
 from scr.math_modeling_agent.llm import create_llm  # noqa: E402
 from scr.runtime.budget import BudgetType  # noqa: E402
+from server import store  # noqa: E402
 
-_DB_PATH = PROJECT_ROOT / "server" / "runs.db"
 _MAX_PROGRESS_EVENTS = 500
+_RUN_KIND = "modeling"
 
 _lock = threading.Lock()
-_conn: sqlite3.Connection | None = None
 
 # 取消意图标志：run_id -> True。仅存在于进程内存；
 # 服务重启后后台任务本就不会存活，无需持久化。
@@ -163,266 +163,225 @@ def clear_clarification_pending(run_id: str) -> None:
         _clarification_decisions.pop(run_id, None)
 
 
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
-
-
-def _get_conn() -> sqlite3.Connection:
-    global _conn
-    if _conn is None:
-        _conn = sqlite3.connect(str(_DB_PATH), check_same_thread=False)
-        _conn.row_factory = sqlite3.Row
-        _conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS runs (
-                run_id TEXT PRIMARY KEY,
-                status TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                workflow_status TEXT,
-                current_question_id TEXT,
-                results_count INTEGER,
-                paper_title TEXT,
-                review_status TEXT,
-                error TEXT,
-                problem_preview TEXT,
-                model_config TEXT,
-                progress_json TEXT,
-                artifacts_json TEXT,
-                task_name TEXT
-            )
-            """
-        )
-        # 兼容已有数据库：若 task_name 列不存在则添加
-        cols = {r[1] for r in _conn.execute("PRAGMA table_info(runs)").fetchall()}
-        if "task_name" not in cols:
-            _conn.execute("ALTER TABLE runs ADD COLUMN task_name TEXT")
-        _conn.commit()
-    return _conn
-
-
 # ---------------------------------------------------------------------------
-# 注册表写操作
+# 持久化：tool 消息（id = run_id）+ 元数据
 # ---------------------------------------------------------------------------
 
 
-def create_run(run_id: str, problem_preview: str, model_config: dict, task_name: str | None = None) -> None:
-    """登记一次新运行（状态 queued）。"""
-    safe_cfg = {
-        k: v for k, v in (model_config or {}).items() if k != "api_key"
+def _load_run_meta(run_id: str) -> dict[str, Any] | None:
+    msg = store.get_message(run_id)
+    if msg is None or msg.get("role") != store.ROLE_TOOL:
+        return None
+    meta = msg.get("metadata") or {}
+    if meta.get("kind") and meta.get("kind") != _RUN_KIND:
+        return None
+    return {
+        "run_id": run_id,
+        "session_id": msg["session_id"],
+        "created_at": msg["created_at"],
+        "updated_at": msg["updated_at"],
+        "problem_preview": meta.get("problem_preview"),
+        "task_name": meta.get("task_name"),
+        "model_config": meta.get("model_config") or {},
+        "status": meta.get("status", "queued"),
+        "workflow_status": meta.get("workflow_status"),
+        "current_question_id": meta.get("current_question_id"),
+        "results_count": meta.get("results_count"),
+        "paper_title": meta.get("paper_title"),
+        "review_status": meta.get("review_status"),
+        "error": meta.get("error"),
+        "progress": meta.get("progress") or [],
+        "artifacts": meta.get("artifacts") or [],
+        "output_dir": meta.get("output_dir"),
     }
-    with _lock:
-        _get_conn().execute(
-            """
-            INSERT INTO runs
-                (run_id, status, created_at, updated_at, problem_preview, model_config, progress_json, artifacts_json, task_name)
-            VALUES (?, 'queued', ?, ?, ?, ?, '[]', '[]', ?)
-            """,
-            (
-                run_id,
-                _now(),
-                _now(),
-                problem_preview,
-                json.dumps(safe_cfg, ensure_ascii=False),
-                task_name,
-            ),
-        )
-        _get_conn().commit()
+
+
+def _update_run_meta(run_id: str, **fields: Any) -> None:
+    store.update_message_metadata(run_id, metadata=fields, merge=True)
+
+
+def create_run(
+    run_id: str,
+    problem_preview: str,
+    model_config: dict,
+    task_name: str | None = None,
+    session_id: str | None = None,
+) -> str:
+    """登记一次新运行：建会话（若无）并写入 tool 消息。返回 session_id。"""
+    safe_cfg = {k: v for k, v in (model_config or {}).items() if k != "api_key"}
+    title = (task_name or problem_preview or "建模任务").strip()[:80] or "建模任务"
+    sid = session_id or store.create_session(title)
+    store.append_message(
+        sid,
+        store.ROLE_TOOL,
+        content=problem_preview or title,
+        message_id=run_id,
+        metadata={
+            "kind": _RUN_KIND,
+            "status": "queued",
+            "problem_preview": problem_preview,
+            "task_name": task_name,
+            "model_config": safe_cfg,
+            "progress": [],
+            "artifacts": [],
+            "error": None,
+        },
+    )
+    return sid
 
 
 def rename_run(run_id: str, task_name: str) -> bool:
-    """更新任务名称。返回是否成功（run_id 存在即成功）。"""
-    with _lock:
-        cur = _get_conn().execute(
-            "UPDATE runs SET task_name=?, updated_at=? WHERE run_id=?",
-            (task_name, _now(), run_id),
-        )
-        _get_conn().commit()
-        return cur.rowcount > 0
+    """更新任务名称（同时同步会话标题）。"""
+    msg = store.get_message(run_id)
+    if msg is None:
+        return False
+    name = (task_name or "").strip()[:80]
+    if not name:
+        return False
+    _update_run_meta(run_id, task_name=name)
+    store.rename_session(msg["session_id"], name)
+    return True
 
 
 def mark_running(run_id: str) -> None:
-    _update(run_id, status="running")
+    _update_run_meta(run_id, status="running")
 
 
 def mark_failed(run_id: str, error: str) -> None:
-    _update(run_id, status="failed", error=error)
+    _update_run_meta(run_id, status="failed", error=error)
 
 
 def mark_cancelled(run_id: str) -> None:
-    _update(run_id, status="cancelled", error="用户已中断任务")
+    _update_run_meta(run_id, status="cancelled", error="用户已中断任务")
 
 
 def set_result(run_id: str, summary: dict, artifacts: list[str]) -> None:
-    fields = {
-        "status": "succeeded",
-        "workflow_status": summary.get("workflow_status"),
-        "paper_title": summary.get("paper_title"),
-        "review_status": summary.get("review_status"),
-        "results_count": summary.get("results_count"),
-        "artifacts_json": json.dumps(artifacts, ensure_ascii=False),
-    }
-    _update(run_id, **fields)
+    _update_run_meta(
+        run_id,
+        status="succeeded",
+        workflow_status=summary.get("workflow_status"),
+        paper_title=summary.get("paper_title"),
+        review_status=summary.get("review_status"),
+        results_count=summary.get("results_count"),
+        artifacts=artifacts,
+        error=None,
+    )
 
 
 def append_progress(run_id: str, event: dict) -> None:
     """记录一个进度事件，并同步更新当前状态快照。"""
     with _lock:
-        conn = _get_conn()
-        row = conn.execute(
-            "SELECT progress_json, workflow_status, current_question_id, results_count FROM runs WHERE run_id=?",
-            (run_id,),
-        ).fetchone()
-        events = json.loads(row["progress_json"]) if row else []
+        row = _load_run_meta(run_id)
+        if row is None:
+            return
+        events = list(row.get("progress") or [])
         events.append(event)
         if len(events) > _MAX_PROGRESS_EVENTS:
             events = events[-_MAX_PROGRESS_EVENTS:]
-        # 用事件里的状态快照更新行
-        wf = event.get("workflow_status") or (row["workflow_status"] if row else None)
-        cq = event.get("current_question_id") or (row["current_question_id"] if row else None)
+        wf = event.get("workflow_status") or row.get("workflow_status")
+        cq = event.get("current_question_id") or row.get("current_question_id")
         rc = event.get("results_count")
         if rc is None:
-            rc = row["results_count"] if row else None
-        conn.execute(
-            """
-            UPDATE runs SET progress_json=?, workflow_status=?, current_question_id=?,
-                results_count=?, updated_at=? WHERE run_id=?
-            """,
-            (json.dumps(events, ensure_ascii=False), wf, cq, rc, _now(), run_id),
+            rc = row.get("results_count")
+        _update_run_meta(
+            run_id,
+            progress=events,
+            workflow_status=wf,
+            current_question_id=cq,
+            results_count=rc,
         )
-        conn.commit()
-
-
-def _update(run_id: str, **fields: Any) -> None:
-    fields["updated_at"] = _now()
-    cols = ", ".join(f"{k}=?" for k in fields)
-    vals = list(fields.values()) + [run_id]
-    with _lock:
-        _get_conn().execute(f"UPDATE runs SET {cols} WHERE run_id=?", vals)
-        _get_conn().commit()
-
-
-# ---------------------------------------------------------------------------
-# 注册表读操作
-# ---------------------------------------------------------------------------
 
 
 def get_run(run_id: str) -> dict | None:
     with _lock:
-        row = _get_conn().execute("SELECT * FROM runs WHERE run_id=?", (run_id,)).fetchone()
-    if row is None:
-        return None
-    return _row_to_dict(row)
+        return _load_run_meta(run_id)
 
 
 def list_runs(limit: int = 50) -> list[dict]:
-    with _lock:
-        rows = _get_conn().execute(
-            "SELECT * FROM runs ORDER BY created_at DESC LIMIT ?", (limit,)
-        ).fetchall()
-    return [_row_to_dict(r) for r in rows]
+    items = store.list_tool_messages(kind=_RUN_KIND, limit=limit)
+    out: list[dict] = []
+    for msg in items:
+        meta = msg.get("metadata") or {}
+        out.append(
+            {
+                "run_id": msg["id"],
+                "session_id": msg["session_id"],
+                "created_at": msg["created_at"],
+                "updated_at": msg["updated_at"],
+                "status": meta.get("status", "queued"),
+                "workflow_status": meta.get("workflow_status"),
+                "current_question_id": meta.get("current_question_id"),
+                "results_count": meta.get("results_count"),
+                "paper_title": meta.get("paper_title"),
+                "review_status": meta.get("review_status"),
+                "error": meta.get("error"),
+                "problem_preview": meta.get("problem_preview"),
+                "task_name": meta.get("task_name"),
+                "progress": meta.get("progress") or [],
+                "artifacts": meta.get("artifacts") or [],
+                "model_config": meta.get("model_config") or {},
+            }
+        )
+    return out
 
 
 def cleanup_stale_runs(max_age_seconds: int = 300) -> int:
-    """把处于 queued/running 但已超过 max_age_seconds 没更新的运行标记为 failed。
-
-    用于服务重启时自动清理：旧的后台线程已随旧进程死亡，但 DB 里的状态
-    不会自动更新。重启时扫一遍，僵尸任务会转成 failed，历史页不再误显示
-    正在运行，也允许用户在历史页删除这些记录。
-
-    Returns:
-        清理的任务数。
-    """
+    """把处于 queued/running 但已超过 max_age_seconds 没更新的运行标记为 failed。"""
     now = datetime.now(timezone.utc)
     cleaned = 0
-    with _lock:
-        rows = _get_conn().execute(
-            "SELECT run_id, status, updated_at FROM runs WHERE status IN ('queued', 'running')"
-        ).fetchall()
-        for row in rows:
-            try:
-                ts = datetime.fromisoformat(row["updated_at"])
-            except (ValueError, TypeError):
-                ts = now
-            age = (now - ts).total_seconds()
-            if age >= max_age_seconds:
-                _get_conn().execute(
-                    "UPDATE runs SET status=?, error=?, updated_at=? WHERE run_id=?",
-                    (
-                        "failed",
-                        f"服务重启后未完成（已停止 {int(age)}s）",
-                        _now(),
-                        row["run_id"],
-                    ),
-                )
-                cleaned += 1
-        if cleaned:
-            _get_conn().commit()
+    for row in list_runs(limit=500):
+        if row.get("status") not in ("queued", "running"):
+            continue
+        try:
+            ts = datetime.fromisoformat(row["updated_at"])
+        except (ValueError, TypeError):
+            ts = now
+        age = (now - ts).total_seconds()
+        if age >= max_age_seconds:
+            _update_run_meta(
+                row["run_id"],
+                status="failed",
+                error=f"服务重启后未完成（已停止 {int(age)}s）",
+            )
+            cleaned += 1
     return cleaned
 
 
 def cancel_run(run_id: str) -> dict:
-    """请求中断一个正在执行（queued/running）的任务。
-
-    实现方式：设置内存标志 `_cancel_flags[run_id]=True`，后台线程在下一个
-    节点边界检测到后抛出 RuntimeError 中断 stream。对于尚未开始的 queued
-    任务，直接标 cancelled，后台线程根本不会启动该 run_graph。
-
-    Returns:
-        {"cancelled": bool, "blocked": bool, "reason": str}
-    """
-    with _lock:
-        row = _get_conn().execute(
-            "SELECT run_id, status FROM runs WHERE run_id=?", (run_id,)
-        ).fetchone()
-        if row is None:
-            return {"cancelled": False, "blocked": False, "reason": "not_found"}
-        status = row["status"]
-        if status in ("succeeded", "failed", "cancelled"):
-            return {
-                "cancelled": False,
-                "blocked": True,
-                "reason": f"任务已结束（{status}），无需中断",
-            }
-        # 标记取消意图
-        _cancel_flags[run_id] = True
-        if status == "queued":
-            # 还没开始跑，直接判定为已取消
-            _get_conn().execute(
-                "UPDATE runs SET status=?, error=?, updated_at=? WHERE run_id=?",
-                ("cancelled", "用户已中断任务", _now(), run_id),
-            )
-            _get_conn().commit()
-        return {"cancelled": True, "blocked": False, "reason": "ok"}
+    """请求中断一个正在执行（queued/running）的任务。"""
+    row = get_run(run_id)
+    if row is None:
+        return {"cancelled": False, "blocked": False, "reason": "not_found"}
+    status = row["status"]
+    if status in ("succeeded", "failed", "cancelled"):
+        return {
+            "cancelled": False,
+            "blocked": True,
+            "reason": f"任务已结束（{status}），无需中断",
+        }
+    _cancel_flags[run_id] = True
+    if status == "queued":
+        mark_cancelled(run_id)
+    return {"cancelled": True, "blocked": False, "reason": "ok"}
 
 
 def delete_run(run_id: str) -> dict:
-    """删除一条运行记录（DB 行 + 产物目录）。
+    """删除一条运行记录（tool 消息 + 产物目录）。
 
-    出于安全考虑：正在执行（queued/running）的任务不允许删除，
-    避免后台线程读写被删目录引发异常。
-
-    Returns:
-        {"deleted": bool, "blocked": bool, "reason": str}
+    出于安全考虑：正在执行（queued/running）的任务不允许删除。
     """
-    with _lock:
-        row = _get_conn().execute(
-            "SELECT run_id, status FROM runs WHERE run_id=?", (run_id,)
-        ).fetchone()
-        if row is None:
-            return {"deleted": False, "blocked": False, "reason": "not_found"}
-        status = row["status"]
-        if status in ("queued", "running"):
-            return {
-                "deleted": False,
-                "blocked": True,
-                "reason": f"任务仍在执行（{status}），请等待完成后再删除",
-            }
-        _get_conn().execute("DELETE FROM runs WHERE run_id=?", (run_id,))
-        _get_conn().commit()
+    row = get_run(run_id)
+    if row is None:
+        return {"deleted": False, "blocked": False, "reason": "not_found"}
+    status = row["status"]
+    if status in ("queued", "running"):
+        return {
+            "deleted": False,
+            "blocked": True,
+            "reason": f"任务仍在执行（{status}），请等待完成后再删除",
+        }
 
-    # 删除产物目录（best-effort，缺失也忽略）
-    import shutil
+    store.delete_message(run_id)
 
     art_dir = PROJECT_ROOT / "artifacts" / run_id
     try:
@@ -431,13 +390,6 @@ def delete_run(run_id: str) -> dict:
     except Exception:
         pass
     return {"deleted": True, "blocked": False, "reason": "ok"}
-
-
-def _row_to_dict(row: sqlite3.Row) -> dict:
-    d = dict(row)
-    d["progress"] = json.loads(d.pop("progress_json") or "[]")
-    d["artifacts"] = json.loads(d.pop("artifacts_json") or "[]")
-    return d
 
 
 # ---------------------------------------------------------------------------

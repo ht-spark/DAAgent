@@ -1,50 +1,59 @@
-"""Persistent local storage for inspiration discussion history."""
+"""灵感讨论：基于统一 store（sessions + messages）的读写。
+
+对外函数签名与旧 JSON 实现保持一致，供 server.main 直接调用。
+"""
 from __future__ import annotations
 
-import json
-import uuid
-from datetime import datetime, timezone
-from pathlib import Path
-from threading import Lock
 from typing import Any
 
-
-DISCUSSIONS_PATH = Path(__file__).resolve().parent / "discussion_history.json"
-_DISCUSSIONS_LOCK = Lock()
+from server import store
 
 
 def list_discussions() -> list[dict[str, Any]]:
-    """Return local discussions ordered by most recently updated."""
-    with _DISCUSSIONS_LOCK:
-        discussions = _read_discussions()
+    """按最近更新返回会话摘要（侧栏「最近」/历史讨论）。"""
     return [
         {
             "id": item["id"],
             "title": item["title"],
             "updated_at": item["updated_at"],
         }
-        for item in sorted(discussions, key=lambda item: item["updated_at"], reverse=True)
+        for item in store.list_sessions()
     ]
 
 
 def get_discussion(discussion_id: str) -> dict[str, Any] | None:
-    """Return one saved discussion, including all of its messages."""
-    with _DISCUSSIONS_LOCK:
-        return next(
-            (item for item in _read_discussions() if item["id"] == discussion_id),
-            None,
+    """返回完整会话。消息字段兼容旧结构：sources/attachments 在顶层。"""
+    session = store.get_session(discussion_id)
+    if session is None:
+        return None
+    messages: list[dict[str, Any]] = []
+    for raw in session.get("messages", []):
+        meta = raw.get("metadata") or {}
+        messages.append(
+            {
+                "id": raw.get("id"),
+                "role": raw.get("role"),
+                "content": raw.get("content") or "",
+                "sources": meta.get("sources") or [],
+                "attachments": meta.get("attachments"),
+                "metadata": meta,
+            }
         )
+    return {
+        "id": session["id"],
+        "title": session["title"],
+        "created_at": session.get("created_at"),
+        "updated_at": session["updated_at"],
+        "messages": messages,
+    }
 
 
 def delete_discussion(discussion_id: str) -> bool:
-    """Permanently remove one saved discussion and all its messages."""
-    with _DISCUSSIONS_LOCK:
-        discussions = _read_discussions()
-        remaining = [item for item in discussions if item["id"] != discussion_id]
-        if len(remaining) == len(discussions):
-            return False
-        _write_discussions(remaining)
-        return True
+    return store.delete_session(discussion_id)
+
+
+def rename_discussion(discussion_id: str, title: str) -> bool:
+    return store.rename_session(discussion_id, title)
 
 
 def save_discussion_message(
@@ -55,67 +64,26 @@ def save_discussion_message(
     title: str | None = None,
     attachments: list[dict[str, str]] | None = None,
 ) -> str:
-    """Append one exchange, including reusable attachment context, and return its ID."""
-    now = datetime.now(timezone.utc).isoformat()
-    with _DISCUSSIONS_LOCK:
-        discussions = _read_discussions()
-        discussion = next(
-            (item for item in discussions if item["id"] == discussion_id),
-            None,
-        )
-        if discussion is None:
-            discussion = {
-                "id": str(uuid.uuid4()),
-                "title": title.strip()[:80] if title and title.strip() else user_message[:40],
-                "created_at": now,
-                "updated_at": now,
-                "messages": [],
-            }
-            discussions.append(discussion)
-        elif title and title.strip():
-            discussion["title"] = title.strip()[:80]
-        user_entry: dict[str, Any] = {"role": "user", "content": user_message, "sources": []}
-        if attachments:
-            user_entry["attachments"] = attachments
-        discussion["messages"].extend([
-            user_entry,
-            {"role": "assistant", "content": assistant_message, "sources": sources},
-        ])
-        discussion["updated_at"] = now
-        _write_discussions(discussions)
-        return str(discussion["id"])
-
-
-def rename_discussion(discussion_id: str, title: str) -> bool:
-    """Persist a user-supplied title for an existing discussion."""
-    normalized_title = title.strip()[:80]
-    if not normalized_title:
-        return False
-    with _DISCUSSIONS_LOCK:
-        discussions = _read_discussions()
-        discussion = next((item for item in discussions if item["id"] == discussion_id), None)
-        if discussion is None:
-            return False
-        discussion["title"] = normalized_title
-        discussion["updated_at"] = datetime.now(timezone.utc).isoformat()
-        _write_discussions(discussions)
-        return True
-
-
-def _read_discussions() -> list[dict[str, Any]]:
-    if not DISCUSSIONS_PATH.exists():
-        return []
-    try:
-        content = json.loads(DISCUSSIONS_PATH.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return []
-    return content if isinstance(content, list) else []
-
-
-def _write_discussions(discussions: list[dict[str, Any]]) -> None:
-    temporary_path = DISCUSSIONS_PATH.with_suffix(".json.tmp")
-    temporary_path.write_text(
-        json.dumps(discussions, ensure_ascii=False, indent=2),
-        encoding="utf-8",
+    """追加一轮 user/assistant 消息，返回会话 id。"""
+    session_id = discussion_id or store.create_session(
+        (title or user_message or "新讨论").strip()[:80]
     )
-    temporary_path.replace(DISCUSSIONS_PATH)
+    if title and title.strip():
+        store.rename_session(session_id, title)
+
+    user_meta: dict[str, Any] = {"sources": []}
+    if attachments:
+        user_meta["attachments"] = attachments
+    store.append_message(
+        session_id,
+        store.ROLE_USER,
+        user_message,
+        metadata=user_meta,
+    )
+    store.append_message(
+        session_id,
+        store.ROLE_ASSISTANT,
+        assistant_message,
+        metadata={"sources": sources or []},
+    )
+    return session_id

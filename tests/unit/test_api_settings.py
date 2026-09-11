@@ -114,3 +114,52 @@ def test_active_discussion_llm_uses_saved_generation_settings(monkeypatch, tmp_p
     assert captured["max_tokens"] == 3072
     assert captured["temperature"] == 0.1
     assert captured["fallback_env"] is False
+
+
+def test_discussion_llm_by_id_selects_requested_config(monkeypatch, tmp_path):
+    """输入框选中的 config_id 必须覆盖默认激活配置。"""
+    _use_tmp_settings(monkeypatch, tmp_path)
+    captured: dict[str, object] = {}
+
+    def fake_create_llm(**kwargs):
+        captured.clear()
+        captured.update(kwargs)
+        return f"llm-{kwargs.get('model')}"
+
+    monkeypatch.setattr(main, "create_llm", fake_create_llm)
+    asyncio.run(
+        main.save_api_settings_endpoint(
+            {
+                "configs": [
+                    {
+                        "id": "cfg_default",
+                        "provider": "openai",
+                        "apiKey": "key-default",
+                        "baseUrl": "https://default.invalid/v1",
+                        "model": "default-model",
+                        "maxTokens": 1000,
+                        "temperature": 0.2,
+                    },
+                    {
+                        "id": "cfg_picked",
+                        "provider": "custom",
+                        "apiKey": "key-picked",
+                        "baseUrl": "https://picked.invalid/v1",
+                        "model": "picked-model",
+                        "maxTokens": 2000,
+                        "temperature": 0.7,
+                    },
+                ],
+                "active_id": "cfg_default",
+            }
+        )
+    )
+
+    assert main._discussion_llm_by_id("cfg_picked") == "llm-picked-model"
+    assert captured["api_key"] == "key-picked"
+    assert captured["model"] == "picked-model"
+
+    assert main._discussion_llm_by_id(None) == "llm-default-model"
+    assert captured["model"] == "default-model"
+
+    assert main._discussion_llm_by_id("missing") is None
