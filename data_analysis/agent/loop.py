@@ -7,10 +7,19 @@ state object before calling :meth:`AgentLoop.step` again.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+import re
 from typing import Any, Literal, Mapping, Protocol, Sequence, TypeAlias
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    TypeAdapter,
+    ValidationError,
+    field_validator,
+)
+
+from ..tools.registry import ToolSpec
 
 
 class AgentLoopError(RuntimeError):
@@ -23,6 +32,10 @@ class DecisionParseError(AgentLoopError):
 
 class UnknownToolError(DecisionParseError):
     """Raised when the LLM selects a tool outside the supplied registry view."""
+
+
+class RequiredToolError(DecisionParseError):
+    """模型在必需工具成功执行前错误地结束本轮。"""
 
 
 class IterationLimitError(AgentLoopError):
@@ -45,21 +58,6 @@ class LlmClient(Protocol):
         """Return one model response for the supplied chat messages."""
 
 
-@dataclass(frozen=True)
-class ToolSpec:
-    """Tool metadata exposed to the LLM without an executable callable."""
-
-    name: str
-    description: str
-    parameters: Mapping[str, Any] = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        normalized_name = self.name.strip()
-        if not normalized_name:
-            raise ValueError("工具名称不能为空")
-        object.__setattr__(self, "name", normalized_name)
-
-
 class Action(BaseModel):
     """A request for the runtime harness to execute one registered tool."""
 
@@ -69,6 +67,15 @@ class Action(BaseModel):
     thought: str = ""
     tool_name: str = Field(min_length=1)
     arguments: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("tool_name")
+    @classmethod
+    def normalize_tool_name(cls, value: str) -> str:
+        """规范化工具名称并拒绝空白值。"""
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("工具名称不能为空")
+        return normalized
 
     @property
     def is_finish(self) -> bool:
@@ -84,6 +91,14 @@ class Finish(BaseModel):
     type: Literal["finish"] = "finish"
     thought: str = ""
     answer: str = Field(min_length=1)
+
+    @field_validator("answer")
+    @classmethod
+    def validate_answer(cls, value: str) -> str:
+        """拒绝空白最终回答，同时保留原始文本格式。"""
+        if not value.strip():
+            raise ValueError("最终回答不能为空")
+        return value
 
     @property
     def is_finish(self) -> bool:
@@ -105,6 +120,8 @@ class AgentLoop:
         system_prompt: str,
         *,
         max_iterations: int = 8,
+        decision_retries: int = 1,
+        required_tools: Sequence[str] = (),
     ) -> None:
         """Initialize the decision-only loop.
 
@@ -113,6 +130,8 @@ class AgentLoop:
             tools: Non-executable tool descriptions available for this run.
             system_prompt: Agent role, retrieval policy, and citation rules.
             max_iterations: Maximum number of decisions in one graph run.
+            decision_retries: 决策格式错误或工具名无效时的纠错重试次数。
+            required_tools: 返回最终回答前必须成功执行的工具名称。
 
         Raises:
             ValueError: If configuration is empty, duplicated, or out of range.
@@ -121,15 +140,24 @@ class AgentLoop:
             raise ValueError("system_prompt 不能为空")
         if max_iterations < 1:
             raise ValueError("max_iterations 必须大于 0")
+        if decision_retries < 0:
+            raise ValueError("decision_retries 不能为负数")
         tool_names = [tool.name for tool in tools]
         if len(tool_names) != len(set(tool_names)):
             raise ValueError("工具名称不能重复")
+        normalized_required_tools = tuple(name.strip() for name in required_tools)
+        unknown_required_tools = set(normalized_required_tools) - set(tool_names)
+        if not all(normalized_required_tools) or unknown_required_tools:
+            names = ", ".join(sorted(unknown_required_tools)) or "<空>"
+            raise ValueError(f"必需工具未注册: {names}")
 
         self._llm = llm
         self._tools = tuple(tools)
         self._tool_names = frozenset(tool_names)
         self._system_prompt = system_prompt.strip()
         self._max_iterations = max_iterations
+        self._decision_retries = decision_retries
+        self._required_tools = normalized_required_tools
 
     def step(self, state: AgentStateView) -> Decision:
         """Return the next decision without executing the selected tool.
@@ -152,11 +180,64 @@ class AgentLoop:
                 f"Agent 已达到最大决策轮数 {self._max_iterations}"
             )
 
-        response = self._llm.invoke(self.build_messages(state))
-        decision = parse_decision(_response_text(response))
-        if isinstance(decision, Action) and decision.tool_name not in self._tool_names:
-            raise UnknownToolError(f"LLM 选择了未注册工具: {decision.tool_name}")
-        return decision
+        messages = self.build_messages(state)
+        last_error: DecisionParseError | None = None
+        for attempt in range(self._decision_retries + 1):
+            response_text = _response_text(self._llm.invoke(messages))
+            try:
+                decision = parse_decision(response_text)
+                if (
+                    isinstance(decision, Action)
+                    and decision.tool_name not in self._tool_names
+                ):
+                    available = ", ".join(sorted(self._tool_names)) or "无"
+                    raise UnknownToolError(
+                        f"LLM 选择了未注册工具: {decision.tool_name}；"
+                        f"可用工具: {available}"
+                    )
+                if isinstance(decision, Finish):
+                    missing_tools = self._missing_required_tools(state)
+                    if missing_tools:
+                        raise RequiredToolError(
+                            "返回最终回答前必须先成功执行工具: "
+                            f"{', '.join(missing_tools)}"
+                        )
+                return decision
+            except DecisionParseError as exc:
+                last_error = exc
+                if attempt >= self._decision_retries:
+                    raise
+                messages.extend(
+                    [
+                        ("assistant", response_text),
+                        ("user", self._decision_correction(exc)),
+                    ]
+                )
+        raise last_error or DecisionParseError("LLM 决策纠错失败")
+
+    def _missing_required_tools(self, state: AgentStateView) -> tuple[str, ...]:
+        """返回当前状态中尚未成功执行的必需工具。"""
+        completed: set[str] = set()
+        for observation in state.observations:
+            if isinstance(observation, Mapping):
+                tool_name = observation.get("tool_name")
+                success = observation.get("success")
+            else:
+                tool_name = getattr(observation, "tool_name", None)
+                success = getattr(observation, "success", None)
+            if success is True and isinstance(tool_name, str):
+                completed.add(tool_name)
+        return tuple(name for name in self._required_tools if name not in completed)
+
+    def _decision_correction(self, error: DecisionParseError) -> str:
+        """生成一次只包含真实协议和工具名的决策纠错指令。"""
+        available = ", ".join(sorted(self._tool_names)) or "无"
+        return (
+            f"上一条决策无效：{error}。"
+            f"当前可用工具仅有：{available}。"
+            "不要创造、猜测或改写工具名；没有合适工具时返回 finish。"
+            "请严格按既定协议重新输出一个 JSON 对象。"
+        )
 
     def build_messages(self, state: AgentStateView) -> list[tuple[str, str]]:
         """Build provider-neutral chat messages for one ReAct decision."""
@@ -175,7 +256,14 @@ class AgentLoop:
             '{"type":"action","thought":"简短理由","tool_name":"工具名",'
             '"arguments":{}}。信息充分时输出：'
             '{"type":"finish","thought":"简短理由","answer":"带引用的最终回答"}。'
+            "tool_name 必须逐字复制可用工具中的 name，禁止创造或改写工具名；"
+            "没有可用工具时只能输出 finish。answer 中的换行必须按 JSON 规则转义。"
         )
+        if self._required_tools:
+            protocol += (
+                "本轮返回 finish 前必须成功调用以下工具："
+                f"{', '.join(self._required_tools)}。"
+            )
         messages: list[tuple[str, str]] = [
             ("system", f"{self._system_prompt}{protocol}")
         ]
@@ -197,22 +285,51 @@ class AgentLoop:
 
 
 def parse_decision(raw_response: str) -> Decision:
-    """Parse one strict JSON decision, accepting a single fenced JSON block."""
-    text = raw_response.strip()
+    """解析唯一决策对象，并兼容推理模型常见的文本包装。"""
+    text = re.sub(
+        r"^\s*<think>.*?</think>\s*",
+        "",
+        raw_response,
+        count=1,
+        flags=re.DOTALL | re.IGNORECASE,
+    ).strip()
     if text.startswith("```") and text.endswith("```"):
         lines = text.splitlines()
         if len(lines) >= 3 and lines[0].strip().lower() in {"```", "```json"}:
             text = "\n".join(lines[1:-1]).strip()
-    try:
-        payload = json.loads(text)
-    except json.JSONDecodeError as exc:
-        raise DecisionParseError("LLM 决策不是合法的单个 JSON 对象") from exc
+    payload = _extract_decision_payload(text)
     if not isinstance(payload, dict):
         raise DecisionParseError("LLM 决策必须是 JSON 对象")
     try:
         return _DECISION_ADAPTER.validate_python(payload)
     except ValidationError as exc:
         raise DecisionParseError(f"LLM 决策字段无效: {exc.errors()}") from exc
+
+
+def _extract_decision_payload(text: str) -> Any:
+    """从响应中提取唯一的 action 或 finish JSON 对象。"""
+    decoder = json.JSONDecoder(strict=False)
+    try:
+        return decoder.decode(text)
+    except json.JSONDecodeError as original_error:
+        candidates: list[dict[str, Any]] = []
+        for index, character in enumerate(text):
+            if character != "{":
+                continue
+            try:
+                candidate, _ = decoder.raw_decode(text, index)
+            except json.JSONDecodeError:
+                continue
+            if (
+                isinstance(candidate, dict)
+                and candidate.get("type") in {"action", "finish"}
+            ):
+                candidates.append(candidate)
+        if len(candidates) == 1:
+            return candidates[0]
+        if len(candidates) > 1:
+            raise DecisionParseError("LLM 响应包含多个决策对象，无法确定执行顺序")
+        raise DecisionParseError("LLM 决策不是合法的单个 JSON 对象") from original_error
 
 
 def _conversation_messages(messages: Sequence[Any]) -> list[tuple[str, str]]:

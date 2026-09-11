@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from pydantic import ValidationError
 
 from data_analysis.agent.loop import (
     Action,
@@ -12,6 +13,7 @@ from data_analysis.agent.loop import (
     DecisionParseError,
     Finish,
     IterationLimitError,
+    RequiredToolError,
     ToolSpec,
     UnknownToolError,
     parse_decision,
@@ -26,6 +28,16 @@ class FakeLlm:
     def invoke(self, messages: list[tuple[str, str]]) -> Any:
         self.messages = messages
         return self.response
+
+
+class SequencedLlm:
+    def __init__(self, responses: list[str]) -> None:
+        self._responses = iter(responses)
+        self.calls: list[list[tuple[str, str]]] = []
+
+    def invoke(self, messages: list[tuple[str, str]]) -> str:
+        self.calls.append(list(messages))
+        return next(self._responses)
 
 
 @dataclass
@@ -84,6 +96,47 @@ def test_parse_decision_accepts_one_fenced_json_object() -> None:
     assert isinstance(decision, Action)
 
 
+def test_parse_decision_accepts_reasoning_prefix() -> None:
+    decision = parse_decision(
+        '<think>这里是模型内部推理</think>\n'
+        '{"type":"action","thought":"读取数据",'
+        '"tool_name":"retrieve","arguments":{}}'
+    )
+
+    assert isinstance(decision, Action)
+    assert decision.tool_name == "retrieve"
+
+
+def test_parse_decision_extracts_one_json_object_from_explanation() -> None:
+    decision = parse_decision(
+        "我将按要求返回决策：\n```json\n"
+        '{"type":"action","thought":"读取数据",'
+        '"tool_name":"retrieve","arguments":{}}'
+        "\n```\n以上是本轮决策。"
+    )
+
+    assert isinstance(decision, Action)
+    assert decision.tool_name == "retrieve"
+
+
+def test_parse_decision_accepts_unescaped_newlines_in_answer() -> None:
+    decision = parse_decision(
+        '{"type":"finish","thought":"分析完成","answer":"数据概况：\n'
+        '- 共 10 行\n- 缺失 1 行"}'
+    )
+
+    assert isinstance(decision, Finish)
+    assert "共 10 行" in decision.answer
+
+
+def test_parse_decision_rejects_multiple_decision_objects() -> None:
+    with pytest.raises(DecisionParseError, match="多个决策对象"):
+        parse_decision(
+            '{"type":"action","tool_name":"retrieve","arguments":{}}\n'
+            '{"type":"finish","answer":"完成"}'
+        )
+
+
 @pytest.mark.parametrize(
     "response",
     [
@@ -91,6 +144,7 @@ def test_parse_decision_accepts_one_fenced_json_object() -> None:
         "[]",
         '{"type":"action","tool_name":"retrieve","arguments":[],"extra":1}',
         '{"type":"finish","answer":""}',
+        '{"type":"finish","answer":"   "}',
     ],
 )
 def test_parse_decision_rejects_malformed_output(response: str) -> None:
@@ -107,6 +161,87 @@ def test_step_rejects_unknown_tool() -> None:
 
     with pytest.raises(UnknownToolError, match="shell"):
         loop.step(FakeState())
+
+
+def test_step_retries_unknown_tool_with_registered_names() -> None:
+    llm = SequencedLlm(
+        [
+            '{"type":"action","tool_name":"get_data_files","arguments":{}}',
+            '{"type":"action","thought":"直接生成画像",'
+            '"tool_name":"profile_data","arguments":{}}',
+        ]
+    )
+    loop = AgentLoop(
+        llm,
+        [ToolSpec("profile_data", "对已授权数据生成画像")],
+        "必须依据真实数据回答。",
+    )
+
+    decision = loop.step(FakeState(user_query="分析上传的数据"))
+
+    assert isinstance(decision, Action)
+    assert decision.tool_name == "profile_data"
+    assert len(llm.calls) == 2
+    assert "get_data_files" in llm.calls[1][-1][1]
+    assert "profile_data" in llm.calls[1][-1][1]
+
+
+def test_step_rejects_finish_until_required_tool_succeeds() -> None:
+    llm = SequencedLlm(
+        [
+            '{"type":"finish","answer":"请重新上传数据"}',
+            '{"type":"action","thought":"读取已上传数据",'
+            '"tool_name":"profile_data","arguments":{}}',
+        ]
+    )
+    loop = AgentLoop(
+        llm,
+        [ToolSpec("profile_data", "生成基础画像")],
+        "必须依据真实数据回答。",
+        required_tools=("profile_data",),
+    )
+
+    decision = loop.step(FakeState(user_query="分析数据特点"))
+
+    assert isinstance(decision, Action)
+    assert decision.tool_name == "profile_data"
+    assert "必须先成功执行工具: profile_data" in llm.calls[1][-1][1]
+
+
+def test_step_allows_finish_after_required_tool_succeeds() -> None:
+    loop = AgentLoop(
+        FakeLlm('{"type":"finish","answer":"数据共有 10 行"}'),
+        [ToolSpec("profile_data", "生成基础画像")],
+        "必须依据真实数据回答。",
+        required_tools=("profile_data",),
+    )
+    state = FakeState(
+        observations=[{"tool_name": "profile_data", "success": True}],
+    )
+
+    decision = loop.step(state)
+
+    assert isinstance(decision, Finish)
+
+
+def test_step_fails_when_model_repeatedly_skips_required_tool() -> None:
+    loop = AgentLoop(
+        FakeLlm('{"type":"finish","answer":"请重新上传数据"}'),
+        [ToolSpec("profile_data", "生成基础画像")],
+        "必须依据真实数据回答。",
+        decision_retries=1,
+        required_tools=("profile_data",),
+    )
+
+    with pytest.raises(RequiredToolError, match="profile_data"):
+        loop.step(FakeState(user_query="分析数据特点"))
+
+
+def test_action_normalizes_tool_name_and_rejects_blank_value() -> None:
+    assert Action(tool_name=" retrieve ").tool_name == "retrieve"
+
+    with pytest.raises(ValidationError, match="工具名称不能为空"):
+        Action(tool_name="   ")
 
 
 def test_step_stops_before_calling_llm_at_iteration_limit() -> None:

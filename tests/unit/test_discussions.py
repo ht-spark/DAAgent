@@ -59,6 +59,24 @@ def test_saved_discussion_retains_attachment_context():
     assert discussions.get_discussion(discussion_id)["messages"][0]["attachments"] == attachments
 
 
+def test_saved_agent_discussion_retains_mode_and_trace():
+    trace = [{"type": "agent_action", "tool_name": "profile_data"}]
+
+    discussion_id = discussions.save_discussion_message(
+        None,
+        "生成数据画像",
+        "画像已完成",
+        [],
+        mode="agent",
+        assistant_metadata={"agent_run_id": "run-1", "agent_trace": trace},
+    )
+
+    messages = discussions.get_discussion(discussion_id)["messages"]
+    assert messages[0]["metadata"]["mode"] == "agent"
+    assert messages[1]["metadata"]["agent_run_id"] == "run-1"
+    assert messages[1]["metadata"]["agent_trace"] == trace
+
+
 def test_modeling_tool_message_lives_in_same_store():
     """建模 run 与聊天共用同一会话库。"""
     from server import runs

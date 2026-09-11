@@ -4,7 +4,7 @@
     开发模式：uv run python -m server.dev
     常规模式：uvicorn server.main:app --host 0.0.0.0 --port 8000
 
-开发模式只监控 server/ 与 scr/。不要直接使用项目根目录下的
+开发模式只监控 server/、scr/ 与 data_analysis/。不要直接使用项目根目录下的
 ``uvicorn server.main:app --reload``，否则 artifacts/ 中的建模产物会触发重载。
 """
 from __future__ import annotations
@@ -25,6 +25,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
+from data_analysis.agent.graph import iter_graph
+from data_analysis.agent.loop import Action, AgentLoop, Finish
+from data_analysis.agent.state import AgentMessage, AgentState, Observation
+from data_analysis.runtime import Harness
+from data_analysis.tools import ToolRegistry, create_data_profile_registry
 from server.files import list_figures, resolve_artifact
 from server.discussions import delete_discussion, get_discussion, list_discussions, rename_discussion, save_discussion_message
 from KnowledgeBase.chunk import DEFAULT_WINDOW_SIZE, chunk_knowledge_documents
@@ -99,6 +104,11 @@ BRAINSTORM_ANSWER_TIMEOUT_SECONDS = 120      #模型流式生成回答的硬超�
 MAX_DISCUSSION_ATTACHMENTS = 5               #单次讨论最多允许上传的附件数量
 MAX_DISCUSSION_ATTACHMENT_BYTES = 10 * 1024 * 1024    #单个附件的字节大小上限（10MB）
 MAX_DISCUSSION_ATTACHMENT_TEXT_LENGTH = 50_000    #文本类附件注入 LLM 时截断的字符数
+AGENT_RUN_TIMEOUT_SECONDS = 180                   #数据 Agent 单轮运行的硬超时时间
+MAX_AGENT_DATA_FILES = 10                         #数据 Agent 单次最多接收的文件数
+MAX_AGENT_DATA_FILE_BYTES = 20 * 1024 * 1024     #数据 Agent 单文件大小上限（20MB）
+AGENT_DATA_SUFFIXES = frozenset({".csv", ".xlsx", ".xls", ".json", ".jsonl", ".ndjson"})
+AGENT_SYSTEM_PROMPT_PATH = PROJECT_ROOT / "data_analysis" / "prompts" / "system.md"
 
 logger = logging.getLogger(__name__)
 
@@ -673,6 +683,202 @@ async def _prepare_discussion_attachments(
             raise HTTPException(status_code=400, detail=f"不支持的附件类型：{name}")
         attachments.append({"kind": "text", "name": name, "content": text[:MAX_DISCUSSION_ATTACHMENT_TEXT_LENGTH]})
     return attachments
+
+
+async def _prepare_agent_data_files(
+    files: list[UploadFile] | None,
+    run_id: str,
+) -> list[Path]:
+    """校验并保存本轮数据 Agent 获授权的数据文件。
+
+    Args:
+        files: 前端上传的数据附件。
+        run_id: 服务端生成的运行标识。
+
+    Returns:
+        已保存且可交给工具注册表授权的绝对路径。
+
+    Raises:
+        HTTPException: 文件数量、类型或大小不符合限制。
+    """
+    if not files:
+        return []
+    if len(files) > MAX_AGENT_DATA_FILES:
+        raise HTTPException(status_code=400, detail=f"最多可上传 {MAX_AGENT_DATA_FILES} 个数据文件")
+
+    prepared: list[tuple[str, bytes]] = []
+    used_names: set[str] = set()
+    for index, file in enumerate(files, start=1):
+        original_name = Path(file.filename or f"data-{index}").name
+        suffix = Path(original_name).suffix.lower()
+        if suffix not in AGENT_DATA_SUFFIXES:
+            supported = "、".join(sorted(AGENT_DATA_SUFFIXES))
+            raise HTTPException(
+                status_code=400,
+                detail=f"数据 Agent 不支持 {original_name}，当前支持 {supported}",
+            )
+        content = await file.read()
+        if len(content) > MAX_AGENT_DATA_FILE_BYTES:
+            raise HTTPException(status_code=400, detail=f"数据文件 {original_name} 超过 20 MB 限制")
+
+        candidate = original_name
+        serial = 2
+        while candidate.casefold() in used_names:
+            candidate = f"{Path(original_name).stem}-{serial}{suffix}"
+            serial += 1
+        used_names.add(candidate.casefold())
+        prepared.append((candidate, content))
+
+    input_dir = (ARTIFACTS_ROOT / "agent_runs" / run_id / "input").resolve()
+    input_dir.mkdir(parents=True, exist_ok=False)
+    saved_paths: list[Path] = []
+    for name, content in prepared:
+        target = (input_dir / name).resolve()
+        if input_dir not in target.parents:
+            raise HTTPException(status_code=400, detail="数据文件路径无效")
+        await asyncio.to_thread(target.write_bytes, content)
+        saved_paths.append(target)
+    return saved_paths
+
+
+def _load_agent_system_prompt() -> str:
+    """读取数据 Agent 的独立系统提示词。"""
+    try:
+        return AGENT_SYSTEM_PROMPT_PATH.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise RuntimeError(f"无法读取数据 Agent 系统提示词: {exc}") from exc
+
+
+def _next_agent_event(iterator: object) -> object | None:
+    """从同步 Agent 迭代器安全读取一个事件。"""
+    try:
+        return next(iterator)  # type: ignore[arg-type]
+    except StopIteration:
+        return None
+
+
+def _agent_event_payload(event: Action | Observation) -> dict[str, object]:
+    """把内部 Agent 事件转换为可公开展示的精简载荷。"""
+    if isinstance(event, Action):
+        return {
+            "type": "agent_action",
+            "thought": event.thought,
+            "tool_name": event.tool_name,
+        }
+    result_summary = None
+    if isinstance(event.result, dict) and isinstance(event.result.get("summary"), dict):
+        result_summary = event.result["summary"]
+    return {
+        "type": "agent_observation",
+        "tool_name": event.tool_name,
+        "success": event.success,
+        "duration_ms": event.duration_ms,
+        "summary": result_summary,
+        "error": event.error,
+    }
+
+
+@app.post("/api/agent/profile/stream")
+async def agent_profile_stream_endpoint(
+    message: str = Form(""),
+    discussion_id: str | None = Form(None),
+    title: str | None = Form(None),
+    files: list[UploadFile] | None = File(None),
+    config_id: str | None = Form(None),
+) -> StreamingResponse:
+    """通过当前聊天输入启动数据画像 Agent，并流式返回运行轨迹。"""
+    message = message.strip() or "请对上传的数据生成基础画像"
+    llm = _discussion_llm_by_id(config_id)
+    if llm is None:
+        raise HTTPException(status_code=400, detail="尚未配置可用的当前 API 模型")
+    run_id = uuid.uuid4().hex
+    data_paths = await _prepare_agent_data_files(files, run_id)
+
+    previous_discussion = (
+        await asyncio.to_thread(get_discussion, discussion_id)
+        if discussion_id
+        else None
+    )
+    history = [
+        AgentMessage(role=item["role"], content=item.get("content") or "")
+        for item in (previous_discussion.get("messages", []) if previous_discussion else [])
+        if item.get("role") in {"user", "assistant"} and (item.get("content") or "").strip()
+    ]
+    registry = create_data_profile_registry(data_paths) if data_paths else ToolRegistry()
+    output_dir = (ARTIFACTS_ROOT / "agent_runs" / run_id).resolve()
+    state = AgentState(
+        user_query=message,
+        data_paths=[str(path) for path in data_paths],
+        output_dir=str(output_dir),
+        messages=history,
+    )
+    loop = AgentLoop(
+        llm,
+        registry.specs(),
+        _load_agent_system_prompt(),
+        max_iterations=4,
+        decision_retries=2,
+        required_tools=("profile_data",) if data_paths else (),
+    )
+    harness = Harness(registry)
+
+    async def event_stream():
+        started_event: dict[str, object] = {
+            "type": "agent_started",
+            "run_id": run_id,
+            "files": [path.name for path in data_paths],
+        }
+        trace: list[dict[str, object]] = [started_event]
+        yield json.dumps(started_event, ensure_ascii=False) + "\n"
+        answer = ""
+        iterator = iter_graph(state, loop, harness)
+        try:
+            async with asyncio.timeout(AGENT_RUN_TIMEOUT_SECONDS):
+                while (event := await asyncio.to_thread(_next_agent_event, iterator)) is not None:
+                    if isinstance(event, Finish):
+                        answer = event.answer
+                        yield json.dumps({"type": "token", "content": answer}, ensure_ascii=False) + "\n"
+                        break
+                    payload = _agent_event_payload(event)
+                    trace.append(payload)
+                    yield json.dumps(payload, ensure_ascii=False) + "\n"
+        except TimeoutError:
+            yield json.dumps({"type": "error", "detail": "数据 Agent 运行超时，请稍后重试。"}, ensure_ascii=False) + "\n"
+            return
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Data agent run failed")
+            yield json.dumps({"type": "error", "detail": f"数据 Agent 运行失败：{exc}"}, ensure_ascii=False) + "\n"
+            return
+
+        attachments = [
+            {
+                "kind": "data",
+                "name": path.name,
+                "content": path.relative_to(PROJECT_ROOT).as_posix(),
+            }
+            for path in data_paths
+        ]
+        saved_discussion_id = await asyncio.to_thread(
+            save_discussion_message,
+            discussion_id,
+            message,
+            answer,
+            [],
+            title,
+            attachments,
+            mode="agent",
+            assistant_metadata={"agent_run_id": run_id, "agent_trace": trace},
+        )
+        yield json.dumps(
+            {"type": "done", "discussion_id": saved_discussion_id, "run_id": run_id},
+            ensure_ascii=False,
+        ) + "\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="application/x-ndjson",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.post("/api/knowledge/brainstorm/stream")

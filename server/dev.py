@@ -11,7 +11,11 @@ import uvicorn
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-RELOAD_DIRS = (PROJECT_ROOT / "server", PROJECT_ROOT / "scr")
+RELOAD_DIRS = (
+    PROJECT_ROOT / "server",
+    PROJECT_ROOT / "scr",
+    PROJECT_ROOT / "data_analysis",
+)
 RELOAD_EXCLUDES = (PROJECT_ROOT / "artifacts",)
 
 

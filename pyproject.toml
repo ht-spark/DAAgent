@@ -1,7 +1,7 @@
 [project]
-name = "MMAgent"
+name = "DAAgent"
 version = "1.1.0"
-description = "通用数学建模竞赛智能体"
+description = "数据分析智能体"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [

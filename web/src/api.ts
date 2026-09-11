@@ -351,8 +351,31 @@ export type BrainstormDiscussion = BrainstormDiscussionSummary & {
     role: 'assistant' | 'user'
     content: string
     sources: BrainstormSource[]
-    metadata?: { knowledge_base_id?: string; knowledge_base_ids?: string[] }
+    metadata?: {
+      knowledge_base_id?: string
+      knowledge_base_ids?: string[]
+      mode?: 'inspiration' | 'agent'
+      agent_run_id?: string
+      agent_trace?: AgentTraceEvent[]
+    }
   }>
+}
+
+export type AgentTraceEvent = {
+  type: 'agent_started'
+  run_id: string
+  files: string[]
+} | {
+  type: 'agent_action'
+  thought: string
+  tool_name: string
+} | {
+  type: 'agent_observation'
+  tool_name: string
+  success: boolean
+  duration_ms: number
+  summary?: Record<string, number> | null
+  error?: string | null
 }
 
 export async function streamBrainstormMessage(
@@ -406,6 +429,77 @@ export async function streamBrainstormMessage(
       if (event.type === 'token' && event.content) handlers.onToken(event.content)
       if (event.type === 'error') throw new Error(event.detail ?? '模型服务调用失败。')
       if (event.type === 'done' && event.discussion_id) handlers.onDone(event.discussion_id)
+    }
+    if (done) break
+  }
+}
+
+export async function streamDataAgentMessage(
+  message: string,
+  discussionId: string | null,
+  title: string,
+  files: File[],
+  handlers: {
+    onStarted: (runId: string, files: string[]) => void
+    onTrace: (event: AgentTraceEvent) => void
+    onToken: (content: string) => void
+    onDone: (discussionId: string, runId: string) => void
+  },
+  configId?: string | null,
+): Promise<void> {
+  const form = new FormData()
+  form.append('message', message)
+  form.append('title', title)
+  if (discussionId) form.append('discussion_id', discussionId)
+  if (configId) form.append('config_id', configId)
+  files.forEach((file) => form.append('files', file))
+
+  let res: Response
+  try {
+    res = await fetch('/api/agent/profile/stream', {
+      method: 'POST',
+      body: form,
+      signal: AbortSignal.timeout(210000),
+    })
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'TimeoutError') {
+      throw new Error('数据 Agent 请求超时，请检查模型服务或缩小数据文件。')
+    }
+    throw new Error('数据 Agent 无法连接，请确认后端服务正在运行。')
+  }
+  if (!res.ok) throw new Error(await extractDetail(res, '数据 Agent 启动失败'))
+  if (!res.body) throw new Error('数据 Agent 未返回流式内容。')
+
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  while (true) {
+    const { done, value } = await reader.read()
+    buffer += decoder.decode(value, { stream: !done })
+    const lines = buffer.split('\n')
+    buffer = lines.pop() ?? ''
+    for (const line of lines) {
+      if (!line) continue
+      const event = JSON.parse(line) as {
+        type: string
+        content?: string
+        detail?: string
+        run_id?: string
+        discussion_id?: string
+        files?: string[]
+      } & Partial<AgentTraceEvent>
+      if (event.type === 'agent_started' && event.run_id) {
+        handlers.onStarted(event.run_id, event.files ?? [])
+        handlers.onTrace(event as AgentTraceEvent)
+      }
+      if (event.type === 'agent_action' || event.type === 'agent_observation') {
+        handlers.onTrace(event as AgentTraceEvent)
+      }
+      if (event.type === 'token' && event.content) handlers.onToken(event.content)
+      if (event.type === 'error') throw new Error(event.detail ?? '数据 Agent 运行失败。')
+      if (event.type === 'done' && event.discussion_id && event.run_id) {
+        handlers.onDone(event.discussion_id, event.run_id)
+      }
     }
     if (done) break
   }
