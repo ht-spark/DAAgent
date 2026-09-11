@@ -40,7 +40,6 @@ data_analysis/
 │       ├── registry.py      #     工具注册与发现机制
 │       ├── retrieval_tools.py   # 知识库检索（核心工具）
 │       ├── data_tools.py    #     数据加载、画像、探索
-│       ├── code_tools.py    #     执行 Python 分析代码
 │       ├── viz_tools.py     #     图表生成
 │       ├── modeling_tool.py #     触发建模工作流（包装 scr/math_modeling_agent）
 │       └── export_tools.py  #     导出报告（带引用的 Markdown / DOCX）

@@ -1,5 +1,7 @@
 # Repository Guidelines
 
+### 所有代码注释均所有中文
+
 ### Project Objectives and Functions
 
     **Objective**: This is an intelligent agent for mathematical modeling, aiming to implement task-oriented automated mathematical modeling.
