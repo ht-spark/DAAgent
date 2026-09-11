@@ -18,7 +18,6 @@ import numpy as np
 __all__ = [
     "format_solution_table",
     "format_metrics_table",
-    "format_structured_evidence_table",
     "format_validation_table",
     "format_data_summary_table",
     "format_comparison_table",
@@ -27,6 +26,8 @@ __all__ = [
     "generate_latex_formula",
     "format_formula_with_number",
     "generate_all_tables",
+    "zh_label_for_key",
+    "public_evidence_pairs",
 ]
 
 
@@ -66,6 +67,167 @@ def _structured_summary(value: Any) -> str:
             return f"{len(value)} 条记录，字段：" + "、".join(map(str, keys))
         return f"{len(value)} 项非标量数据"
     return str(value)
+
+
+# ---------------------------------------------------------------------------
+# 结果键名中文化（防止原始 snake_case 键名泄漏进论文）
+# ---------------------------------------------------------------------------
+
+# 建模流程内部键 — 任何情况下都不应出现在论文正文或表格中
+_INTERNAL_EVIDENCE_KEYS = {
+    "model_name", "model", "method", "method_key", "canonical_method",
+    "status", "message", "success", "solver", "solver_status",
+    "figures", "figure", "tables", "table", "code", "code_path",
+    "artifacts_dir", "validation_details", "note", "notes",
+    "error", "error_message", "generation_attempts",
+    "solution_code_snippet", "intermediate_values", "parameters_used",
+    "model_summary", "baseline_objective", "scenario_objectives",
+    "variable_count", "constraint_count",
+}
+
+# 通用建模词汇表（问题无关），用于把结果键名逐词译为中文
+_KEY_WORD_ZH = {
+    "effective": "有效", "total": "总", "overall": "总体",
+    "average": "平均", "mean": "均值", "max": "最大", "maximum": "最大",
+    "min": "最小", "minimum": "最小", "value": "值", "count": "数量",
+    "num": "数量", "number": "数量", "n": "数量", "rate": "速率",
+    "ratio": "比率", "time": "时间", "start": "起始", "begin": "起始",
+    "end": "结束", "finish": "结束", "duration": "时长",
+    "seconds": "秒", "second": "秒", "s": "秒", "minutes": "分钟",
+    "minute": "分钟", "hours": "小时", "hour": "小时", "days": "天",
+    "day": "天", "years": "年", "year": "年", "distance": "距离",
+    "length": "长度", "width": "宽度", "height": "高度", "depth": "深度",
+    "area": "面积", "volume": "体积", "mass": "质量", "weight": "权重",
+    "threshold": "阈值", "tolerance": "容差", "position": "位置",
+    "coordinate": "坐标", "coordinates": "坐标", "x": "横坐标",
+    "y": "纵坐标", "z": "竖坐标", "initial": "初始", "final": "最终",
+    "speed": "速度", "velocity": "速度", "acceleration": "加速度",
+    "angle": "角度", "slope": "斜率", "intercept": "截距",
+    "coefficient": "系数", "cost": "成本", "profit": "利润",
+    "revenue": "收益", "price": "价格", "budget": "预算",
+    "objective": "目标", "optimal": "最优", "expected": "期望",
+    "worst": "最坏", "best": "最好", "case": "情形", "scenario": "场景",
+    "sample": "样本", "samples": "样本", "sampled": "采样",
+    "feature": "特征", "features": "特征", "error": "误差",
+    "accuracy": "精度", "index": "指标", "level": "水平", "score": "得分",
+    "rank": "排名", "allocation": "分配", "capacity": "容量",
+    "demand": "需求", "supply": "供给", "constraint": "约束",
+    "variable": "变量", "variables": "变量", "param": "参数",
+    "parameter": "参数", "parameters": "参数", "solution": "解",
+    "iteration": "迭代", "iterations": "迭代次数", "convergence": "收敛",
+    "residual": "残差", "residuals": "残差", "prediction": "预测",
+    "predicted": "预测", "forecast": "预测", "actual": "实际",
+    "observed": "观测", "true": "真实", "fitted": "拟合",
+    "variance": "方差", "std": "标准差", "deviation": "偏差",
+    "median": "中位数", "quantile": "分位数", "percentile": "百分位",
+    "interval": "区间", "confidence": "置信", "simulation": "模拟",
+    "simulated": "模拟", "path": "路径", "target": "目标点",
+    "source": "来源", "input": "输入", "output": "输出",
+    "result": "结果", "results": "结果", "summary": "汇总",
+    "utilization": "利用率", "remaining": "剩余", "available": "可用",
+    "used": "已用", "free": "空闲", "unit": "单位", "coverage": "覆盖率",
+    "risk": "风险", "return": "回报", "gap": "差距",
+    "improvement": "改进", "reduction": "削减", "increase": "增量",
+    "decrease": "减量", "upper": "上", "lower": "下", "bound": "界",
+    "limit": "限度", "offset": "偏移", "scale": "尺度", "factor": "因子",
+    "term": "项", "matrix": "矩阵", "vector": "向量", "norm": "范数",
+    "gradient": "梯度", "step": "步长", "energy": "能量", "power": "功率",
+    "force": "力", "flow": "流量", "stock": "存量", "inventory": "库存",
+    "order": "订单", "orders": "订单", "quantity": "数量",
+    "amount": "金额", "annual": "年度", "monthly": "月度",
+    "daily": "每日", "weekly": "每周", "grid": "网格", "node": "节点",
+    "edge": "边", "layer": "层", "region": "区域", "zone": "分区",
+    "point": "点", "segment": "分段", "stage": "阶段", "state": "状态",
+    "transition": "转移", "probability": "概率", "distribution": "分布",
+    "frequency": "频数", "correlation": "相关性", "sensitivity": "敏感性",
+    "robustness": "鲁棒性", "efficiency": "效率", "performance": "性能",
+    "quality": "质量", "service": "服务", "waiting": "等待",
+    "arrival": "到达", "departure": "离开", "population": "总量",
+    "growth": "增长", "decay": "衰减", "peak": "峰值", "sum": "和",
+    "difference": "差", "product": "积", "first": "第一",
+    "last": "最后", "current": "当前", "next": "下一",
+    "previous": "前一", "drop": "投放", "release": "释放",
+}
+
+# 已知指标键 → (中文标签, 说明)
+_METRIC_LABELS = {
+    "n_samples": ("样本数", "参与计算的数据行数"),
+    "n_features": ("特征数", "参与计算的数值列数"),
+    "objective_value": ("目标值", "优化目标函数值"),
+    "optimal_objective": ("最优目标值", "优化目标函数最优值"),
+    "total_allocation": ("总分配量", "所有决策变量之和"),
+    "capacity_utilization": ("容量利用率", "已用容量/总容量"),
+    "expected_objective": ("期望目标值", "随机优化期望最优值"),
+    "objective_std": ("目标值标准差", "随机优化目标值波动"),
+    "worst_case": ("最坏情况", "最坏场景目标值"),
+    "robustness_ratio": ("鲁棒性比率", "最坏/期望，越接近1越鲁棒"),
+    "n_scenarios": ("场景数", "蒙特卡洛模拟场景数"),
+    "n_simulations": ("模拟次数", "蒙特卡洛模拟次数"),
+    "simulation_seed": ("随机种子", "模拟随机种子"),
+    "posterior_ratio_c": ("后验差比C", "GM(1,1)精度指标"),
+    "small_error_probability": ("小误差概率P", "GM(1,1)精度指标"),
+    "r_squared": ("R²", "线性回归决定系数"),
+    "rmse": ("RMSE", "均方根误差"),
+    "max_entropy": ("最大熵值", "熵权法指标"),
+    "min_entropy": ("最小熵值", "熵权法指标"),
+}
+
+
+def zh_label_for_key(key: str) -> str | None:
+    """把结果键名翻译为论文可用的中文标签。
+
+    键名按 ``_`` 分词后逐词翻译；无法翻译的短记号（如数学符号
+    ``d``、``x0``）原样保留，含其他未知词的键名整体丢弃，
+    避免原始 snake_case 键名或领域英文词混入论文。
+    """
+    if not isinstance(key, str):
+        return None
+    normalized = key.strip()
+    if not normalized:
+        return None
+    if normalized in _METRIC_LABELS:
+        return _METRIC_LABELS[normalized][0]
+    words = [w for w in normalized.split("_") if w]
+    if not words:
+        return None
+    translated: list[str] = []
+    for word in words:
+        zh = _KEY_WORD_ZH.get(word.lower())
+        if zh is not None:
+            translated.append(zh)
+        elif len(word) <= 2 and word.isalnum():
+            translated.append(word)
+        else:
+            return None
+    return "".join(translated) or None
+
+
+def public_evidence_pairs(
+    mapping: Any,
+    max_items: int = 6,
+) -> list[tuple[str, str]]:
+    """从 results/metrics 映射中提取论文安全的 (中文标签, 数值) 对。
+
+    过滤内部流程键、非标量值与非有限值；键名无法完整中文化的条目
+    一律丢弃，避免原始键名或本地路径进入论文。
+    """
+    pairs: list[tuple[str, str]] = []
+    if not isinstance(mapping, dict):
+        return pairs
+    for key, value in mapping.items():
+        if key in _INTERNAL_EVIDENCE_KEYS:
+            continue
+        if isinstance(value, bool) or not isinstance(value, (int, float, np.number)):
+            continue
+        if isinstance(value, (float, np.floating)) and not np.isfinite(value):
+            continue
+        label = zh_label_for_key(str(key))
+        if not label:
+            continue
+        pairs.append((label, _fmt_num(value)))
+        if len(pairs) >= max_items:
+            break
+    return pairs
 
 
 # ---------------------------------------------------------------------------
@@ -146,37 +308,16 @@ def format_metrics_table(
     computation: dict[str, Any],
     qid: str,
 ) -> str:
-    """格式化关键指标为 Markdown 表格。"""
+    """格式化关键指标为 Markdown 表格。
+
+    只展示能完整中文化的标量指标；内部流程键和无法翻译的原始
+    snake_case 键名一律不进入论文。无可展示行时返回空字符串，
+    由调用方决定是否跳过该表。
+    """
     metrics = computation.get("metrics", {})
 
     if not metrics:
-        return f"（问题 {qid} 无指标数据）"
-
-    lines: list[str] = []
-    lines.append("| 指标名称 | 数值 | 说明 |")
-    lines.append("|----------|------|------|")
-
-    metric_labels = {
-        "n_samples": ("样本数", "参与计算的数据行数"),
-        "n_features": ("特征数", "参与计算的数值列数"),
-        "objective_value": ("目标值", "优化目标函数值"),
-        "optimal_objective": ("最优目标值", "优化目标函数最优值"),
-        "total_allocation": ("总分配量", "所有决策变量之和"),
-        "capacity_utilization": ("容量利用率", "已用容量/总容量"),
-        "expected_objective": ("期望目标值", "随机优化期望最优值"),
-        "objective_std": ("目标值标准差", "随机优化目标值波动"),
-        "worst_case": ("最坏情况", "最坏场景目标值"),
-        "robustness_ratio": ("鲁棒性比率", "最坏/期望，越接近1越鲁棒"),
-        "n_scenarios": ("场景数", "蒙特卡洛模拟场景数"),
-        "n_simulations": ("模拟次数", "蒙特卡洛模拟次数"),
-        "simulation_seed": ("随机种子", "模拟随机种子"),
-        "posterior_ratio_c": ("后验差比C", "GM(1,1)精度指标"),
-        "small_error_probability": ("小误差概率P", "GM(1,1)精度指标"),
-        "r_squared": ("R²", "线性回归决定系数"),
-        "rmse": ("RMSE", "均方根误差"),
-        "max_entropy": ("最大熵值", "熵权法指标"),
-        "min_entropy": ("最小熵值", "熵权法指标"),
-    }
+        return ""
 
     # 需要跳过的代码级指标（不应在报告中展示）
     _SKIP_METRIC_KEYS = {
@@ -189,47 +330,50 @@ def format_metrics_table(
         "n_samples",  # 样本数是代码级信息
     }
 
-    scalar_count = 0
+    lines: list[str] = []
+    lines.append("| 指标 | 数值 | 说明 |")
+    lines.append("|----------|------|------|")
+
+    rows = 0
     for key, value in metrics.items():
-        if key in _SKIP_METRIC_KEYS:
+        if key in _SKIP_METRIC_KEYS or key in _INTERNAL_EVIDENCE_KEYS:
+            continue
+        if isinstance(value, (dict, list, tuple, np.ndarray)):
             continue
         # 跳过过长的字符串值（如求解器状态消息）
         if isinstance(value, str) and len(value) > 50:
             continue
-        if isinstance(value, (dict, list, tuple, np.ndarray)):
+        label = zh_label_for_key(key)
+        if not label:
             continue
-        label, desc = metric_labels.get(key, (key, ""))
+        desc = _METRIC_LABELS.get(key, ("", ""))[1]
         lines.append(f"| {label} | {_fmt_num(value)} | {desc} |")
-        scalar_count += 1
+        rows += 1
 
-    if scalar_count == 0:
-        lines.append("| — | 无可直接展示的标量指标 | 结构化证据将在下方摘要展示 |")
-
-    return "\n".join(lines)
-
-
-def format_structured_evidence_table(
-    metrics: dict[str, Any],
-    qid: str,
-) -> str:
-    """将嵌套指标转为证据摘要，避免把字典或记录列表误作数值。"""
-    structured = {
-        key: value
-        for key, value in metrics.items()
-        if isinstance(value, (dict, list, tuple, np.ndarray))
-    }
-    if not structured:
+    if rows == 0:
         return ""
-
-    lines = ["| 结构化证据项 | 摘要 |", "|--------------|------|"]
-    for key, value in structured.items():
-        lines.append(f"| {key} | {_structured_summary(value)} |")
     return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
 # 3. 验证报告表
 # ---------------------------------------------------------------------------
+
+# 框架检查项名 → 中文标签（检查项由 result_validator 固义生成，可完整映射）
+_CHECK_LABELS = {
+    "computation_recorded": "计算过程记录",
+    "computation_status": "计算状态",
+    "outputs_recorded": "计算输出记录",
+    "model_recorded": "模型表述记录",
+    "assumptions_recorded": "模型假设记录",
+    "numeric_finiteness": "数值有限性核查",
+}
+
+_CATEGORY_LABELS = {
+    "evidence": "证据完整性",
+    "result": "结果质量",
+    "model": "模型质量",
+}
 
 
 def format_validation_table(
@@ -276,7 +420,10 @@ def format_validation_table(
             category = check.get("category", "")
             passed = "✓" if check.get("passed") else "✗"
             severity = check.get("severity", "info")
-            detail = check.get("detail", "")
+            detail = str(check.get("detail", ""))
+
+            name_label = _CHECK_LABELS.get(name, name)
+            category_label = _CATEGORY_LABELS.get(category, category)
 
             # 严重级别中文标签
             sev_labels = {
@@ -286,7 +433,9 @@ def format_validation_table(
             }
             sev_label = sev_labels.get(severity, severity)
 
-            lines.append(f"| {name} | {category} | {passed} | {sev_label} | {detail} |")
+            lines.append(
+                f"| {name_label} | {category_label} | {passed} | {sev_label} | {detail} |"
+            )
 
     # 风险列表
     risks = validation.get("risks", [])
@@ -372,7 +521,7 @@ def format_comparison_table(
         return "（无小问结果）"
 
     lines: list[str] = []
-    lines.append("| 问题 | 题型 | 方法 | 求解结果 | 验证状态 |")
+    lines.append("| 问题 | 题型 | 模型 | 求解结果 | 验证状态 |")
     lines.append("|------|------|------|----------|----------|")
 
     for qid in qids:
@@ -396,7 +545,19 @@ def format_comparison_table(
         }
         task_label = task_labels.get(task, task)
 
-        method = findings.get("selected_method", "未知")
+        formulation = (
+            result.formulation if hasattr(result, "formulation")
+            else result.get("formulation", {})
+        )
+        # 方法列展示论文可读的模型名称，不暴露内部流程词汇
+        model_label = str(formulation.get("description", "")).strip() if formulation else ""
+        if (not model_label
+                or "LLM" in model_label
+                or "问题驱动建模" in model_label
+                or "候选方法" in model_label):
+            model_label = "本文所建模型"
+        elif len(model_label) > 20:
+            model_label = model_label[:20] + "…"
 
         # 求解结果：提取关键数值而非计算状态
         results = computation.get("results", {})
@@ -416,6 +577,11 @@ def format_comparison_table(
             r2 = metrics.get("r_squared")
             if r2 is not None:
                 result_str = f"R² = {r2:.4f}"
+        if result_str == "—":
+            pairs = public_evidence_pairs(results, max_items=3) or \
+                public_evidence_pairs(metrics, max_items=3)
+            if pairs:
+                result_str = "；".join(f"{label} {value}" for label, value in pairs)
 
         val_status = validation.get("status", "—") if validation else "—"
         val_labels = {
@@ -425,7 +591,7 @@ def format_comparison_table(
         }
         val_label = val_labels.get(val_status, val_status)
 
-        lines.append(f"| {qid} | {task_label} | {method} | {result_str} | {val_label} |")
+        lines.append(f"| {qid} | {task_label} | {model_label} | {result_str} | {val_label} |")
 
     return "\n".join(lines)
 
@@ -540,8 +706,22 @@ def format_symbols_table(
         params = formulation.get("parameters", {})
 
         for dv in decision_vars:
-            if dv not in seen_symbols:
-                seen_symbols.add(dv)
+            # 兼容 list[str] 与 list[dict]（symbol/meaning）两种记录形式
+            if isinstance(dv, dict):
+                symbol = str(dv.get("symbol") or dv.get("name") or "").strip()
+                meaning = str(dv.get("meaning") or dv.get("description") or "").strip()
+                dv = f"{symbol}：{meaning}" if meaning else symbol
+            else:
+                dv = str(dv).strip()
+            if not dv or dv in seen_symbols:
+                continue
+            seen_symbols.add(dv)
+            symbol, _, meaning = dv.partition("：")
+            if not meaning:
+                symbol, _, meaning = dv.partition(":")
+            if meaning:
+                lines.append(f"| {symbol.strip()} | {meaning.strip()} | {qid} |")
+            else:
                 lines.append(f"| {dv} | 决策变量 | {qid} |")
 
         for sym, desc in params.items():

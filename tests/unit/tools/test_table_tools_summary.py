@@ -7,7 +7,6 @@
 from scr.tools.table_tools import (
     format_data_summary_table,
     format_metrics_table,
-    format_structured_evidence_table,
 )
 
 
@@ -80,20 +79,22 @@ def test_no_summary_key_returns_placeholder():
     assert "无数据摘要" in table
 
 
-def test_nested_metrics_are_excluded_from_scalar_table_and_summarized():
-    """代码返回的检查记录不能被误转换为 float，仍需在报告中可追溯。"""
+def test_nested_metrics_are_excluded_from_scalar_table():
+    """代码返回的检查记录不能进入指标表；可翻译键以中文标签展示。"""
     metrics = {
         "sampled_d_min": 4.7167,
         "boundary_checks": [{"start_s": 8.01, "end_s": 9.45}],
         "constraint_checks": {"drop_point_matches_given": True},
+        "missile_initial_position": [20000.0, 0.0, 2000.0],
     }
     computation = {"metrics": metrics}
 
     scalar_table = format_metrics_table(computation, "q1")
-    evidence_table = format_structured_evidence_table(metrics, "q1")
 
+    # 标量指标保留（含数学符号 d 的键翻译为"采样d最小"）
     assert "4.7167" in scalar_table
+    assert "采样d最小" in scalar_table
+    # 非标量/内部结构一律不进入论文表格
     assert "boundary_checks" not in scalar_table
-    assert "boundary_checks" in evidence_table
-    assert "1 条记录" in evidence_table
-    assert "constraint_checks" in evidence_table
+    assert "constraint_checks" not in scalar_table
+    assert "missile_initial_position" not in scalar_table
