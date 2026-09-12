@@ -43,6 +43,9 @@ export default function Submit({ onSubmitted }: { onSubmitted: (runId: string) =
       if (typeof activeCfg.temperature === 'number' && activeCfg.temperature >= 0 && activeCfg.temperature <= 2) {
         cfg.temperature = activeCfg.temperature
       }
+      if (activeCfg.reasoningEffort && activeCfg.reasoningEffort !== 'off') {
+        cfg.reasoning_effort = activeCfg.reasoningEffort
+      }
       fd.append('llm_config', JSON.stringify(cfg))
     }
     try {

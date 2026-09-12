@@ -1054,6 +1054,9 @@ export default function ChatModeling({
     if (typeof activeCfg.temperature === 'number' && activeCfg.temperature >= 0 && activeCfg.temperature <= 2) {
       cfg.temperature = activeCfg.temperature
     }
+    if (activeCfg.reasoningEffort && activeCfg.reasoningEffort !== 'off') {
+      cfg.reasoning_effort = activeCfg.reasoningEffort
+    }
     fd.append('llm_config', JSON.stringify(cfg))
     if (taskName.trim()) fd.append('task_name', taskName.trim())
     knowledgeBaseIds.forEach((id) => fd.append('knowledge_base_ids', id))

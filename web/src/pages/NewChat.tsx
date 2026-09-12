@@ -3,6 +3,7 @@ import { memo, useEffect, useRef, useState } from 'react'
 import {
   fetchBrainstormDiscussion,
   getKnowledgeBases,
+  openAgentArtifactFolder,
   renameBrainstormDiscussion,
   streamBrainstormMessage,
   streamDataAgentMessage,
@@ -46,6 +47,183 @@ function artifactType(name: string): string {
   return extension && extension !== name ? extension.toUpperCase() : 'FILE'
 }
 
+type ArtifactPreviewKind = 'image' | 'pdf' | 'markdown' | 'code' | 'docx' | 'xlsx' | 'unsupported'
+
+type ArtifactPreviewData = {
+  kind: 'docx'
+  paragraphs: string[]
+  tables: string[][][]
+  truncated: boolean
+} | {
+  kind: 'xlsx'
+  sheets: Array<{ name: string; rows: Array<Array<string | number | boolean | null>> }>
+  truncated: boolean
+}
+
+const IMAGE_PREVIEW_EXTENSIONS = new Set(['bmp', 'gif', 'jpeg', 'jpg', 'png', 'svg', 'tif', 'tiff', 'webp'])
+const CODE_PREVIEW_EXTENSIONS = new Set([
+  'bat', 'c', 'cc', 'cpp', 'cs', 'css', 'csv', 'go', 'h', 'hpp', 'htm', 'html',
+  'ini', 'ipynb', 'java', 'js', 'json', 'jsonl', 'jsx', 'log', 'ndjson', 'ps1',
+  'py', 'r', 'rmd', 'rs', 'sh', 'sql', 'toml', 'ts', 'tsx', 'txt', 'xml', 'yaml', 'yml',
+])
+
+function artifactExtension(name: string): string {
+  const extension = name.split('.').pop()
+  return extension && extension !== name ? extension.toLowerCase() : ''
+}
+
+function artifactPreviewKind(name: string): ArtifactPreviewKind {
+  const extension = artifactExtension(name)
+  if (IMAGE_PREVIEW_EXTENSIONS.has(extension)) return 'image'
+  if (extension === 'pdf') return 'pdf'
+  if (extension === 'md' || extension === 'markdown') return 'markdown'
+  if (extension === 'docx') return 'docx'
+  if (extension === 'xlsx') return 'xlsx'
+  if (CODE_PREVIEW_EXTENSIONS.has(extension)) return 'code'
+  return 'unsupported'
+}
+
+function artifactUrl(artifact: AgentArtifact, action: 'files' | 'previews'): string {
+  const path = artifact.path.split('/').map(encodeURIComponent).join('/')
+  return artifact.discussion_id
+    ? `/api/agent/discussions/${encodeURIComponent(artifact.discussion_id)}/${action}/${path}`
+    : `/api/agent/runs/${artifact.run_id}/${action}/${path}`
+}
+
+const ArtifactPreview = memo(function ArtifactPreview({
+  artifact,
+  onClose,
+}: {
+  artifact: AgentArtifact
+  onClose: () => void
+}) {
+  const kind = artifactPreviewKind(artifact.name)
+  const previewUrl = artifactUrl(artifact, 'previews')
+  const [text, setText] = useState('')
+  const [data, setData] = useState<ArtifactPreviewData | null>(null)
+  const [activeSheet, setActiveSheet] = useState(0)
+  const [loading, setLoading] = useState(!['image', 'pdf', 'unsupported'].includes(kind))
+  const [error, setError] = useState('')
+  const [truncated, setTruncated] = useState(false)
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [onClose])
+
+  useEffect(() => {
+    if (kind === 'image' || kind === 'pdf' || kind === 'unsupported') return undefined
+    const controller = new AbortController()
+    setLoading(true)
+    setError('')
+    setText('')
+    setData(null)
+    setActiveSheet(0)
+    void fetch(previewUrl, { signal: controller.signal })
+      .then(async (response) => {
+        if (!response.ok) {
+          const payload = await response.json().catch(() => null) as { detail?: string } | null
+          throw new Error(payload?.detail || '预览加载失败')
+        }
+        if (kind === 'docx' || kind === 'xlsx') {
+          setData(await response.json() as ArtifactPreviewData)
+        } else {
+          setText(await response.text())
+          setTruncated(response.headers.get('X-Preview-Truncated') === 'true')
+        }
+      })
+      .catch((reason: unknown) => {
+        if (reason instanceof DOMException && reason.name === 'AbortError') return
+        setError(reason instanceof Error ? reason.message : '预览加载失败')
+      })
+      .finally(() => setLoading(false))
+    return () => controller.abort()
+  }, [kind, previewUrl])
+
+  const sheet = data?.kind === 'xlsx' ? data.sheets[activeSheet] : null
+
+  return (
+    <div className="artifact-preview-mask" onMouseDown={onClose}>
+      <section
+        className="artifact-preview-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-label={`${artifact.name} 预览`}
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <header className="artifact-preview-head">
+          <div>
+            <span>{artifactType(artifact.name)}</span>
+            <h2>{artifact.name}</h2>
+          </div>
+          <nav aria-label="预览操作">
+            <a href={artifactUrl(artifact, 'files')} download={artifact.name}>下载</a>
+            <button type="button" onClick={onClose}>关闭</button>
+          </nav>
+        </header>
+        <div className={`artifact-preview-body kind-${kind}`}>
+          {loading && <p className="artifact-preview-state">正在加载预览…</p>}
+          {error && <p className="artifact-preview-state error">{error}</p>}
+          {!loading && !error && kind === 'image' && <img src={previewUrl} alt={artifact.name} />}
+          {!loading && !error && kind === 'pdf' && <iframe src={previewUrl} title={artifact.name} />}
+          {!loading && !error && kind === 'markdown' && (
+            <article className="artifact-preview-markdown"><MarkdownContent content={text} /></article>
+          )}
+          {!loading && !error && kind === 'code' && <pre><code>{text}</code></pre>}
+          {!loading && !error && data?.kind === 'docx' && (
+            <article className="artifact-preview-document">
+              {data.paragraphs.map((paragraph, index) => <p key={`${index}-${paragraph.slice(0, 24)}`}>{paragraph}</p>)}
+              {data.tables.map((table, tableIndex) => (
+                <div className="artifact-preview-table-wrap" key={`table-${tableIndex}`}>
+                  <table><tbody>{table.map((row, rowIndex) => (
+                    <tr key={`row-${rowIndex}`}>{row.map((cell, cellIndex) => (
+                      <td key={`cell-${cellIndex}`}>{cell}</td>
+                    ))}</tr>
+                  ))}</tbody></table>
+                </div>
+              ))}
+            </article>
+          )}
+          {!loading && !error && data?.kind === 'xlsx' && (
+            <div className="artifact-preview-workbook">
+              <div className="artifact-preview-tabs" role="tablist" aria-label="工作表">
+                {data.sheets.map((item, index) => (
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={index === activeSheet}
+                    className={index === activeSheet ? 'active' : ''}
+                    key={item.name}
+                    onClick={() => setActiveSheet(index)}
+                  >
+                    {item.name}
+                  </button>
+                ))}
+              </div>
+              {sheet && (
+                <div className="artifact-preview-table-wrap">
+                  <table><tbody>{sheet.rows.map((row, rowIndex) => (
+                    <tr key={`row-${rowIndex}`}>{row.map((cell, cellIndex) => (
+                      <td key={`cell-${cellIndex}`}>{cell === null ? '' : String(cell)}</td>
+                    ))}</tr>
+                  ))}</tbody></table>
+                </div>
+              )}
+            </div>
+          )}
+          {!loading && !error && kind === 'unsupported' && (
+            <p className="artifact-preview-state">该文件暂不支持在线预览，请下载后查看。</p>
+          )}
+          {(truncated || data?.truncated) && <p className="artifact-preview-note">文件较大，当前仅展示部分内容。</p>}
+        </div>
+      </section>
+    </div>
+  )
+})
+
 const AgentInlineProcess = memo(function AgentInlineProcess({
   trace,
   running,
@@ -69,6 +247,12 @@ const AgentInlineProcess = memo(function AgentInlineProcess({
               <>
                 <p className="agent-inline-reasoning">{event.thought || '正在判断下一步操作。'}</p>
                 <p className="agent-inline-activity">调用了工具 · {event.tool_name}</p>
+                {event.code && (
+                  <details className="agent-inline-code">
+                    <summary>查看本轮 Python 代码</summary>
+                    <pre><code>{event.code}</code></pre>
+                  </details>
+                )}
               </>
             ) : event.type === 'agent_reasoning' ? (
               <p className="agent-inline-reasoning">{event.summary}</p>
@@ -164,6 +348,9 @@ export default function NewChat({
   const [activeSources, setActiveSources] = useState<BrainstormSource[]>([])
   const [agentTrace, setAgentTrace] = useState<AgentTraceEvent[]>([])
   const [agentArtifacts, setAgentArtifacts] = useState<AgentArtifact[]>([])
+  const [previewArtifact, setPreviewArtifact] = useState<AgentArtifact | null>(null)
+  const [openingArtifactFolder, setOpeningArtifactFolder] = useState(false)
+  const [artifactFolderError, setArtifactFolderError] = useState('')
   const [sourcesCollapsed, setSourcesCollapsed] = useState(false)
   const [apiConfigs, setApiConfigs] = useState<ApiConfig[]>([])
   const [selectedConfigId, setSelectedConfigId] = useState<string>('')
@@ -207,6 +394,8 @@ export default function NewChat({
   }, [])
 
   useEffect(() => {
+    setPreviewArtifact(null)
+    setArtifactFolderError('')
     if (!discussionId) {
       setMessages([])
       setTitle('新讨论')
@@ -235,11 +424,13 @@ export default function NewChat({
           setMode('inspiration')
           setAgentTrace([])
         }
-        setAgentArtifacts(
-          discussion.messages.flatMap(
-            (message) => message.metadata?.agent_artifacts ?? [],
-          ),
-        )
+        const artifactsByPath = new Map<string, AgentArtifact>()
+        discussion.messages.forEach((message) => {
+          message.metadata?.agent_artifacts?.forEach((artifact) => {
+            artifactsByPath.set(artifact.path, artifact)
+          })
+        })
+        setAgentArtifacts([...artifactsByPath.values()])
         setMessages(
           discussion.messages.map((m) => ({
             role: m.role,
@@ -317,9 +508,7 @@ export default function NewChat({
             onDone: (savedDiscussionId, _runId, artifacts) => {
               setAgentArtifacts((current) => [
                 ...current.filter(
-                  (item) => !artifacts.some(
-                    (artifact) => artifact.run_id === item.run_id && artifact.path === item.path,
-                  ),
+                  (item) => !artifacts.some((artifact) => artifact.path === item.path),
                 ),
                 ...artifacts,
               ])
@@ -382,6 +571,21 @@ export default function NewChat({
     if (discussionId) await renameBrainstormDiscussion(discussionId, normalizedTitle)
   }
 
+  async function openArtifactFolder() {
+    const targetDiscussionId = discussionId
+      ?? agentArtifacts.find((artifact) => artifact.discussion_id)?.discussion_id
+    if (!targetDiscussionId || openingArtifactFolder) return
+    setOpeningArtifactFolder(true)
+    setArtifactFolderError('')
+    try {
+      await openAgentArtifactFolder(targetDiscussionId)
+    } catch (error) {
+      setArtifactFolderError(error instanceof Error ? error.message : '无法打开产物文件夹')
+    } finally {
+      setOpeningArtifactFolder(false)
+    }
+  }
+
   if (mode === 'modeling') {
     return (
       <div className="page page-fill chat-page new-chat-mode">
@@ -423,7 +627,7 @@ export default function NewChat({
             onBlur={() => void saveTitle()}
             aria-label="讨论名称"
           />
-          <p>{mode === 'agent' ? '思考 · 执行 · 观察 · 数据画像' : '混合检索 · 引用可追溯 · 灵感迸发'}</p>
+          {mode !== 'agent' && <p>混合检索 · 引用可追溯 · 灵感迸发</p>}
         </div>
         <div className="rag-top-actions">
           {onOpenHistory && (
@@ -503,7 +707,7 @@ export default function NewChat({
                     void submit()
                   }
                 }}
-                placeholder={mode === 'agent' ? '直接提问，或上传数据让 Agent 自主选择工具…' : '输入待讨论的建模问题、假设或分析方向…'}
+                placeholder={mode === 'agent' ? '直接提问，或上传数据、文档和图片让 Agent 自主分析…' : '输入待讨论的建模问题、假设或分析方向…'}
                 rows={2}
               />
               <div className="rag-composer-bar">
@@ -568,8 +772,8 @@ export default function NewChat({
                   type="file"
                   multiple
                   accept={mode === 'agent'
-                    ? '.csv,.xlsx,.xls,.json,.jsonl,.ndjson'
-                    : '.md,.markdown,.txt,.json,.csv,.xlsx,.xlsm,.png,.jpg,.jpeg,.webp,.gif'}
+                    ? '.csv,.xlsx,.xls,.json,.jsonl,.ndjson,.pdf,.docx,.md,.markdown,.png,.jpg,.jpeg,.webp,.gif,.bmp,.tif,.tiff'
+                    : '.pdf,.docx,.md,.markdown,.txt,.json,.csv,.xlsx,.xlsm,.png,.jpg,.jpeg,.webp,.gif'}
                   onChange={(event) => setFiles(Array.from(event.target.files ?? []))}
                 />
                 {apiConfigs.length > 0 ? (
@@ -645,42 +849,57 @@ export default function NewChat({
               <div className="rag-sources-head">
                 <div>
                   <h2>{mode === 'agent' ? '输出产物' : '引用来源'}</h2>
-                  <p>{mode === 'agent' ? 'Agent 生成的文件，可直接下载' : '点击消息中的引用编号定位片段'}</p>
+                  <p>{mode === 'agent' ? 'Agent 生成的文件，可预览或下载' : '点击消息中的引用编号定位片段'}</p>
                 </div>
-                <button
-                  type="button"
-                  className="rag-sources-collapse"
-                  onClick={() => setSourcesCollapsed(true)}
-                  title={mode === 'agent' ? '收起输出产物' : '收起引用来源'}
-                  aria-label={mode === 'agent' ? '收起输出产物' : '收起引用来源'}
-                >
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                    <path d="M9 18l6-6-6-6" strokeLinecap="round" strokeLinejoin="round" />
-                  </svg>
-                </button>
+                <div className="rag-sources-head-actions">
+                  {mode === 'agent' && (
+                    <button
+                      type="button"
+                      className="rag-open-folder"
+                      onClick={() => void openArtifactFolder()}
+                      disabled={openingArtifactFolder || (!discussionId && !agentArtifacts.some((artifact) => artifact.discussion_id))}
+                      title="在文件管理器中打开产物文件夹"
+                    >
+                      {openingArtifactFolder ? '打开中…' : '打开文件夹'}
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    className="rag-sources-collapse"
+                    onClick={() => setSourcesCollapsed(true)}
+                    title={mode === 'agent' ? '收起输出产物' : '收起引用来源'}
+                    aria-label={mode === 'agent' ? '收起输出产物' : '收起引用来源'}
+                  >
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <path d="M9 18l6-6-6-6" strokeLinecap="round" strokeLinejoin="round" />
+                    </svg>
+                  </button>
+                </div>
               </div>
               <div className="rag-sources-list">
+                {mode === 'agent' && artifactFolderError && (
+                  <p className="rag-folder-error">{artifactFolderError}</p>
+                )}
                 {mode === 'agent' ? (
                   agentArtifacts.length === 0 ? (
                     <p className="rag-sources-empty">
                       {isSubmitting ? 'Agent 正在处理，生成的文件会出现在这里。' : '当前讨论还没有生成可下载的产物。'}
                     </p>
                   ) : agentArtifacts.map((artifact) => (
-                    <a
+                    <article
                       className="agent-artifact-item"
                       key={`${artifact.run_id}-${artifact.path}`}
-                      href={`/api/agent/runs/${artifact.run_id}/files/${artifact.path.split('/').map(encodeURIComponent).join('/')}`}
-                      download={artifact.name}
-                      target="_blank"
-                      rel="noreferrer"
                     >
                       <span className="agent-artifact-type">{artifactType(artifact.name)}</span>
                       <span className="agent-artifact-copy">
                         <strong>{artifact.name}</strong>
                         <small>{formatArtifactSize(artifact.size_bytes)}</small>
                       </span>
-                      <span className="agent-artifact-download">下载</span>
-                    </a>
+                      <span className="agent-artifact-actions">
+                        <button type="button" onClick={() => setPreviewArtifact(artifact)}>预览</button>
+                        <a href={artifactUrl(artifact, 'files')} download={artifact.name}>下载</a>
+                      </span>
+                    </article>
                   ))
                 ) : lastAssistantSources.length === 0 ? (
                   <p className="rag-sources-empty">发送问题后，这里会展示知识库命中片段。</p>
@@ -729,6 +948,9 @@ export default function NewChat({
           )}
         </aside>
       </div>
+      {previewArtifact && (
+        <ArtifactPreview artifact={previewArtifact} onClose={() => setPreviewArtifact(null)} />
+      )}
     </div>
   )
 }

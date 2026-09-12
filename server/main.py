@@ -14,22 +14,29 @@ import base64
 import io
 import json
 import logging
+import mimetypes
 import re
+import shutil
+import subprocess
+import sys
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from threading import Lock
+from zipfile import BadZipFile
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from docx.opc.exceptions import PackageNotFoundError
+from openpyxl.utils.exceptions import InvalidFileException
 
 from data_analysis.agent.graph import iter_graph
 from data_analysis.agent.loop import Action, AgentLoop, Finish
 from data_analysis.agent.state import AgentMessage, AgentState, Observation
-from data_analysis.runtime import Harness
-from data_analysis.tools import ToolRegistry, create_data_profile_registry
+from data_analysis.runtime import Harness, SubprocessSandbox
+from data_analysis.tools import create_agent_tool_registry, supports_data_profile
 from server.files import list_figures, resolve_artifact
 from server.discussions import delete_discussion, get_discussion, list_discussions, rename_discussion, save_discussion_message
 from KnowledgeBase.chunk import DEFAULT_WINDOW_SIZE, chunk_knowledge_documents
@@ -72,7 +79,10 @@ from server.runs import (
     submit_clarification_decision,
 )
 from scr.runtime.budget import BudgetType
-from scr.math_modeling_agent.llm import create_llm
+from scr.math_modeling_agent.llm import (
+    LLM_CALL_TIMEOUT_SECONDS as AGENT_LLM_TIMEOUT_SECONDS,
+    create_llm,
+)
 from server.schemas import (
     BudgetConfirmBody,
     BrainstormDiscussion,
@@ -104,11 +114,49 @@ BRAINSTORM_ANSWER_TIMEOUT_SECONDS = 120      #模型流式生成回答的硬超�
 MAX_DISCUSSION_ATTACHMENTS = 5               #单次讨论最多允许上传的附件数量
 MAX_DISCUSSION_ATTACHMENT_BYTES = 10 * 1024 * 1024    #单个附件的字节大小上限（10MB）
 MAX_DISCUSSION_ATTACHMENT_TEXT_LENGTH = 50_000    #文本类附件注入 LLM 时截断的字符数
-AGENT_RUN_TIMEOUT_SECONDS = 180                   #数据 Agent 单轮运行的硬超时时间
-MAX_AGENT_DATA_FILES = 10                         #数据 Agent 单次最多接收的文件数
-MAX_AGENT_DATA_FILE_BYTES = 20 * 1024 * 1024     #数据 Agent 单文件大小上限（20MB）
-AGENT_DATA_SUFFIXES = frozenset({".csv", ".xlsx", ".xls", ".json", ".jsonl", ".ndjson"})
+AGENT_TOOL_TIMEOUT_SECONDS = 2 * 60 * 60          # Agent 单次工具执行超时时间（2 小时）
+AGENT_RUN_TIMEOUT_SECONDS = 3 * 60 * 60           # Agent 整轮运行硬超时时间（3 小时）
+MAX_AGENT_ATTACHMENTS = 10                        # 数据 Agent 单次最多接收的附件数
+MAX_AGENT_ATTACHMENT_BYTES = 20 * 1024 * 1024    # 数据 Agent 单附件大小上限（20MB）
+MAX_AGENT_PREVIEW_TEXT_BYTES = 2 * 1024 * 1024   # 文本预览最多读取 2 MB
+MAX_AGENT_PREVIEW_ROWS = 200                      # 表格预览最多展示 200 行
+MAX_AGENT_PREVIEW_COLUMNS = 40                    # 表格预览最多展示 40 列
+MAX_AGENT_PREVIEW_SHEETS = 8                      # 工作簿预览最多展示 8 个工作表
+AGENT_ATTACHMENT_SUFFIXES = frozenset(
+    {
+        ".bmp",
+        ".csv",
+        ".docx",
+        ".gif",
+        ".jpeg",
+        ".jpg",
+        ".json",
+        ".jsonl",
+        ".markdown",
+        ".md",
+        ".ndjson",
+        ".pdf",
+        ".png",
+        ".tif",
+        ".tiff",
+        ".webp",
+        ".xls",
+        ".xlsx",
+    }
+)
 AGENT_SYSTEM_PROMPT_PATH = PROJECT_ROOT / "data_analysis" / "prompts" / "system.md"
+AGENT_PREVIEW_IMAGE_SUFFIXES = frozenset(
+    {".bmp", ".gif", ".jpeg", ".jpg", ".png", ".svg", ".tif", ".tiff", ".webp"}
+)
+AGENT_PREVIEW_TEXT_SUFFIXES = frozenset(
+    {
+        ".bat", ".c", ".cc", ".cpp", ".cs", ".css", ".csv", ".go", ".h",
+        ".hpp", ".htm", ".html", ".ini", ".java", ".js", ".json", ".jsonl",
+        ".ipynb", ".jsx", ".log", ".markdown", ".md", ".ndjson", ".ps1", ".py",
+        ".r", ".rmd", ".rs", ".sh", ".sql", ".toml", ".ts", ".tsx", ".txt", ".xml", ".yaml",
+        ".yml",
+    }
+)
 
 logger = logging.getLogger(__name__)
 
@@ -510,6 +558,7 @@ def _create_llm_from_api_config(config: dict) -> object | None:
         model=config.get("model"),
         max_tokens=config.get("maxTokens"),
         temperature=config.get("temperature"),
+        reasoning_effort=config.get("reasoningEffort"),
         fallback_env=False,
     )
 
@@ -661,7 +710,38 @@ async def _prepare_discussion_attachments(
                 "content": f"data:{mime_type};base64,{base64.b64encode(content).decode('ascii')}",
             })
             continue
-        if suffix in {".xlsx", ".xlsm"}:
+        if suffix == ".pdf":
+            try:
+                from pypdf import PdfReader
+
+                reader = PdfReader(io.BytesIO(content))
+                pages = [page.extract_text() or "" for page in reader.pages]
+                text = "\n\n".join(page for page in pages if page.strip())
+                if not text.strip():
+                    text = "[PDF 未提取到可搜索文本，可能是扫描件]"
+            except Exception as exc:  # noqa: BLE001
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"无法读取 PDF 附件 {name}：{exc}",
+                ) from exc
+        elif suffix == ".docx":
+            try:
+                from docx import Document
+
+                document = Document(io.BytesIO(content))
+                blocks = [paragraph.text for paragraph in document.paragraphs]
+                for table in document.tables:
+                    blocks.extend(
+                        "\t".join(cell.text for cell in row.cells)
+                        for row in table.rows
+                    )
+                text = "\n".join(block for block in blocks if block.strip())
+            except Exception as exc:  # noqa: BLE001
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"无法读取 DOCX 附件 {name}：{exc}",
+                ) from exc
+        elif suffix in {".xlsx", ".xlsm"}:
             try:
                 from openpyxl import load_workbook
 
@@ -687,39 +767,41 @@ async def _prepare_discussion_attachments(
 
 async def _prepare_agent_data_files(
     files: list[UploadFile] | None,
+    discussion_id: str,
     run_id: str,
 ) -> list[Path]:
-    """校验并保存本轮数据 Agent 获授权的数据文件。
+    """校验并保存本轮数据 Agent 获授权的附件。
 
     Args:
-        files: 前端上传的数据附件。
-        run_id: 服务端生成的运行标识。
+        files: 前端上传的附件。
+        discussion_id: 当前会话标识。
+        run_id: 服务端生成的本轮运行标识。
 
     Returns:
-        已保存且可交给工具注册表授权的绝对路径。
+        已保存且可交给工具注册表授权的附件绝对路径。
 
     Raises:
         HTTPException: 文件数量、类型或大小不符合限制。
     """
     if not files:
         return []
-    if len(files) > MAX_AGENT_DATA_FILES:
-        raise HTTPException(status_code=400, detail=f"最多可上传 {MAX_AGENT_DATA_FILES} 个数据文件")
+    if len(files) > MAX_AGENT_ATTACHMENTS:
+        raise HTTPException(status_code=400, detail=f"最多可上传 {MAX_AGENT_ATTACHMENTS} 个附件")
 
     prepared: list[tuple[str, bytes]] = []
     used_names: set[str] = set()
     for index, file in enumerate(files, start=1):
         original_name = Path(file.filename or f"data-{index}").name
         suffix = Path(original_name).suffix.lower()
-        if suffix not in AGENT_DATA_SUFFIXES:
-            supported = "、".join(sorted(AGENT_DATA_SUFFIXES))
+        if suffix not in AGENT_ATTACHMENT_SUFFIXES:
+            supported = "、".join(sorted(AGENT_ATTACHMENT_SUFFIXES))
             raise HTTPException(
                 status_code=400,
                 detail=f"数据 Agent 不支持 {original_name}，当前支持 {supported}",
             )
         content = await file.read()
-        if len(content) > MAX_AGENT_DATA_FILE_BYTES:
-            raise HTTPException(status_code=400, detail=f"数据文件 {original_name} 超过 20 MB 限制")
+        if len(content) > MAX_AGENT_ATTACHMENT_BYTES:
+            raise HTTPException(status_code=400, detail=f"附件 {original_name} 超过 20 MB 限制")
 
         candidate = original_name
         serial = 2
@@ -729,13 +811,13 @@ async def _prepare_agent_data_files(
         used_names.add(candidate.casefold())
         prepared.append((candidate, content))
 
-    input_dir = (ARTIFACTS_ROOT / "agent_runs" / run_id / "input").resolve()
+    input_dir = (_agent_session_root(discussion_id) / ".runs" / run_id / "input").resolve()
     input_dir.mkdir(parents=True, exist_ok=False)
     saved_paths: list[Path] = []
     for name, content in prepared:
         target = (input_dir / name).resolve()
         if input_dir not in target.parents:
-            raise HTTPException(status_code=400, detail="数据文件路径无效")
+            raise HTTPException(status_code=400, detail="附件路径无效")
         await asyncio.to_thread(target.write_bytes, content)
         saved_paths.append(target)
     return saved_paths
@@ -765,11 +847,15 @@ def _agent_event_payload(event: Action | Observation | Finish) -> dict[str, obje
             "summary": event.thought,
         }
     if isinstance(event, Action):
-        return {
+        payload: dict[str, object] = {
             "type": "agent_action",
             "thought": event.thought,
             "tool_name": event.tool_name,
         }
+        code = event.arguments.get("code")
+        if event.tool_name == "execute_python" and isinstance(code, str):
+            payload["code"] = code
+        return payload
     result_summary = None
     if isinstance(event.result, dict) and isinstance(event.result.get("summary"), dict):
         result_summary = event.result["summary"]
@@ -783,20 +869,78 @@ def _agent_event_payload(event: Action | Observation | Finish) -> dict[str, obje
     }
 
 
-def _agent_run_root(run_id: str) -> Path:
-    """返回经过校验的 Agent 运行目录。"""
+def _agent_session_root(discussion_id: str) -> Path:
+    """返回经过校验的 Agent 会话产物目录。"""
+    if re.fullmatch(r"[A-Za-z0-9_-]{1,128}", discussion_id) is None:
+        raise ValueError("Agent 会话标识无效")
+    root = (ARTIFACTS_ROOT / "agent_sessions" / discussion_id).resolve()
+    sessions_root = (ARTIFACTS_ROOT / "agent_sessions").resolve()
+    if sessions_root not in root.parents:
+        raise ValueError("Agent 会话产物目录越界")
+    return root
+
+
+def _open_local_folder(target: Path) -> None:
+    """使用当前操作系统的文件管理器打开指定目录。"""
+    if sys.platform == "win32":
+        command = ["explorer.exe", str(target)]
+    elif sys.platform == "darwin":
+        command = ["open", str(target)]
+    else:
+        command = ["xdg-open", str(target)]
+    try:
+        subprocess.Popen(command, close_fds=True)
+    except OSError as exc:
+        raise RuntimeError("无法启动系统文件管理器") from exc
+
+
+@app.post("/api/agent/discussions/{discussion_id}/open-folder")
+def open_agent_artifact_folder(discussion_id: str) -> dict[str, bool]:
+    """在本机文件管理器中打开指定讨论的产物目录。"""
+    try:
+        target = _agent_session_root(discussion_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not target.is_dir():
+        raise HTTPException(status_code=404, detail="当前讨论还没有产物目录")
+    try:
+        _open_local_folder(target)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return {"opened": True}
+
+
+def _legacy_agent_run_root(run_id: str) -> Path:
+    """返回旧版按运行保存的 Agent 产物目录。"""
     if re.fullmatch(r"[0-9a-f]{32}", run_id) is None:
         raise ValueError("Agent 运行标识无效")
     root = (ARTIFACTS_ROOT / "agent_runs" / run_id).resolve()
-    agent_runs_root = (ARTIFACTS_ROOT / "agent_runs").resolve()
-    if agent_runs_root not in root.parents:
+    runs_root = (ARTIFACTS_ROOT / "agent_runs").resolve()
+    if runs_root not in root.parents:
         raise ValueError("Agent 运行目录越界")
     return root
 
 
-def _resolve_agent_artifact(run_id: str, file_path: str) -> Path:
+def _resolve_agent_artifact(discussion_id: str, file_path: str) -> Path:
     """解析 Agent 输出产物，并阻止访问输入附件或目录外文件。"""
-    root = _agent_run_root(run_id)
+    root = _agent_session_root(discussion_id)
+    relative_path = Path(file_path)
+    if (
+        relative_path.is_absolute()
+        or ".." in relative_path.parts
+        or not relative_path.parts
+        or relative_path.parts[0].casefold() == ".runs"
+    ):
+        raise ValueError("Agent 产物路径无效")
+    target = (root / relative_path).resolve()
+    if root not in target.parents or not target.is_file():
+        raise FileNotFoundError(f"Agent 产物不存在: {file_path}")
+    return target
+
+
+def _resolve_legacy_agent_artifact(run_id: str, file_path: str) -> Path:
+    """解析旧版按运行保存的输出产物。"""
+    root = _legacy_agent_run_root(run_id)
     relative_path = Path(file_path)
     if (
         relative_path.is_absolute()
@@ -811,9 +955,12 @@ def _resolve_agent_artifact(run_id: str, file_path: str) -> Path:
     return target
 
 
-def _list_agent_artifacts(run_id: str) -> list[dict[str, object]]:
-    """列出一次 Agent 运行生成的输出文件，排除用户输入附件。"""
-    root = _agent_run_root(run_id)
+def _list_agent_artifacts(
+    discussion_id: str,
+    run_id: str,
+) -> list[dict[str, object]]:
+    """列出会话产物区内的输出文件，排除各轮用户输入附件。"""
+    root = _agent_session_root(discussion_id)
     if not root.is_dir():
         return []
     artifacts: list[dict[str, object]] = []
@@ -821,10 +968,11 @@ def _list_agent_artifacts(run_id: str) -> list[dict[str, object]]:
         if not path.is_file():
             continue
         relative_path = path.relative_to(root)
-        if relative_path.parts[0].casefold() == "input":
+        if relative_path.parts[0].casefold() == ".runs":
             continue
         artifacts.append(
             {
+                "discussion_id": discussion_id,
                 "run_id": run_id,
                 "path": relative_path.as_posix(),
                 "name": path.name,
@@ -834,11 +982,151 @@ def _list_agent_artifacts(run_id: str) -> list[dict[str, object]]:
     return artifacts
 
 
-@app.get("/api/agent/runs/{run_id}/files/{file_path:path}")
-def download_agent_artifact(run_id: str, file_path: str) -> FileResponse:
-    """下载一次 Agent 运行生成的输出产物。"""
+def _preview_cell_value(value: object) -> object:
+    """把工作表单元格转换为 JSON 可序列化值。"""
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    return str(value)
+
+
+def _agent_docx_preview(target: Path) -> JSONResponse:
+    """提取 DOCX 中可安全展示的段落和表格。"""
+    from docx import Document
+
+    document = Document(str(target))
+    paragraphs = [
+        paragraph.text
+        for paragraph in document.paragraphs[:MAX_AGENT_PREVIEW_ROWS]
+        if paragraph.text.strip()
+    ]
+    tables: list[list[list[str]]] = []
+    truncated = len(document.paragraphs) > MAX_AGENT_PREVIEW_ROWS
+    for table in document.tables[:MAX_AGENT_PREVIEW_SHEETS]:
+        rows = [
+            [cell.text for cell in row.cells[:MAX_AGENT_PREVIEW_COLUMNS]]
+            for row in table.rows[:MAX_AGENT_PREVIEW_ROWS]
+        ]
+        tables.append(rows)
+        truncated = truncated or len(table.rows) > MAX_AGENT_PREVIEW_ROWS
+        truncated = truncated or any(
+            len(row.cells) > MAX_AGENT_PREVIEW_COLUMNS for row in table.rows
+        )
+    truncated = truncated or len(document.tables) > MAX_AGENT_PREVIEW_SHEETS
+    return JSONResponse(
+        {
+            "kind": "docx",
+            "paragraphs": paragraphs,
+            "tables": tables,
+            "truncated": truncated,
+        }
+    )
+
+
+def _agent_xlsx_preview(target: Path) -> JSONResponse:
+    """读取 XLSX 的有限工作表区域供前端预览。"""
+    from openpyxl import load_workbook
+
+    workbook = load_workbook(target, read_only=True, data_only=True)
     try:
-        target = _resolve_agent_artifact(run_id, file_path)
+        sheets: list[dict[str, object]] = []
+        truncated = len(workbook.worksheets) > MAX_AGENT_PREVIEW_SHEETS
+        for sheet in workbook.worksheets[:MAX_AGENT_PREVIEW_SHEETS]:
+            max_row = min(sheet.max_row or 1, MAX_AGENT_PREVIEW_ROWS)
+            max_column = min(sheet.max_column or 1, MAX_AGENT_PREVIEW_COLUMNS)
+            rows = [
+                [_preview_cell_value(value) for value in row]
+                for row in sheet.iter_rows(
+                    min_row=1,
+                    max_row=max_row,
+                    max_col=max_column,
+                    values_only=True,
+                )
+            ]
+            sheets.append({"name": sheet.title, "rows": rows})
+            truncated = truncated or (sheet.max_row or 0) > MAX_AGENT_PREVIEW_ROWS
+            truncated = truncated or (sheet.max_column or 0) > MAX_AGENT_PREVIEW_COLUMNS
+        return JSONResponse(
+            {"kind": "xlsx", "sheets": sheets, "truncated": truncated}
+        )
+    finally:
+        workbook.close()
+
+
+def _agent_artifact_preview(target: Path) -> Response:
+    """根据文件类型生成不可执行的安全预览响应。"""
+    suffix = target.suffix.casefold()
+    if suffix in AGENT_PREVIEW_IMAGE_SUFFIXES or suffix == ".pdf":
+        media_type = mimetypes.guess_type(target.name)[0]
+        if suffix == ".pdf":
+            media_type = "application/pdf"
+        return FileResponse(
+            target,
+            media_type=media_type,
+            filename=target.name,
+            content_disposition_type="inline",
+        )
+    if suffix in AGENT_PREVIEW_TEXT_SUFFIXES:
+        size = target.stat().st_size
+        with target.open("rb") as handle:
+            content = handle.read(MAX_AGENT_PREVIEW_TEXT_BYTES)
+        headers = {"X-Preview-Truncated": "true"} if size > len(content) else None
+        return PlainTextResponse(
+            content.decode("utf-8-sig", errors="replace"),
+            headers=headers,
+        )
+    try:
+        if suffix == ".docx":
+            return _agent_docx_preview(target)
+        if suffix == ".xlsx":
+            return _agent_xlsx_preview(target)
+    except (OSError, ValueError, KeyError, BadZipFile, InvalidFileException, PackageNotFoundError) as exc:
+        raise HTTPException(status_code=422, detail="文件内容损坏或无法解析预览") from exc
+    raise HTTPException(status_code=415, detail="该文件类型暂不支持预览")
+
+
+@app.get("/api/agent/discussions/{discussion_id}/previews/{file_path:path}")
+def preview_agent_artifact(discussion_id: str, file_path: str) -> Response:
+    """预览指定会话产物区内的输出文件。"""
+    try:
+        target = _resolve_agent_artifact(discussion_id, file_path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return _agent_artifact_preview(target)
+
+
+@app.get("/api/agent/runs/{run_id}/previews/{file_path:path}")
+def preview_legacy_agent_artifact(run_id: str, file_path: str) -> Response:
+    """兼容预览旧版按运行保存的 Agent 产物。"""
+    try:
+        target = _resolve_legacy_agent_artifact(run_id, file_path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return _agent_artifact_preview(target)
+
+
+@app.get("/api/agent/discussions/{discussion_id}/files/{file_path:path}")
+def download_agent_artifact(discussion_id: str, file_path: str) -> FileResponse:
+    """下载指定会话产物区内的输出文件。"""
+    try:
+        target = _resolve_agent_artifact(discussion_id, file_path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return FileResponse(target, filename=target.name)
+
+
+@app.get("/api/agent/runs/{run_id}/files/{file_path:path}")
+def download_legacy_agent_artifact(run_id: str, file_path: str) -> FileResponse:
+    """兼容下载旧版按运行保存的 Agent 产物。"""
+    try:
+        target = _resolve_legacy_agent_artifact(run_id, file_path)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except FileNotFoundError as exc:
@@ -861,20 +1149,22 @@ async def agent_profile_stream_endpoint(
     if llm is None:
         raise HTTPException(status_code=400, detail="尚未配置可用的当前 API 模型")
     run_id = uuid.uuid4().hex
-    data_paths = await _prepare_agent_data_files(files, run_id)
+    active_discussion_id = discussion_id or uuid.uuid4().hex
 
     previous_discussion = (
-        await asyncio.to_thread(get_discussion, discussion_id)
+        await asyncio.to_thread(get_discussion, active_discussion_id)
         if discussion_id
         else None
     )
+    data_paths = await _prepare_agent_data_files(files, active_discussion_id, run_id)
     history = [
         AgentMessage(role=item["role"], content=item.get("content") or "")
         for item in (previous_discussion.get("messages", []) if previous_discussion else [])
         if item.get("role") in {"user", "assistant"} and (item.get("content") or "").strip()
     ]
-    registry = create_data_profile_registry(data_paths) if data_paths else ToolRegistry()
-    output_dir = (ARTIFACTS_ROOT / "agent_runs" / run_id).resolve()
+    output_dir = _agent_session_root(active_discussion_id)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    registry = create_agent_tool_registry(data_paths, output_dir)
     state = AgentState(
         user_query=message,
         data_paths=[str(path) for path in data_paths],
@@ -885,10 +1175,13 @@ async def agent_profile_stream_endpoint(
         llm,
         registry.specs(),
         _load_agent_system_prompt(),
-        max_iterations=4,
+        max_iterations=30,
         decision_retries=2,
     )
-    harness = Harness(registry)
+    harness = Harness(
+        registry,
+        sandbox=SubprocessSandbox(timeout_seconds=AGENT_TOOL_TIMEOUT_SECONDS),
+    )
 
     async def event_stream():
         started_event: dict[str, object] = {
@@ -923,13 +1216,13 @@ async def agent_profile_stream_endpoint(
             return
 
         try:
-            artifacts = _list_agent_artifacts(run_id)
+            artifacts = _list_agent_artifacts(active_discussion_id, run_id)
         except OSError:
             logger.exception("Failed to list Agent artifacts")
             artifacts = []
         attachments = [
             {
-                "kind": "data",
+                "kind": "data" if supports_data_profile(path) else "file",
                 "name": path.name,
                 "content": path.relative_to(PROJECT_ROOT).as_posix(),
             }
@@ -937,7 +1230,7 @@ async def agent_profile_stream_endpoint(
         ]
         saved_discussion_id = await asyncio.to_thread(
             save_discussion_message,
-            discussion_id,
+            active_discussion_id,
             message,
             answer,
             [],
@@ -1125,9 +1418,15 @@ async def get_brainstorm_discussion_endpoint(
 @app.delete("/api/knowledge/discussions/{discussion_id}")
 async def delete_brainstorm_discussion_endpoint(discussion_id: str) -> dict[str, bool]:
     """Permanently delete a saved inspiration discussion."""
+    try:
+        artifact_dir = _agent_session_root(discussion_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     deleted = await asyncio.to_thread(delete_discussion, discussion_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="未找到该讨论记录")
+    if artifact_dir.is_dir():
+        await asyncio.to_thread(shutil.rmtree, artifact_dir)
     return {"deleted": True}
 
 
@@ -1149,7 +1448,8 @@ async def create_run_endpoint(
     problem_file: UploadFile | None = File(None, description="任务文件(.md/.txt)"),
     data_files: list[UploadFile] | None = File(None, description="数据附件(可多个)"),
     llm_config: str = Form(
-        "{}", description="JSON: provider/api_key/base_url/model/max_tokens/temperature"
+        "{}",
+        description="JSON: provider/api_key/base_url/model/max_tokens/temperature/reasoning_effort",
     ),
     task_name: str | None = Form(None, description="任务名称（用户自定义）"),
     knowledge_base_id: str | None = Form(None, description="任务检索使用的知识库 ID"),

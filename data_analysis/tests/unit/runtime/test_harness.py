@@ -12,7 +12,11 @@ from data_analysis.runtime import (
     SandboxTimeoutError,
     SubprocessSandbox,
 )
-from data_analysis.tools import ToolRegistry, create_data_profile_registry
+from data_analysis.tools import (
+    ToolRegistry,
+    create_agent_tool_registry,
+    create_data_profile_registry,
+)
 
 
 def test_harness_profiles_data_in_subprocess(tmp_path) -> None:
@@ -87,3 +91,54 @@ def test_sandbox_rejects_invalid_worker_response(monkeypatch, tmp_path) -> None:
 
     with pytest.raises(SandboxProtocolError, match="合法 JSON"):
         SubprocessSandbox().execute(tool, {})
+
+
+def test_harness_executes_generated_python_in_subprocess(tmp_path) -> None:
+    registry = create_agent_tool_registry([], tmp_path / "output")
+    harness = Harness(registry)
+
+    observation = harness.execute(
+        Action(
+            tool_name="execute_python",
+            arguments={"code": "print(6 * 7)\nresult = {'answer': 42}"},
+        )
+    )
+
+    assert observation.success is True
+    assert observation.result["stdout"] == "42\n"
+    assert observation.result["result"] == {"answer": 42}
+
+
+def test_harness_returns_generated_code_failure_for_rethinking(tmp_path) -> None:
+    registry = create_agent_tool_registry([], tmp_path / "output")
+
+    observation = Harness(registry).execute(
+        Action(
+            tool_name="execute_python",
+            arguments={"code": "result = missing_name"},
+        )
+    )
+
+    assert observation.success is False
+    assert "NameError" in observation.error
+
+
+def test_harness_writes_artifact_in_subprocess(tmp_path) -> None:
+    output_dir = tmp_path / "output"
+    registry = create_agent_tool_registry([], output_dir)
+
+    observation = Harness(registry).execute(
+        Action(
+            tool_name="write_artifact",
+            arguments={
+                "relative_path": "reports/result.md",
+                "content": "# 运行结果\n\n已完成。",
+            },
+        )
+    )
+
+    assert observation.success is True
+    assert observation.result["path"] == "reports/result.md"
+    assert (output_dir / "reports" / "result.md").read_text(
+        encoding="utf-8"
+    ) == "# 运行结果\n\n已完成。"

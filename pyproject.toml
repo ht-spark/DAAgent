@@ -23,6 +23,7 @@ dependencies = [
     "pytest",
     "pytest-asyncio",
     "python-docx",
+    "pypdf",
     "tavily-python",
     "fastapi>=0.141.1",
     "uvicorn[standard]>=0.52.1",
@@ -33,7 +34,9 @@ dependencies = [
     "modelscope",
     "langchain-huggingface",
     "sentence-transformers",
-    "langchain-classic "
+    "langchain-classic",
+    "pdfplumber",
+    "seaborn"
 ]
 
 [tool.pytest.ini_options]

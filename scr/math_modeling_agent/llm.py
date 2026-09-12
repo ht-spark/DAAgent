@@ -17,6 +17,8 @@ from typing import Any
 
 from ..runtime.logging import get_logger
 
+LLM_CALL_TIMEOUT_SECONDS = 180
+
 
 def create_llm(
     provider: str | None = None,
@@ -26,6 +28,7 @@ def create_llm(
     *,
     max_tokens: int | None = None,
     temperature: float | None = None,
+    reasoning_effort: str | None = None,
     fallback_env: bool = True,
 ) -> Any | None:
     """创建一个 OpenAI 兼容的 LLM 客户端。
@@ -37,6 +40,7 @@ def create_llm(
         model: 模型名，缺省时回退到环境变量默认值。
         max_tokens: 单次回复的最大输出 token 数；缺省时使用 20000。
         temperature: 生成随机性（0 到 2）；缺省时使用 0.3。
+        reasoning_effort: 思考程度（low/medium/high/max）；None 或 "off" 时不传。
         fallback_env: 当显式参数缺失时是否回退到环境变量。
 
     Returns:
@@ -100,10 +104,13 @@ def create_llm(
             kwargs["base_url"] = resolved_url
         # 单次调用超时（秒）。避免 LLM 端点无响应时线程无限阻塞，
         # 也让「中断任务」能在当前节点结束后尽快在边界生效。
-        kwargs["timeout"] = 180
+        kwargs["timeout"] = LLM_CALL_TIMEOUT_SECONDS
         # 生成参数可由网页 API 配置覆盖；保留默认值以兼容环境变量调用。
         kwargs["temperature"] = 0.3 if temperature is None else temperature
         kwargs["max_tokens"] = 20_000 if max_tokens is None else max_tokens
+        # 思考程度：仅在显式开启时透传，避免不支持该参数的端点报错。
+        if reasoning_effort and reasoning_effort not in ("off", "none", ""):
+            kwargs["reasoning_effort"] = reasoning_effort
         return ChatOpenAI(**kwargs)
     except ImportError:
         get_logger().warning("[llm] langchain_openai 未安装，LLM 不可用")

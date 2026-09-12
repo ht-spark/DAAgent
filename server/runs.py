@@ -472,6 +472,7 @@ async def execute_run(
         model=model_config.get("model"),
         max_tokens=model_config.get("max_tokens"),
         temperature=model_config.get("temperature"),
+        reasoning_effort=model_config.get("reasoning_effort"),
     )
 
     try:

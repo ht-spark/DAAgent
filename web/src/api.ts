@@ -363,10 +363,19 @@ export type BrainstormDiscussion = BrainstormDiscussionSummary & {
 }
 
 export type AgentArtifact = {
+  discussion_id?: string
   run_id: string
   path: string
   name: string
   size_bytes: number
+}
+
+export async function openAgentArtifactFolder(discussionId: string): Promise<void> {
+  const res = await fetch(
+    `/api/agent/discussions/${encodeURIComponent(discussionId)}/open-folder`,
+    { method: 'POST' },
+  )
+  if (!res.ok) throw new Error(await extractDetail(res, '无法打开产物文件夹'))
 }
 
 export type AgentTraceEvent = {
@@ -377,6 +386,7 @@ export type AgentTraceEvent = {
   type: 'agent_action'
   thought: string
   tool_name: string
+  code?: string
 } | {
   type: 'agent_reasoning'
   summary: string
@@ -388,6 +398,8 @@ export type AgentTraceEvent = {
   summary?: Record<string, number> | null
   error?: string | null
 }
+
+const AGENT_REQUEST_TIMEOUT_MS = 3 * 60 * 60 * 1000 + 60 * 1000
 
 export async function streamBrainstormMessage(
   message: string,
@@ -470,11 +482,11 @@ export async function streamDataAgentMessage(
     res = await fetch('/api/agent/chat/stream', {
       method: 'POST',
       body: form,
-      signal: AbortSignal.timeout(210000),
+      signal: AbortSignal.timeout(AGENT_REQUEST_TIMEOUT_MS),
     })
   } catch (error) {
     if (error instanceof DOMException && error.name === 'TimeoutError') {
-      throw new Error('Agent 请求超时，请检查模型服务或缩小数据文件。')
+      throw new Error('Agent 请求超过 3 小时，请检查模型服务或缩小任务规模。')
     }
     throw new Error('Agent 无法连接，请确认后端服务正在运行。')
   }

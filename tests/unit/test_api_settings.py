@@ -103,6 +103,7 @@ def test_active_discussion_llm_uses_saved_generation_settings(monkeypatch, tmp_p
                         "model": "test-model",
                         "maxTokens": 3072,
                         "temperature": 0.1,
+                        "reasoningEffort": "max",
                     }
                 ],
                 "active_id": "cfg_1",
@@ -113,6 +114,7 @@ def test_active_discussion_llm_uses_saved_generation_settings(monkeypatch, tmp_p
     assert main._active_discussion_llm() == "discussion-llm"
     assert captured["max_tokens"] == 3072
     assert captured["temperature"] == 0.1
+    assert captured["reasoning_effort"] == "max"
     assert captured["fallback_env"] is False
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import pandas as pd
@@ -9,7 +10,11 @@ from data_analysis.agent.graph import iter_graph, run_graph
 from data_analysis.agent.loop import Action, AgentLoop, Finish, IterationLimitError
 from data_analysis.agent.state import AgentState, Observation
 from data_analysis.runtime import Harness
-from data_analysis.tools import ToolRegistry, create_data_profile_registry
+from data_analysis.tools import (
+    ToolRegistry,
+    create_agent_tool_registry,
+    create_data_profile_registry,
+)
 
 
 class ScriptedLlm:
@@ -185,3 +190,63 @@ def test_graph_can_finish_without_using_available_data_tool(tmp_path) -> None:
     assert finish.answer == "均值是算术平均数。"
     assert state.observations == []
     assert sandbox.call_count == 0
+
+
+def test_graph_can_choose_real_row_inspection(tmp_path) -> None:
+    path = tmp_path / "data.csv"
+    pd.DataFrame({"销量": [10, 20, 30]}).to_csv(path, index=False)
+    registry = create_data_profile_registry([path])
+    llm = ScriptedLlm(
+        [
+            '{"type":"action","thought":"按要求查看第 2 行",'
+            '"tool_name":"inspect_data_rows",'
+            '"arguments":{"start_row":2,"row_count":1}}',
+            '{"type":"finish","thought":"已核实真实记录",'
+            '"answer":"第 2 行销量是 20。"}',
+        ]
+    )
+    state = AgentState(user_query="查看第 2 行真实数据", data_paths=[str(path)])
+
+    finish = run_graph(
+        state,
+        AgentLoop(llm, registry.specs(), "根据指令自主选择工具"),
+        Harness(registry),
+    )
+
+    assert finish.answer == "第 2 行销量是 20。"
+    assert state.observations[0].tool_name == "inspect_data_rows"
+    assert state.observations[0].result["rows"] == [
+        {"row_number": 2, "values": [20]}
+    ]
+
+
+def test_graph_can_write_code_observe_and_rethink(tmp_path) -> None:
+    registry = create_agent_tool_registry([], tmp_path / "output")
+    code_action = json.dumps(
+        {
+            "type": "action",
+            "thought": "需要计算验证结果",
+            "tool_name": "execute_python",
+            "arguments": {"code": "result = {'sum': sum(range(1, 6))}"},
+        },
+        ensure_ascii=False,
+    )
+    llm = ScriptedLlm(
+        [
+            code_action,
+            '{"type":"finish","thought":"计算结果已经充分",'
+            '"answer":"1 到 5 的和是 15。"}',
+        ]
+    )
+    state = AgentState(user_query="计算 1 到 5 的和")
+
+    finish = run_graph(
+        state,
+        AgentLoop(llm, registry.specs(), "需要时编写代码验证"),
+        Harness(registry),
+    )
+
+    assert finish.answer == "1 到 5 的和是 15。"
+    assert state.observations[0].tool_name == "execute_python"
+    assert state.observations[0].result["result"] == {"sum": 15}
+    assert '"sum": 15' in llm.calls[1][-1][1]

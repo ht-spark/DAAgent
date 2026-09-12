@@ -15,6 +15,7 @@ from data_analysis.tools import (
     ToolNotFoundError,
     ToolRegistry,
     ToolSpec,
+    create_agent_tool_registry,
     create_data_profile_registry,
 )
 
@@ -105,13 +106,50 @@ def test_profile_registry_binds_authorized_files(tmp_path) -> None:
     tool = registry.resolve("profile_data")
     result = tool.invoke({})
 
-    assert len(registry) == 1
+    assert len(registry) == 2
     assert registry.specs()[0].parameters == {
         "type": "object",
         "properties": {},
         "additionalProperties": False,
     }
     assert result["summary"]["row_count"] == 3
+
+
+def test_registry_runs_real_row_inspection(tmp_path) -> None:
+    path = tmp_path / "data.csv"
+    pd.DataFrame({"销量": [10, 20, 30]}).to_csv(path, index=False)
+    registry = create_data_profile_registry([path])
+
+    result = registry.resolve("inspect_data_rows").invoke(
+        {"start_row": 2, "row_count": 2}
+    )
+
+    assert [spec.name for spec in registry.specs()] == [
+        "profile_data",
+        "inspect_data_rows",
+    ]
+    assert result["rows"] == [
+        {"row_number": 2, "values": [20]},
+        {"row_number": 3, "values": [30]},
+    ]
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {},
+        {"row_count": True},
+        {"row_count": 201},
+        {"row_count": 1, "unknown": 1},
+    ],
+)
+def test_inspect_registry_rejects_malformed_arguments(tmp_path, arguments) -> None:
+    path = tmp_path / "data.csv"
+    pd.DataFrame({"销量": [1]}).to_csv(path, index=False)
+    tool = create_data_profile_registry([path]).resolve("inspect_data_rows")
+
+    with pytest.raises(ToolArgumentsError):
+        tool.invoke(arguments)
 
 
 def test_profile_registry_rejects_llm_arguments(tmp_path) -> None:
@@ -144,3 +182,108 @@ def test_agent_loop_consumes_registry_specs() -> None:
 
     assert decision.tool_name == "profile_data"
     assert AgentToolSpec is ToolSpec
+
+
+def test_agent_registry_always_exposes_dynamic_python(tmp_path) -> None:
+    registry = create_agent_tool_registry([], tmp_path / "output")
+
+    assert [spec.name for spec in registry.specs()] == [
+        "write_artifact",
+        "execute_python",
+    ]
+    result = registry.resolve("execute_python").invoke(
+        {"code": "print('ok')\nresult = {'value': 2 + 3}"}
+    )
+
+    assert result["stdout"] == "ok\n"
+    assert result["result"] == {"value": 5}
+
+
+def test_agent_registry_combines_data_and_code_tools(tmp_path) -> None:
+    path = tmp_path / "data.csv"
+    pd.DataFrame({"销量": [1]}).to_csv(path, index=False)
+
+    registry = create_agent_tool_registry([path], tmp_path / "output")
+
+    assert [spec.name for spec in registry.specs()] == [
+        "profile_data",
+        "inspect_data_rows",
+        "write_artifact",
+        "execute_python",
+    ]
+
+
+def test_agent_registry_keeps_documents_out_of_profile_tool(tmp_path) -> None:
+    csv_path = tmp_path / "data.csv"
+    pdf_path = tmp_path / "report.pdf"
+    pd.DataFrame({"销量": [1, 2]}).to_csv(csv_path, index=False)
+    pdf_path.write_bytes(b"pdf-content")
+    registry = create_agent_tool_registry(
+        [csv_path, pdf_path],
+        tmp_path / "output",
+    )
+
+    profile = registry.resolve("profile_data").invoke({})
+    code_result = registry.resolve("execute_python").invoke(
+        {
+            "code": (
+                "from pathlib import Path\n"
+                "result = sorted(Path(path).suffix for path in DATA_FILES)"
+            )
+        }
+    )
+
+    assert profile["summary"]["file_count"] == 1
+    assert profile["files"][0]["file_name"] == "data.csv"
+    assert code_result["result"] == [".csv", ".pdf"]
+
+
+@pytest.mark.parametrize("arguments", [{}, {"code": ""}, {"code": "x", "extra": 1}])
+def test_agent_registry_rejects_invalid_python_arguments(
+    tmp_path,
+    arguments,
+) -> None:
+    tool = create_agent_tool_registry([], tmp_path / "output").resolve(
+        "execute_python"
+    )
+
+    with pytest.raises(ToolArgumentsError):
+        tool.invoke(arguments)
+
+
+def test_agent_registry_writes_artifact(tmp_path) -> None:
+    output_dir = tmp_path / "output"
+    tool = create_agent_tool_registry([], output_dir).resolve("write_artifact")
+
+    result = tool.invoke(
+        {
+            "relative_path": "scripts/analysis.py",
+            "content": "result = 42\n",
+        }
+    )
+
+    assert result["path"] == "scripts/analysis.py"
+    assert (output_dir / "scripts" / "analysis.py").read_text(
+        encoding="utf-8"
+    ) == "result = 42\n"
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {},
+        {"relative_path": "result.md"},
+        {"relative_path": "result.md", "content": "x", "overwrite": 1},
+        {"relative_path": "result.md", "content": "x", "extra": True},
+    ],
+)
+def test_agent_registry_rejects_invalid_artifact_arguments(
+    tmp_path,
+    arguments,
+) -> None:
+    tool = create_agent_tool_registry([], tmp_path / "output").resolve(
+        "write_artifact"
+    )
+
+    with pytest.raises(ToolArgumentsError):
+        tool.invoke(arguments)

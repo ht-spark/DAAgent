@@ -1,6 +1,9 @@
 // 本地保存的 API 配置（localStorage）
 // 一次填写，多次复用；并标记一个当前激活的供 Submit 默认填入。
 
+// 思考程度：off 表示不传给模型；其余透传给支持 reasoning_effort 的端点
+export type ReasoningEffort = 'off' | 'low' | 'medium' | 'high' | 'max'
+
 export type ApiConfig = {
   id: string
   name: string
@@ -10,7 +13,26 @@ export type ApiConfig = {
   model: string
   maxTokens?: number
   temperature?: number
+  reasoningEffort?: ReasoningEffort
   createdAt: number
+}
+
+/** 思考程度下拉选项（值 → 展示名） */
+export const REASONING_EFFORT_OPTIONS: { value: ReasoningEffort; label: string }[] = [
+  { value: 'off', label: '关闭' },
+  { value: 'low', label: '低' },
+  { value: 'medium', label: '中' },
+  { value: 'high', label: '高' },
+  { value: 'max', label: '最高' },
+]
+
+export function isReasoningEffort(v: unknown): v is ReasoningEffort {
+  return v === 'off' || v === 'low' || v === 'medium' || v === 'high' || v === 'max'
+}
+
+export function reasoningEffortLabel(v: ReasoningEffort | undefined): string {
+  if (!v || v === 'off') return '关闭'
+  return REASONING_EFFORT_OPTIONS.find((o) => o.value === v)?.label ?? v
 }
 
 export type ExternalService = 'tavily' | 'mineru'

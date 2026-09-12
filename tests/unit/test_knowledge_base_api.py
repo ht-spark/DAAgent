@@ -5,7 +5,9 @@ import io
 import json
 from types import SimpleNamespace
 
+from docx import Document
 from fastapi import UploadFile
+from pypdf import PdfWriter
 from KnowledgeBase import upload_file
 from server import main
 from server.schemas import (
@@ -313,6 +315,38 @@ def test_prepare_discussion_attachments_extracts_markdown(monkeypatch):
     attachments = asyncio.run(main._prepare_discussion_attachments([upload]))
 
     assert attachments == [{"kind": "text", "name": "notes.md", "content": "# 建模笔记"}]
+
+
+def test_prepare_discussion_attachments_extracts_docx():
+    buffer = io.BytesIO()
+    document = Document()
+    document.add_paragraph("DOCX 建模说明")
+    document.save(buffer)
+    upload = UploadFile(filename="report.docx", file=io.BytesIO(buffer.getvalue()))
+
+    attachments = asyncio.run(main._prepare_discussion_attachments([upload]))
+
+    assert attachments == [
+        {"kind": "text", "name": "report.docx", "content": "DOCX 建模说明"}
+    ]
+
+
+def test_prepare_discussion_attachments_accepts_scanned_pdf_without_text():
+    buffer = io.BytesIO()
+    writer = PdfWriter()
+    writer.add_blank_page(width=100, height=100)
+    writer.write(buffer)
+    upload = UploadFile(filename="scan.pdf", file=io.BytesIO(buffer.getvalue()))
+
+    attachments = asyncio.run(main._prepare_discussion_attachments([upload]))
+
+    assert attachments == [
+        {
+            "kind": "text",
+            "name": "scan.pdf",
+            "content": "[PDF 未提取到可搜索文本，可能是扫描件]",
+        }
+    ]
 
 
 def test_brainstorm_discussion_endpoints_restore_saved_messages(monkeypatch):

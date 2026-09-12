@@ -11,6 +11,9 @@ import {
   ExternalServiceConfig,
   loadExternalServiceConfigs,
   saveExternalServiceConfigs,
+  REASONING_EFFORT_OPTIONS,
+  isReasoningEffort,
+  reasoningEffortLabel,
 } from '../apiConfigs'
 import { persistApiSettings, syncApiSettingsCache } from '../api'
 
@@ -22,6 +25,14 @@ const EMPTY: Omit<ApiConfig, 'id' | 'createdAt'> = {
   model: '',
   maxTokens: 20000,
   temperature: 0.3,
+  reasoningEffort: 'off',
+}
+
+/** 服务商展示名，卡片与弹窗共用 */
+const PROVIDER_LABELS: Record<ApiConfig['provider'], string> = {
+  openai: 'OpenAI',
+  deepseek: 'DeepSeek',
+  custom: '自定义',
 }
 
 const SERVICE_META: Record<ExternalService, { name: string; keyLabel: string; hint: string }> = {
@@ -46,6 +57,27 @@ export default function ApiManager() {
     loadExternalServiceConfigs,
   )
   const persistDebounceRef = useRef<number | null>(null)
+  const editorOpen = isNew || Boolean(editing.id)
+
+  // 弹窗打开时锁定页面滚动，关闭后恢复
+  useEffect(() => {
+    if (!editorOpen) return
+    const prev = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => {
+      document.body.style.overflow = prev
+    }
+  }, [editorOpen])
+
+  // Esc 关闭编辑弹窗
+  useEffect(() => {
+    if (!editorOpen) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') cancelEdit()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [editorOpen])
 
   useEffect(() => {
     setConfigs(loadConfigs())
@@ -99,6 +131,9 @@ export default function ApiManager() {
     const model = editing.model ?? ''
     const maxTokens = Number(editing.maxTokens)
     const temperature = Number(editing.temperature)
+    const reasoningEffort = isReasoningEffort(editing.reasoningEffort)
+      ? editing.reasoningEffort
+      : 'off'
 
     if (!Number.isInteger(maxTokens) || maxTokens < 1 || maxTokens > 200000) {
       window.alert('最大输出 Token 必须是 1 到 200000 之间的整数。')
@@ -119,6 +154,7 @@ export default function ApiManager() {
         model,
         maxTokens,
         temperature,
+        reasoningEffort,
         createdAt: Date.now(),
       }
       const next = [...configs, c]
@@ -127,7 +163,7 @@ export default function ApiManager() {
     } else if (editing.id) {
       const next = configs.map((c) =>
         c.id === editing.id
-          ? { ...c, name, provider, apiKey, baseUrl, model, maxTokens, temperature }
+          ? { ...c, name, provider, apiKey, baseUrl, model, maxTokens, temperature, reasoningEffort }
           : c,
       )
       persist(next, activeId)
@@ -186,98 +222,153 @@ export default function ApiManager() {
         </button>
       </div>
 
-      {(isNew || editing.id) && (
-        <div className="api-editor">
-          <h2>{isNew ? '新增 API 配置' : '编辑 API 配置'}</h2>
-          <p className="api-editor-lead">填写服务商与密钥信息，保存后可作为默认模型使用。</p>
-
-          <div className="field">
-            <label>配置名（用于区分多个 API）</label>
-            <input
-              type="text"
-              value={editing.name ?? ''}
-              onChange={(e) => setEditing({ ...editing, name: e.target.value })}
-              placeholder="例如：DeepSeek 个人 / OpenAI 官方"
-            />
-          </div>
-
-          <div className="form-row">
-            <div className="field" style={{ flex: 1 }}>
-              <label>服务商</label>
-              <select
-                value={editing.provider ?? 'openai'}
-                onChange={(e) =>
-                  setEditing({ ...editing, provider: e.target.value as ApiConfig['provider'] })
-                }
+      {/* 编辑 / 新增：模态弹窗，点击遮罩或按 Esc 可关闭 */}
+      {editorOpen && (
+        <div className="api-modal-mask" onClick={cancelEdit} role="presentation">
+          <div
+            className="api-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="api-editor-title"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <header className="api-modal-head">
+              <div>
+                <h2 id="api-editor-title">{isNew ? '新增 API 配置' : '编辑 API 配置'}</h2>
+                <p className="api-modal-lead">填写服务商与密钥信息，保存后可作为默认模型使用。</p>
+              </div>
+              <button
+                type="button"
+                className="api-modal-close"
+                onClick={cancelEdit}
+                aria-label="关闭"
               >
-                <option value="openai">OpenAI</option>
-                <option value="deepseek">DeepSeek</option>
-                <option value="custom">自定义</option>
-              </select>
-            </div>
-            <div className="field" style={{ flex: 1 }}>
-              <label>模型</label>
-              <input
-                type="text"
-                value={editing.model ?? ''}
-                onChange={(e) => setEditing({ ...editing, model: e.target.value })}
-                placeholder="如 gpt-4o-mini / deepseek-chat"
-              />
-            </div>
-          </div>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true">
+                  <path d="M6 6l12 12M18 6L6 18" strokeLinecap="round" />
+                </svg>
+              </button>
+            </header>
 
-          <div className="field">
-            <label>Base URL</label>
-            <input
-              type="url"
-              value={editing.baseUrl ?? ''}
-              onChange={(e) => setEditing({ ...editing, baseUrl: e.target.value })}
-              placeholder="可留空；OpenAI 官方默认；DeepSeek 可填 https://api.deepseek.com"
-            />
-          </div>
+            <div className="api-modal-body">
+              <div className="field">
+                <label htmlFor="api-name">配置名</label>
+                <input
+                  id="api-name"
+                  type="text"
+                  value={editing.name ?? ''}
+                  onChange={(e) => setEditing({ ...editing, name: e.target.value })}
+                  placeholder="例如：DeepSeek 个人 / OpenAI 官方"
+                  autoFocus
+                />
+              </div>
 
-          <div className="field">
-            <label>API Key</label>
-            <input
-              type="password"
-              value={editing.apiKey ?? ''}
-              onChange={(e) => setEditing({ ...editing, apiKey: e.target.value })}
-              placeholder="sk-..."
-            />
-          </div>
+              <div className="form-row">
+                <div className="field">
+                  <label htmlFor="api-provider">服务商</label>
+                  <select
+                    id="api-provider"
+                    value={editing.provider ?? 'openai'}
+                    onChange={(e) =>
+                      setEditing({ ...editing, provider: e.target.value as ApiConfig['provider'] })
+                    }
+                  >
+                    <option value="openai">OpenAI</option>
+                    <option value="deepseek">DeepSeek</option>
+                    <option value="custom">自定义</option>
+                  </select>
+                </div>
+                <div className="field">
+                  <label htmlFor="api-model">模型</label>
+                  <input
+                    id="api-model"
+                    type="text"
+                    value={editing.model ?? ''}
+                    onChange={(e) => setEditing({ ...editing, model: e.target.value })}
+                    placeholder="如 gpt-4o-mini / deepseek-chat"
+                  />
+                </div>
+              </div>
 
-          <div className="form-row">
-            <div className="field" style={{ flex: 1 }}>
-              <label>最大输出 Token</label>
-              <input
-                type="number"
-                min="1"
-                max="200000"
-                step="1"
-                value={editing.maxTokens ?? 20000}
-                onChange={(e) => setEditing({ ...editing, maxTokens: Number(e.target.value) })}
-              />
+              <div className="field">
+                <label htmlFor="api-base-url">Base URL</label>
+                <input
+                  id="api-base-url"
+                  type="url"
+                  value={editing.baseUrl ?? ''}
+                  onChange={(e) => setEditing({ ...editing, baseUrl: e.target.value })}
+                  placeholder="可留空；OpenAI 官方默认；DeepSeek 可填 https://api.deepseek.com"
+                />
+              </div>
+
+              <div className="field">
+                <label htmlFor="api-key">API Key</label>
+                <input
+                  id="api-key"
+                  type="password"
+                  value={editing.apiKey ?? ''}
+                  onChange={(e) => setEditing({ ...editing, apiKey: e.target.value })}
+                  placeholder="sk-..."
+                  autoComplete="off"
+                />
+              </div>
+
+              <div className="form-row">
+                <div className="field">
+                  <label htmlFor="api-max-tokens">最大输出 Token</label>
+                  <input
+                    id="api-max-tokens"
+                    type="number"
+                    min="1"
+                    max="200000"
+                    step="1"
+                    value={editing.maxTokens ?? 20000}
+                    onChange={(e) => setEditing({ ...editing, maxTokens: Number(e.target.value) })}
+                  />
+                </div>
+                <div className="field">
+                  <label htmlFor="api-temperature">Temperature</label>
+                  <input
+                    id="api-temperature"
+                    type="number"
+                    min="0"
+                    max="2"
+                    step="0.1"
+                    value={editing.temperature ?? 0.3}
+                    onChange={(e) => setEditing({ ...editing, temperature: Number(e.target.value) })}
+                  />
+                </div>
+              </div>
+
+              <div className="field">
+                <label htmlFor="api-reasoning-effort">思考程度</label>
+                <select
+                  id="api-reasoning-effort"
+                  value={isReasoningEffort(editing.reasoningEffort) ? editing.reasoningEffort : 'off'}
+                  onChange={(e) => {
+                    const v = e.target.value
+                    if (isReasoningEffort(v)) setEditing({ ...editing, reasoningEffort: v })
+                  }}
+                >
+                  {REASONING_EFFORT_OPTIONS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+                <p className="api-field-hint">
+                  仅对支持 reasoning_effort 的模型生效；关闭时不传该参数。
+                </p>
+              </div>
             </div>
-            <div className="field" style={{ flex: 1 }}>
-              <label>Temperature</label>
-              <input
-                type="number"
-                min="0"
-                max="2"
-                step="0.1"
-                value={editing.temperature ?? 0.3}
-                onChange={(e) => setEditing({ ...editing, temperature: Number(e.target.value) })}
-              />
-            </div>
-          </div>
 
-          <div className="api-editor-actions">
-            <button type="button" className="api-save" onClick={save}>
-              保存
-            </button>
-            <button type="button" className="api-cancel" onClick={cancelEdit}>
-              取消
-            </button>
+            <footer className="api-modal-foot">
+              <button type="button" className="api-cancel" onClick={cancelEdit}>
+                取消
+              </button>
+              <button type="button" className="api-save" onClick={save}>
+                保存
+              </button>
+            </footer>
           </div>
         </div>
       )}
@@ -290,9 +381,16 @@ export default function ApiManager() {
 
         {configs.length === 0 ? (
           <div className="api-empty">
-            还没有保存任何 API。
-            <br />
-            点击右上角 <strong>新增配置</strong>，添加你的第一个模型服务。
+            <div className="api-empty-mark" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6">
+                <path d="M12 5v14M5 12h14" strokeLinecap="round" />
+              </svg>
+            </div>
+            <p className="api-empty-title">还没有保存任何 API</p>
+            <p className="api-empty-desc">添加第一个模型服务后，新建任务会自动带入。</p>
+            <button type="button" className="api-btn primary" onClick={startNew}>
+              新增配置
+            </button>
           </div>
         ) : (
           <div className="api-grid">
@@ -311,7 +409,7 @@ export default function ApiManager() {
                   <div className="api-meta">
                     <div>
                       <span className="k">服务商</span>
-                      <span className="v">{c.provider}</span>
+                      <span className="v">{PROVIDER_LABELS[c.provider] ?? c.provider}</span>
                     </div>
                     <div>
                       <span className="k">模型</span>
@@ -319,7 +417,7 @@ export default function ApiManager() {
                     </div>
                     <div>
                       <span className="k">Base URL</span>
-                      <span className="v">{c.baseUrl || '默认'}</span>
+                      <span className="v" title={c.baseUrl || undefined}>{c.baseUrl || '默认'}</span>
                     </div>
                     <div>
                       <span className="k">Key</span>
@@ -332,6 +430,10 @@ export default function ApiManager() {
                     <div>
                       <span className="k">Temperature</span>
                       <span className="v">{c.temperature ?? 0.3}</span>
+                    </div>
+                    <div>
+                      <span className="k">思考程度</span>
+                      <span className="v">{reasoningEffortLabel(c.reasoningEffort)}</span>
                     </div>
                   </div>
                   <div className="api-actions">

@@ -21,6 +21,10 @@ class ModelConfig(BaseModel):
     temperature: float | None = Field(
         None, ge=0, le=2, description="生成随机性"
     )
+    reasoning_effort: str | None = Field(
+        None,
+        description="思考程度：low | medium | high | max；缺省/None 表示不传该参数",
+    )
 
 
 class RunSummary(BaseModel):
