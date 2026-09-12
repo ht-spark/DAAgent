@@ -9,7 +9,6 @@ from .loop import (
     DecisionParseError,
     Finish,
     IterationLimitError,
-    RequiredToolError,
     ToolSpec,
     UnknownToolError,
 )
@@ -27,7 +26,6 @@ __all__ = [
     "Finish",
     "IterationLimitError",
     "Observation",
-    "RequiredToolError",
     "ToolSpec",
     "UnknownToolError",
 ]

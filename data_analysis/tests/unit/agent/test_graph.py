@@ -64,10 +64,10 @@ def test_graph_runs_profile_action_then_finishes(tmp_path) -> None:
 
 def test_graph_returns_immediate_finish_without_tool_call() -> None:
     llm = ScriptedLlm(
-        ['{"type":"finish","thought":"无需工具","answer":"请先上传数据。"}']
+        ['{"type":"finish","thought":"无需工具","answer":"线性回归用于拟合线性关系。"}']
     )
     sandbox = FakeSandbox()
-    state = AgentState(user_query="有什么数据？")
+    state = AgentState(user_query="什么是线性回归？")
 
     finish = run_graph(
         state,
@@ -75,13 +75,16 @@ def test_graph_returns_immediate_finish_without_tool_call() -> None:
         Harness(ToolRegistry(), sandbox=sandbox),
     )
 
-    assert finish == Finish(thought="无需工具", answer="请先上传数据。")
+    assert finish == Finish(
+        thought="无需工具",
+        answer="线性回归用于拟合线性关系。",
+    )
     assert state.iteration == 0
     assert state.observations == []
     assert sandbox.call_count == 0
     assert [message.content for message in state.messages] == [
-        "有什么数据？",
-        "请先上传数据。",
+        "什么是线性回归？",
+        "线性回归用于拟合线性关系。",
     ]
 
 
@@ -165,31 +168,20 @@ def test_iter_graph_exposes_action_observation_and_finish(tmp_path) -> None:
     assert events[2].answer == "数据共有 2 行。"
 
 
-def test_graph_corrects_premature_finish_when_profile_is_required(tmp_path) -> None:
+def test_graph_can_finish_without_using_available_data_tool(tmp_path) -> None:
     path = tmp_path / "data.csv"
     pd.DataFrame({"销量": [1, 2]}).to_csv(path, index=False)
     registry = create_data_profile_registry([path])
-    llm = ScriptedLlm(
-        [
-            '{"type":"finish","answer":"请重新上传数据"}',
-            '{"type":"action","thought":"读取已上传数据",'
-            '"tool_name":"profile_data","arguments":{}}',
-            '{"type":"finish","answer":"数据共有 2 行。"}',
-        ]
-    )
-    state = AgentState(user_query="分析数据特点", data_paths=[str(path)])
+    llm = ScriptedLlm(['{"type":"finish","answer":"均值是算术平均数。"}'])
+    sandbox = FakeSandbox()
+    state = AgentState(user_query="解释一下均值", data_paths=[str(path)])
 
     finish = run_graph(
         state,
-        AgentLoop(
-            llm,
-            registry.specs(),
-            "必须依据真实数据回答",
-            required_tools=("profile_data",),
-        ),
-        Harness(registry),
+        AgentLoop(llm, registry.specs(), "根据问题自主决定是否调用工具"),
+        Harness(registry, sandbox=sandbox),
     )
 
-    assert finish.answer == "数据共有 2 行。"
-    assert state.observations[0].tool_name == "profile_data"
-    assert state.observations[0].success is True
+    assert finish.answer == "均值是算术平均数。"
+    assert state.observations == []
+    assert sandbox.call_count == 0

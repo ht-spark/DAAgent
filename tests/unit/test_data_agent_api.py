@@ -7,7 +7,7 @@ import io
 import pytest
 from fastapi import HTTPException, UploadFile
 
-from data_analysis.agent.loop import Action
+from data_analysis.agent.loop import Action, Finish
 from data_analysis.agent.state import Observation
 from server import main
 
@@ -58,3 +58,51 @@ def test_agent_events_expose_progress_without_tool_arguments():
     assert "arguments" not in action_payload
     assert action_payload["thought"] == "读取已授权数据"
     assert observation_payload["summary"] == {"row_count": 2}
+
+
+def test_agent_finish_exposes_public_reasoning_summary():
+    finish = Finish(thought="数据画像已经足以支撑结论", answer="分析完成")
+
+    payload = main._agent_event_payload(finish)
+
+    assert payload == {
+        "type": "agent_reasoning",
+        "summary": "数据画像已经足以支撑结论",
+    }
+
+
+def test_agent_artifacts_only_include_generated_outputs(monkeypatch, tmp_path):
+    monkeypatch.setattr(main, "ARTIFACTS_ROOT", tmp_path)
+    run_id = "a" * 32
+    run_dir = tmp_path / "agent_runs" / run_id
+    (run_dir / "input").mkdir(parents=True)
+    (run_dir / "reports").mkdir()
+    (run_dir / "input" / "source.csv").write_text("x\n1\n", encoding="utf-8")
+    (run_dir / "reports" / "summary.md").write_text("# 结果", encoding="utf-8")
+
+    artifacts = main._list_agent_artifacts(run_id)
+
+    assert artifacts == [
+        {
+            "run_id": run_id,
+            "path": "reports/summary.md",
+            "name": "summary.md",
+            "size_bytes": 8,
+        }
+    ]
+
+
+def test_agent_artifact_resolver_rejects_inputs_and_path_traversal(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setattr(main, "ARTIFACTS_ROOT", tmp_path)
+    run_id = "b" * 32
+    input_dir = tmp_path / "agent_runs" / run_id / "input"
+    input_dir.mkdir(parents=True)
+    (input_dir / "source.csv").write_text("x\n1\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="路径无效"):
+        main._resolve_agent_artifact(run_id, "input/source.csv")
+    with pytest.raises(ValueError, match="路径无效"):
+        main._resolve_agent_artifact(run_id, "../outside.txt")

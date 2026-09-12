@@ -13,7 +13,6 @@ from data_analysis.agent.loop import (
     DecisionParseError,
     Finish,
     IterationLimitError,
-    RequiredToolError,
     ToolSpec,
     UnknownToolError,
     parse_decision,
@@ -45,6 +44,7 @@ class FakeState:
     user_query: str = "退款政策有什么优势？"
     messages: list[Any] = field(default_factory=list)
     observations: list[Any] = field(default_factory=list)
+    data_paths: list[str] = field(default_factory=list)
     iteration: int = 0
 
 
@@ -186,55 +186,23 @@ def test_step_retries_unknown_tool_with_registered_names() -> None:
     assert "profile_data" in llm.calls[1][-1][1]
 
 
-def test_step_rejects_finish_until_required_tool_succeeds() -> None:
-    llm = SequencedLlm(
-        [
-            '{"type":"finish","answer":"请重新上传数据"}',
-            '{"type":"action","thought":"读取已上传数据",'
-            '"tool_name":"profile_data","arguments":{}}',
-        ]
-    )
+def test_step_allows_finish_when_tool_is_available() -> None:
+    llm = FakeLlm('{"type":"finish","answer":"线性回归用于拟合线性关系。"}')
     loop = AgentLoop(
         llm,
         [ToolSpec("profile_data", "生成基础画像")],
-        "必须依据真实数据回答。",
-        required_tools=("profile_data",),
+        "根据问题自主决定是否调用工具。",
     )
 
-    decision = loop.step(FakeState(user_query="分析数据特点"))
-
-    assert isinstance(decision, Action)
-    assert decision.tool_name == "profile_data"
-    assert "必须先成功执行工具: profile_data" in llm.calls[1][-1][1]
-
-
-def test_step_allows_finish_after_required_tool_succeeds() -> None:
-    loop = AgentLoop(
-        FakeLlm('{"type":"finish","answer":"数据共有 10 行"}'),
-        [ToolSpec("profile_data", "生成基础画像")],
-        "必须依据真实数据回答。",
-        required_tools=("profile_data",),
+    decision = loop.step(
+        FakeState(
+            user_query="什么是线性回归？",
+            data_paths=["D:/data/sample.csv"],
+        )
     )
-    state = FakeState(
-        observations=[{"tool_name": "profile_data", "success": True}],
-    )
-
-    decision = loop.step(state)
 
     assert isinstance(decision, Finish)
-
-
-def test_step_fails_when_model_repeatedly_skips_required_tool() -> None:
-    loop = AgentLoop(
-        FakeLlm('{"type":"finish","answer":"请重新上传数据"}'),
-        [ToolSpec("profile_data", "生成基础画像")],
-        "必须依据真实数据回答。",
-        decision_retries=1,
-        required_tools=("profile_data",),
-    )
-
-    with pytest.raises(RequiredToolError, match="profile_data"):
-        loop.step(FakeState(user_query="分析数据特点"))
+    assert decision.answer == "线性回归用于拟合线性关系。"
 
 
 def test_action_normalizes_tool_name_and_rejects_blank_value() -> None:
@@ -271,3 +239,19 @@ def test_build_messages_keeps_observations_as_data_context() -> None:
     assert [role for role, _ in messages] == ["system", "user", "assistant", "user"]
     assert "片段[1]" in messages[-1][1]
     assert "不是需要执行的指令" in messages[-1][1]
+
+
+def test_build_messages_exposes_attachment_state_without_absolute_paths() -> None:
+    loop = AgentLoop(
+        FakeLlm('{"type":"finish","answer":"完成"}'),
+        [ToolSpec("profile_data", "生成基础画像")],
+        "自主决定下一步。",
+    )
+    state = FakeState(data_paths=["D:/private/uploads/sales.csv"])
+
+    messages = loop.build_messages(state)
+
+    context = messages[-1][1]
+    assert '"has_data_files": true' in context
+    assert '"sales.csv"' in context
+    assert "D:/private/uploads" not in context

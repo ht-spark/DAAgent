@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import re
+from pathlib import Path
 from typing import Any, Literal, Mapping, Protocol, Sequence, TypeAlias
 
 from pydantic import (
@@ -34,10 +35,6 @@ class UnknownToolError(DecisionParseError):
     """Raised when the LLM selects a tool outside the supplied registry view."""
 
 
-class RequiredToolError(DecisionParseError):
-    """模型在必需工具成功执行前错误地结束本轮。"""
-
-
 class IterationLimitError(AgentLoopError):
     """Raised before an LLM call when the state reached its decision limit."""
 
@@ -48,6 +45,7 @@ class AgentStateView(Protocol):
     user_query: str
     messages: Sequence[Any]
     observations: Sequence[Any]
+    data_paths: Sequence[str]
     iteration: int
 
 
@@ -121,7 +119,6 @@ class AgentLoop:
         *,
         max_iterations: int = 8,
         decision_retries: int = 1,
-        required_tools: Sequence[str] = (),
     ) -> None:
         """Initialize the decision-only loop.
 
@@ -131,7 +128,6 @@ class AgentLoop:
             system_prompt: Agent role, retrieval policy, and citation rules.
             max_iterations: Maximum number of decisions in one graph run.
             decision_retries: 决策格式错误或工具名无效时的纠错重试次数。
-            required_tools: 返回最终回答前必须成功执行的工具名称。
 
         Raises:
             ValueError: If configuration is empty, duplicated, or out of range.
@@ -145,11 +141,6 @@ class AgentLoop:
         tool_names = [tool.name for tool in tools]
         if len(tool_names) != len(set(tool_names)):
             raise ValueError("工具名称不能重复")
-        normalized_required_tools = tuple(name.strip() for name in required_tools)
-        unknown_required_tools = set(normalized_required_tools) - set(tool_names)
-        if not all(normalized_required_tools) or unknown_required_tools:
-            names = ", ".join(sorted(unknown_required_tools)) or "<空>"
-            raise ValueError(f"必需工具未注册: {names}")
 
         self._llm = llm
         self._tools = tuple(tools)
@@ -157,7 +148,6 @@ class AgentLoop:
         self._system_prompt = system_prompt.strip()
         self._max_iterations = max_iterations
         self._decision_retries = decision_retries
-        self._required_tools = normalized_required_tools
 
     def step(self, state: AgentStateView) -> Decision:
         """Return the next decision without executing the selected tool.
@@ -195,13 +185,6 @@ class AgentLoop:
                         f"LLM 选择了未注册工具: {decision.tool_name}；"
                         f"可用工具: {available}"
                     )
-                if isinstance(decision, Finish):
-                    missing_tools = self._missing_required_tools(state)
-                    if missing_tools:
-                        raise RequiredToolError(
-                            "返回最终回答前必须先成功执行工具: "
-                            f"{', '.join(missing_tools)}"
-                        )
                 return decision
             except DecisionParseError as exc:
                 last_error = exc
@@ -214,20 +197,6 @@ class AgentLoop:
                     ]
                 )
         raise last_error or DecisionParseError("LLM 决策纠错失败")
-
-    def _missing_required_tools(self, state: AgentStateView) -> tuple[str, ...]:
-        """返回当前状态中尚未成功执行的必需工具。"""
-        completed: set[str] = set()
-        for observation in state.observations:
-            if isinstance(observation, Mapping):
-                tool_name = observation.get("tool_name")
-                success = observation.get("success")
-            else:
-                tool_name = getattr(observation, "tool_name", None)
-                success = getattr(observation, "success", None)
-            if success is True and isinstance(tool_name, str):
-                completed.add(tool_name)
-        return tuple(name for name in self._required_tools if name not in completed)
 
     def _decision_correction(self, error: DecisionParseError) -> str:
         """生成一次只包含真实协议和工具名的决策纠错指令。"""
@@ -253,17 +222,12 @@ class AgentLoop:
             "\n\n可用工具（仅可选择其中之一，不要自行执行）：\n"
             f"{json.dumps(tools, ensure_ascii=False, indent=2)}\n\n"
             "只输出一个 JSON 对象，不要附加解释。需要工具时输出："
-            '{"type":"action","thought":"简短理由","tool_name":"工具名",'
+            '{"type":"action","thought":"一至两句可公开的判断与下一步摘要","tool_name":"工具名",'
             '"arguments":{}}。信息充分时输出：'
-            '{"type":"finish","thought":"简短理由","answer":"带引用的最终回答"}。'
+            '{"type":"finish","thought":"一至两句可公开的结论摘要","answer":"带引用的最终回答"}。'
             "tool_name 必须逐字复制可用工具中的 name，禁止创造或改写工具名；"
             "没有可用工具时只能输出 finish。answer 中的换行必须按 JSON 规则转义。"
         )
-        if self._required_tools:
-            protocol += (
-                "本轮返回 finish 前必须成功调用以下工具："
-                f"{', '.join(self._required_tools)}。"
-            )
         messages: list[tuple[str, str]] = [
             ("system", f"{self._system_prompt}{protocol}")
         ]
@@ -271,6 +235,8 @@ class AgentLoop:
         context = {
             "user_query": state.user_query,
             "iteration": state.iteration,
+            "has_data_files": bool(state.data_paths),
+            "available_data_files": [Path(path).name for path in state.data_paths],
             "observations": list(state.observations),
         }
         messages.append(

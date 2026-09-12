@@ -357,8 +357,16 @@ export type BrainstormDiscussion = BrainstormDiscussionSummary & {
       mode?: 'inspiration' | 'agent'
       agent_run_id?: string
       agent_trace?: AgentTraceEvent[]
+      agent_artifacts?: AgentArtifact[]
     }
   }>
+}
+
+export type AgentArtifact = {
+  run_id: string
+  path: string
+  name: string
+  size_bytes: number
 }
 
 export type AgentTraceEvent = {
@@ -369,6 +377,9 @@ export type AgentTraceEvent = {
   type: 'agent_action'
   thought: string
   tool_name: string
+} | {
+  type: 'agent_reasoning'
+  summary: string
 } | {
   type: 'agent_observation'
   tool_name: string
@@ -443,7 +454,7 @@ export async function streamDataAgentMessage(
     onStarted: (runId: string, files: string[]) => void
     onTrace: (event: AgentTraceEvent) => void
     onToken: (content: string) => void
-    onDone: (discussionId: string, runId: string) => void
+    onDone: (discussionId: string, runId: string, artifacts: AgentArtifact[]) => void
   },
   configId?: string | null,
 ): Promise<void> {
@@ -456,19 +467,19 @@ export async function streamDataAgentMessage(
 
   let res: Response
   try {
-    res = await fetch('/api/agent/profile/stream', {
+    res = await fetch('/api/agent/chat/stream', {
       method: 'POST',
       body: form,
       signal: AbortSignal.timeout(210000),
     })
   } catch (error) {
     if (error instanceof DOMException && error.name === 'TimeoutError') {
-      throw new Error('数据 Agent 请求超时，请检查模型服务或缩小数据文件。')
+      throw new Error('Agent 请求超时，请检查模型服务或缩小数据文件。')
     }
-    throw new Error('数据 Agent 无法连接，请确认后端服务正在运行。')
+    throw new Error('Agent 无法连接，请确认后端服务正在运行。')
   }
-  if (!res.ok) throw new Error(await extractDetail(res, '数据 Agent 启动失败'))
-  if (!res.body) throw new Error('数据 Agent 未返回流式内容。')
+  if (!res.ok) throw new Error(await extractDetail(res, 'Agent 启动失败'))
+  if (!res.body) throw new Error('Agent 未返回流式内容。')
 
   const reader = res.body.getReader()
   const decoder = new TextDecoder()
@@ -487,18 +498,19 @@ export async function streamDataAgentMessage(
         run_id?: string
         discussion_id?: string
         files?: string[]
+        artifacts?: AgentArtifact[]
       } & Partial<AgentTraceEvent>
       if (event.type === 'agent_started' && event.run_id) {
         handlers.onStarted(event.run_id, event.files ?? [])
         handlers.onTrace(event as AgentTraceEvent)
       }
-      if (event.type === 'agent_action' || event.type === 'agent_observation') {
+      if (event.type === 'agent_action' || event.type === 'agent_reasoning' || event.type === 'agent_observation') {
         handlers.onTrace(event as AgentTraceEvent)
       }
       if (event.type === 'token' && event.content) handlers.onToken(event.content)
       if (event.type === 'error') throw new Error(event.detail ?? '数据 Agent 运行失败。')
       if (event.type === 'done' && event.discussion_id && event.run_id) {
-        handlers.onDone(event.discussion_id, event.run_id)
+        handlers.onDone(event.discussion_id, event.run_id, event.artifacts ?? [])
       }
     }
     if (done) break

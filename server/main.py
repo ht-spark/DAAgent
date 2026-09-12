@@ -757,8 +757,13 @@ def _next_agent_event(iterator: object) -> object | None:
         return None
 
 
-def _agent_event_payload(event: Action | Observation) -> dict[str, object]:
+def _agent_event_payload(event: Action | Observation | Finish) -> dict[str, object]:
     """把内部 Agent 事件转换为可公开展示的精简载荷。"""
+    if isinstance(event, Finish):
+        return {
+            "type": "agent_reasoning",
+            "summary": event.thought,
+        }
     if isinstance(event, Action):
         return {
             "type": "agent_action",
@@ -778,7 +783,71 @@ def _agent_event_payload(event: Action | Observation) -> dict[str, object]:
     }
 
 
-@app.post("/api/agent/profile/stream")
+def _agent_run_root(run_id: str) -> Path:
+    """返回经过校验的 Agent 运行目录。"""
+    if re.fullmatch(r"[0-9a-f]{32}", run_id) is None:
+        raise ValueError("Agent 运行标识无效")
+    root = (ARTIFACTS_ROOT / "agent_runs" / run_id).resolve()
+    agent_runs_root = (ARTIFACTS_ROOT / "agent_runs").resolve()
+    if agent_runs_root not in root.parents:
+        raise ValueError("Agent 运行目录越界")
+    return root
+
+
+def _resolve_agent_artifact(run_id: str, file_path: str) -> Path:
+    """解析 Agent 输出产物，并阻止访问输入附件或目录外文件。"""
+    root = _agent_run_root(run_id)
+    relative_path = Path(file_path)
+    if (
+        relative_path.is_absolute()
+        or ".." in relative_path.parts
+        or not relative_path.parts
+        or relative_path.parts[0].casefold() == "input"
+    ):
+        raise ValueError("Agent 产物路径无效")
+    target = (root / relative_path).resolve()
+    if root not in target.parents or not target.is_file():
+        raise FileNotFoundError(f"Agent 产物不存在: {file_path}")
+    return target
+
+
+def _list_agent_artifacts(run_id: str) -> list[dict[str, object]]:
+    """列出一次 Agent 运行生成的输出文件，排除用户输入附件。"""
+    root = _agent_run_root(run_id)
+    if not root.is_dir():
+        return []
+    artifacts: list[dict[str, object]] = []
+    for path in sorted(root.rglob("*")):
+        if not path.is_file():
+            continue
+        relative_path = path.relative_to(root)
+        if relative_path.parts[0].casefold() == "input":
+            continue
+        artifacts.append(
+            {
+                "run_id": run_id,
+                "path": relative_path.as_posix(),
+                "name": path.name,
+                "size_bytes": path.stat().st_size,
+            }
+        )
+    return artifacts
+
+
+@app.get("/api/agent/runs/{run_id}/files/{file_path:path}")
+def download_agent_artifact(run_id: str, file_path: str) -> FileResponse:
+    """下载一次 Agent 运行生成的输出产物。"""
+    try:
+        target = _resolve_agent_artifact(run_id, file_path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return FileResponse(target, filename=target.name)
+
+
+@app.post("/api/agent/chat/stream")
+@app.post("/api/agent/profile/stream", include_in_schema=False)
 async def agent_profile_stream_endpoint(
     message: str = Form(""),
     discussion_id: str | None = Form(None),
@@ -786,7 +855,7 @@ async def agent_profile_stream_endpoint(
     files: list[UploadFile] | None = File(None),
     config_id: str | None = Form(None),
 ) -> StreamingResponse:
-    """通过当前聊天输入启动数据画像 Agent，并流式返回运行轨迹。"""
+    """启动自主决策 Agent，并流式返回回答及工具运行轨迹。"""
     message = message.strip() or "请对上传的数据生成基础画像"
     llm = _discussion_llm_by_id(config_id)
     if llm is None:
@@ -818,7 +887,6 @@ async def agent_profile_stream_endpoint(
         _load_agent_system_prompt(),
         max_iterations=4,
         decision_retries=2,
-        required_tools=("profile_data",) if data_paths else (),
     )
     harness = Harness(registry)
 
@@ -836,6 +904,10 @@ async def agent_profile_stream_endpoint(
             async with asyncio.timeout(AGENT_RUN_TIMEOUT_SECONDS):
                 while (event := await asyncio.to_thread(_next_agent_event, iterator)) is not None:
                     if isinstance(event, Finish):
+                        if event.thought.strip():
+                            payload = _agent_event_payload(event)
+                            trace.append(payload)
+                            yield json.dumps(payload, ensure_ascii=False) + "\n"
                         answer = event.answer
                         yield json.dumps({"type": "token", "content": answer}, ensure_ascii=False) + "\n"
                         break
@@ -843,13 +915,18 @@ async def agent_profile_stream_endpoint(
                     trace.append(payload)
                     yield json.dumps(payload, ensure_ascii=False) + "\n"
         except TimeoutError:
-            yield json.dumps({"type": "error", "detail": "数据 Agent 运行超时，请稍后重试。"}, ensure_ascii=False) + "\n"
+            yield json.dumps({"type": "error", "detail": "Agent 运行超时，请稍后重试。"}, ensure_ascii=False) + "\n"
             return
         except Exception as exc:  # noqa: BLE001
             logger.exception("Data agent run failed")
-            yield json.dumps({"type": "error", "detail": f"数据 Agent 运行失败：{exc}"}, ensure_ascii=False) + "\n"
+            yield json.dumps({"type": "error", "detail": f"Agent 运行失败：{exc}"}, ensure_ascii=False) + "\n"
             return
 
+        try:
+            artifacts = _list_agent_artifacts(run_id)
+        except OSError:
+            logger.exception("Failed to list Agent artifacts")
+            artifacts = []
         attachments = [
             {
                 "kind": "data",
@@ -867,10 +944,19 @@ async def agent_profile_stream_endpoint(
             title,
             attachments,
             mode="agent",
-            assistant_metadata={"agent_run_id": run_id, "agent_trace": trace},
+            assistant_metadata={
+                "agent_run_id": run_id,
+                "agent_trace": trace,
+                "agent_artifacts": artifacts,
+            },
         )
         yield json.dumps(
-            {"type": "done", "discussion_id": saved_discussion_id, "run_id": run_id},
+            {
+                "type": "done",
+                "discussion_id": saved_discussion_id,
+                "run_id": run_id,
+                "artifacts": artifacts,
+            },
             ensure_ascii=False,
         ) + "\n"
 

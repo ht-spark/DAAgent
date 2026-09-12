@@ -7,6 +7,7 @@ import {
   streamBrainstormMessage,
   streamDataAgentMessage,
   syncApiSettingsCache,
+  type AgentArtifact,
   type AgentTraceEvent,
   type BrainstormSource,
   type KnowledgeBaseSummary,
@@ -34,6 +35,17 @@ function describeObservation(event: Extract<AgentTraceEvent, { type: 'agent_obse
   return `${summary.file_count ?? 0} 个文件，${summary.table_count ?? 0} 张表，${summary.row_count ?? 0} 行，${summary.column_count ?? 0} 列${missingRate}`
 }
 
+function formatArtifactSize(size: number): string {
+  if (size < 1024) return `${size} B`
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`
+}
+
+function artifactType(name: string): string {
+  const extension = name.split('.').pop()
+  return extension && extension !== name ? extension.toUpperCase() : 'FILE'
+}
+
 const AgentInlineProcess = memo(function AgentInlineProcess({
   trace,
   running,
@@ -43,42 +55,31 @@ const AgentInlineProcess = memo(function AgentInlineProcess({
 }) {
   return (
     <div className={`agent-inline-process ${running ? 'is-running' : ''}`}>
-      <div className="agent-inline-head">
-        <span className="agent-inline-status" aria-hidden="true" />
-        <strong>{running ? 'Agent 正在执行' : 'Agent 执行过程'}</strong>
-        <small>{trace.length} 条事件</small>
-      </div>
       <div className="agent-inline-steps">
         {trace.map((event, index) => (
           <div
-            className="agent-inline-step"
-            key={`${event.type}-${event.type === 'agent_started' ? event.run_id : event.tool_name}-${index}`}
+            className={`agent-inline-step ${event.type}`}
+            key={`${event.type}-${event.type === 'agent_started' ? event.run_id : event.type === 'agent_reasoning' ? index : event.tool_name}-${index}`}
           >
-            <span>
-              {event.type === 'agent_started'
-                ? '任务已接收'
-                : event.type === 'agent_action' ? '思考摘要' : event.success ? '观察结果' : '执行失败'}
-            </span>
-            <div>
-              {event.type === 'agent_started' ? (
-                <>
-                  <p>{event.files.length ? `已授权 ${event.files.length} 个数据文件` : '当前任务没有数据附件'}</p>
-                  <code>运行标识 · {event.run_id.slice(0, 8)}</code>
-                </>
-              ) : event.type === 'agent_action' ? (
-                <>
-                  <p>{event.thought || '准备执行数据工具'}</p>
-                  <code>调用工具 · {event.tool_name}</code>
-                </>
-              ) : (
-                <>
-                  <p>{describeObservation(event)}</p>
-                  <code>{event.tool_name} · {event.duration_ms} ms</code>
-                </>
-              )}
-            </div>
+            {event.type === 'agent_started' ? (
+              <p className="agent-inline-activity">
+                {event.files.length ? `已查看 ${event.files.length} 个附件` : '已开始处理任务'}
+              </p>
+            ) : event.type === 'agent_action' ? (
+              <>
+                <p className="agent-inline-reasoning">{event.thought || '正在判断下一步操作。'}</p>
+                <p className="agent-inline-activity">调用了工具 · {event.tool_name}</p>
+              </>
+            ) : event.type === 'agent_reasoning' ? (
+              <p className="agent-inline-reasoning">{event.summary}</p>
+            ) : (
+              <p className={`agent-inline-activity ${event.success ? '' : 'failed'}`}>
+                {event.success ? '完成了工具' : '工具执行失败'} · {event.tool_name} · {describeObservation(event)}
+              </p>
+            )}
           </div>
         ))}
+        {running && <p className="agent-inline-activity is-running">正在继续分析…</p>}
       </div>
     </div>
   )
@@ -162,7 +163,7 @@ export default function NewChat({
   const [activeSourceKey, setActiveSourceKey] = useState<string | null>(null)
   const [activeSources, setActiveSources] = useState<BrainstormSource[]>([])
   const [agentTrace, setAgentTrace] = useState<AgentTraceEvent[]>([])
-  const [agentRunId, setAgentRunId] = useState<string | null>(null)
+  const [agentArtifacts, setAgentArtifacts] = useState<AgentArtifact[]>([])
   const [sourcesCollapsed, setSourcesCollapsed] = useState(false)
   const [apiConfigs, setApiConfigs] = useState<ApiConfig[]>([])
   const [selectedConfigId, setSelectedConfigId] = useState<string>('')
@@ -212,7 +213,7 @@ export default function NewChat({
       setActiveSources([])
       setActiveSourceKey(null)
       setAgentTrace([])
-      setAgentRunId(null)
+      setAgentArtifacts([])
       return
     }
     void fetchBrainstormDiscussion(discussionId)
@@ -230,12 +231,15 @@ export default function NewChat({
         if (latestModeMessage?.metadata?.mode === 'agent') {
           setMode('agent')
           setAgentTrace(latestModeMessage.metadata.agent_trace ?? [])
-          setAgentRunId(latestModeMessage.metadata.agent_run_id ?? null)
         } else {
           setMode('inspiration')
           setAgentTrace([])
-          setAgentRunId(null)
         }
+        setAgentArtifacts(
+          discussion.messages.flatMap(
+            (message) => message.metadata?.agent_artifacts ?? [],
+          ),
+        )
         setMessages(
           discussion.messages.map((m) => ({
             role: m.role,
@@ -294,7 +298,7 @@ export default function NewChat({
           title,
           attachedFiles,
           {
-            onStarted: (runId) => setAgentRunId(runId),
+            onStarted: () => undefined,
             onTrace: (event) => {
               setAgentTrace((current) => [...current, event])
               setMessages((current) => current.map(
@@ -310,8 +314,15 @@ export default function NewChat({
                   : item,
               ))
             },
-            onDone: (savedDiscussionId, runId) => {
-              setAgentRunId(runId)
+            onDone: (savedDiscussionId, _runId, artifacts) => {
+              setAgentArtifacts((current) => [
+                ...current.filter(
+                  (item) => !artifacts.some(
+                    (artifact) => artifact.run_id === item.run_id && artifact.path === item.path,
+                  ),
+                ),
+                ...artifacts,
+              ])
               onDiscussionId(savedDiscussionId)
             },
           },
@@ -356,7 +367,7 @@ export default function NewChat({
               role: 'assistant',
               content: error instanceof Error
                 ? error.message
-                : mode === 'agent' ? '数据 Agent 暂不可用。' : '灵感讨论服务暂不可用。',
+                : mode === 'agent' ? 'Agent 暂不可用。' : '灵感讨论服务暂不可用。',
             }
           : item,
       ))
@@ -443,9 +454,8 @@ export default function NewChat({
               ))}
               {messages.length === 0 && mode === 'agent' && (
                 <div className="agent-empty-state">
-                  <span>DATA AGENT</span>
-                  <h2>从一份真实数据开始</h2>
-                  <p>上传 CSV、Excel 或 JSON，Agent 会先读取数据，再返回字段质量、分布特征与下一步建议。</p>
+                  <img className="agent-empty-logo" src="/logo.png" alt="" aria-hidden="true" />
+                  <h2>今天想分析什么？</h2>
                 </div>
               )}
               {isSubmitting
@@ -493,7 +503,7 @@ export default function NewChat({
                     void submit()
                   }
                 }}
-                placeholder={mode === 'agent' ? '描述希望 Agent 完成的数据分析任务…' : '输入待讨论的建模问题、假设或分析方向…'}
+                placeholder={mode === 'agent' ? '直接提问，或上传数据让 Agent 自主选择工具…' : '输入待讨论的建模问题、假设或分析方向…'}
                 rows={2}
               />
               <div className="rag-composer-bar">
@@ -512,7 +522,7 @@ export default function NewChat({
                     onClick={() => selectMode('agent')}
                     disabled={isSubmitting}
                   >
-                    数据 Agent
+                    自主 Agent
                   </button>
                 </div>
                 {mode === 'inspiration' && <details className="rag-kb-picker">
@@ -550,7 +560,7 @@ export default function NewChat({
                   onClick={() => fileInputRef.current?.click()}
                   disabled={isSubmitting}
                 >
-                  {mode === 'agent' ? '添加数据' : '上传文件'}{files.length ? ` · ${files.length}` : ''}
+                  {mode === 'agent' ? '添加附件' : '上传文件'}{files.length ? ` · ${files.length}` : ''}
                 </button>
                 <input
                   ref={fileInputRef}
@@ -612,21 +622,21 @@ export default function NewChat({
 
         <aside
           className={`rag-sources ${sourcesCollapsed ? 'is-collapsed' : ''}`}
-          aria-label={mode === 'agent' ? 'Agent 运行轨迹' : '引用来源'}
+          aria-label={mode === 'agent' ? '输出产物' : '引用来源'}
         >
           {sourcesCollapsed ? (
             <button
               type="button"
               className="rag-sources-expand"
               onClick={() => setSourcesCollapsed(false)}
-              title={mode === 'agent' ? '展开运行轨迹' : '展开引用来源'}
+              title={mode === 'agent' ? '展开输出产物' : '展开引用来源'}
             >
               <span className="rag-sources-expand-text">
-                {mode === 'agent' ? '运行轨迹' : '引用来源'}
+                {mode === 'agent' ? '输出产物' : '引用来源'}
               </span>
-              {(mode === 'agent' ? agentTrace.length : activeSources.length) > 0 && (
+              {(mode === 'agent' ? agentArtifacts.length : activeSources.length) > 0 && (
                 <span className="rag-sources-expand-badge">
-                  {mode === 'agent' ? agentTrace.length : activeSources.length}
+                  {mode === 'agent' ? agentArtifacts.length : activeSources.length}
                 </span>
               )}
             </button>
@@ -634,15 +644,15 @@ export default function NewChat({
             <>
               <div className="rag-sources-head">
                 <div>
-                  <h2>{mode === 'agent' ? 'Agent 运行轨迹' : '引用来源'}</h2>
-                  <p>{mode === 'agent' ? '仅展示可公开的进度与工具结果' : '点击消息中的引用编号定位片段'}</p>
+                  <h2>{mode === 'agent' ? '输出产物' : '引用来源'}</h2>
+                  <p>{mode === 'agent' ? 'Agent 生成的文件，可直接下载' : '点击消息中的引用编号定位片段'}</p>
                 </div>
                 <button
                   type="button"
                   className="rag-sources-collapse"
                   onClick={() => setSourcesCollapsed(true)}
-                  title="收起引用来源"
-                  aria-label="收起引用来源"
+                  title={mode === 'agent' ? '收起输出产物' : '收起引用来源'}
+                  aria-label={mode === 'agent' ? '收起输出产物' : '收起引用来源'}
                 >
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                     <path d="M9 18l6-6-6-6" strokeLinecap="round" strokeLinejoin="round" />
@@ -651,35 +661,26 @@ export default function NewChat({
               </div>
               <div className="rag-sources-list">
                 {mode === 'agent' ? (
-                  agentTrace.length === 0 ? (
+                  agentArtifacts.length === 0 ? (
                     <p className="rag-sources-empty">
-                      {isSubmitting ? '正在启动 Agent，等待第一步决策…' : '启动数据 Agent 后，这里会依次展示思考、执行与观察。'}
+                      {isSubmitting ? 'Agent 正在处理，生成的文件会出现在这里。' : '当前讨论还没有生成可下载的产物。'}
                     </p>
-                  ) : agentTrace.map((event, index) => (
-                    <article
-                      className={`agent-trace-card ${event.type === 'agent_observation' && !event.success ? 'failed' : ''}`}
-                      key={`${event.type}-${event.type === 'agent_started' ? event.run_id : event.tool_name}-${index}`}
+                  ) : agentArtifacts.map((artifact) => (
+                    <a
+                      className="agent-artifact-item"
+                      key={`${artifact.run_id}-${artifact.path}`}
+                      href={`/api/agent/runs/${artifact.run_id}/files/${artifact.path.split('/').map(encodeURIComponent).join('/')}`}
+                      download={artifact.name}
+                      target="_blank"
+                      rel="noreferrer"
                     >
-                      <div className="agent-trace-top">
-                        <span className={`agent-trace-dot ${event.type === 'agent_started' || event.type === 'agent_action' ? 'thinking' : event.success ? 'success' : 'failed'}`} />
-                        <span>
-                          {event.type === 'agent_started'
-                            ? '任务已接收'
-                            : event.type === 'agent_action' ? '思考并执行' : event.success ? '观察完成' : '观察失败'}
-                        </span>
-                        {event.type === 'agent_observation' && <small>{event.duration_ms} ms</small>}
-                      </div>
-                      <strong>
-                        {event.type === 'agent_started'
-                          ? '准备数据分析'
-                          : event.tool_name === 'profile_data' ? '基础数据画像' : event.tool_name}
-                      </strong>
-                      <p>
-                        {event.type === 'agent_started'
-                          ? event.files.length ? `已授权 ${event.files.length} 个数据文件` : '当前任务没有数据附件'
-                          : event.type === 'agent_action' ? event.thought || '准备调用工具' : describeObservation(event)}
-                      </p>
-                    </article>
+                      <span className="agent-artifact-type">{artifactType(artifact.name)}</span>
+                      <span className="agent-artifact-copy">
+                        <strong>{artifact.name}</strong>
+                        <small>{formatArtifactSize(artifact.size_bytes)}</small>
+                      </span>
+                      <span className="agent-artifact-download">下载</span>
+                    </a>
                   ))
                 ) : lastAssistantSources.length === 0 ? (
                   <p className="rag-sources-empty">发送问题后，这里会展示知识库命中片段。</p>
@@ -704,43 +705,26 @@ export default function NewChat({
                   })
                 )}
               </div>
-              <div className="rag-metrics">
-                {mode === 'agent' ? (
-                  <>
-                    <div className="rag-metric">
-                      <b>{agentTrace.filter((event) => event.type === 'agent_action').length || '···'}</b>
-                      <span>执行步骤</span>
-                    </div>
-                    <div className="rag-metric">
-                      <b>{agentTrace.filter((event) => event.type === 'agent_observation' && event.success).length || '···'}</b>
-                      <span>成功观察</span>
-                    </div>
-                    <div className="rag-metric agent-run-metric">
-                      <b>{agentRunId ? agentRunId.slice(0, 8) : '···'}</b>
-                      <span>运行标识</span>
-                    </div>
-                  </>
-                ) : (
-                  <>
-                    <div className="rag-metric">
-                      <b>{lastAssistantSources.length || '···'}</b>
-                      <span>命中片段</span>
-                    </div>
-                    <div className="rag-metric">
-                      <b>{Math.max(0, messages.filter((m) => m.role === 'user').length) || '···'}</b>
-                      <span>提问轮次</span>
-                    </div>
-                    <div className="rag-metric">
-                      <b>···</b>
-                      <span>检索轮次</span>
-                    </div>
-                    <div className="rag-metric">
-                      <b>···</b>
-                      <span>端到端耗时</span>
-                    </div>
-                  </>
-                )}
-              </div>
+              {mode !== 'agent' && (
+                <div className="rag-metrics">
+                  <div className="rag-metric">
+                    <b>{lastAssistantSources.length || '···'}</b>
+                    <span>命中片段</span>
+                  </div>
+                  <div className="rag-metric">
+                    <b>{Math.max(0, messages.filter((m) => m.role === 'user').length) || '···'}</b>
+                    <span>提问轮次</span>
+                  </div>
+                  <div className="rag-metric">
+                    <b>···</b>
+                    <span>检索轮次</span>
+                  </div>
+                  <div className="rag-metric">
+                    <b>···</b>
+                    <span>端到端耗时</span>
+                  </div>
+                </div>
+              )}
             </>
           )}
         </aside>
