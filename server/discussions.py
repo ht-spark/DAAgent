@@ -6,6 +6,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from data_analysis.context.rolling_memory import COMPACTION_KIND
+
 from server import store
 
 
@@ -29,6 +31,8 @@ def get_discussion(discussion_id: str) -> dict[str, Any] | None:
     messages: list[dict[str, Any]] = []
     for raw in session.get("messages", []):
         meta = raw.get("metadata") or {}
+        if meta.get("kind") == COMPACTION_KIND:
+            continue
         messages.append(
             {
                 "id": raw.get("id"),

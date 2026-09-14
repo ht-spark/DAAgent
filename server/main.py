@@ -35,8 +35,10 @@ from openpyxl.utils.exceptions import InvalidFileException
 from data_analysis.agent.graph import iter_graph
 from data_analysis.agent.loop import Action, AgentLoop, Finish
 from data_analysis.agent.state import AgentMessage, AgentState, Observation
+from data_analysis.context import compile_rolling_context
 from data_analysis.runtime import Harness, SubprocessSandbox
 from data_analysis.tools import create_agent_tool_registry, supports_data_profile
+from server import store
 from server.files import list_figures, resolve_artifact
 from server.discussions import delete_discussion, get_discussion, list_discussions, rename_discussion, save_discussion_message
 from KnowledgeBase.chunk import DEFAULT_WINDOW_SIZE, chunk_knowledge_documents
@@ -880,6 +882,64 @@ def _agent_session_root(discussion_id: str) -> Path:
     return root
 
 
+def _restore_agent_data_files(
+    session_entries: list[dict[str, object]],
+    discussion_id: str,
+) -> list[Path]:
+    """恢复同一会话中仍然有效的历史输入附件。"""
+    session_root = _agent_session_root(discussion_id)
+    restored_by_name: dict[str, Path] = {}
+    for entry in reversed(session_entries):
+        if entry.get("role") != store.ROLE_USER:
+            continue
+        metadata = entry.get("metadata")
+        if not isinstance(metadata, dict):
+            continue
+        attachments = metadata.get("attachments")
+        if not isinstance(attachments, list):
+            continue
+        for attachment in reversed(attachments):
+            if not isinstance(attachment, dict):
+                continue
+            if attachment.get("kind") not in {"data", "file"}:
+                continue
+            raw_path = attachment.get("content")
+            if not isinstance(raw_path, str) or not raw_path.strip():
+                continue
+            relative_path = Path(raw_path)
+            if relative_path.is_absolute() or ".." in relative_path.parts:
+                continue
+            candidate = (PROJECT_ROOT / relative_path).resolve()
+            try:
+                session_relative = candidate.relative_to(session_root)
+            except ValueError:
+                continue
+            parts = session_relative.parts
+            if (
+                len(parts) != 4
+                or parts[0].casefold() != ".runs"
+                or parts[2].casefold() != "input"
+                or candidate.suffix.casefold() not in AGENT_ATTACHMENT_SUFFIXES
+                or not candidate.is_file()
+            ):
+                continue
+            restored_by_name.setdefault(candidate.name.casefold(), candidate)
+    return list(reversed(restored_by_name.values()))
+
+
+def _merge_agent_data_files(
+    restored_paths: list[Path],
+    uploaded_paths: list[Path],
+) -> list[Path]:
+    """合并历史和本轮附件；同名时优先使用本轮上传版本。"""
+    uploaded_names = {path.name.casefold() for path in uploaded_paths}
+    merged_paths = [
+        *(path for path in restored_paths if path.name.casefold() not in uploaded_names),
+        *uploaded_paths,
+    ]
+    return merged_paths[-MAX_AGENT_ATTACHMENTS:]
+
+
 def _open_local_folder(target: Path) -> None:
     """使用当前操作系统的文件管理器打开指定目录。"""
     if sys.platform == "win32":
@@ -1151,22 +1211,43 @@ async def agent_profile_stream_endpoint(
     run_id = uuid.uuid4().hex
     active_discussion_id = discussion_id or uuid.uuid4().hex
 
-    previous_discussion = (
-        await asyncio.to_thread(get_discussion, active_discussion_id)
+    stored_session = (
+        await asyncio.to_thread(store.get_session, active_discussion_id)
         if discussion_id
         else None
     )
-    data_paths = await _prepare_agent_data_files(files, active_discussion_id, run_id)
+    session_entries = stored_session.get("messages", []) if stored_session else []
+    rolling_context = await asyncio.to_thread(
+        compile_rolling_context,
+        session_entries,
+        llm,
+    )
+    if rolling_context.compaction_error:
+        logger.warning(
+            "Agent rolling memory compaction failed; using bounded recent context: %s",
+            rolling_context.compaction_error,
+        )
+    if rolling_context.compaction is not None:
+        await asyncio.to_thread(
+            store.append_message,
+            active_discussion_id,
+            store.ROLE_TOOL,
+            rolling_context.compaction.summary,
+            rolling_context.compaction.metadata(),
+        )
+    uploaded_paths = await _prepare_agent_data_files(files, active_discussion_id, run_id)
+    restored_paths = _restore_agent_data_files(session_entries, active_discussion_id)
+    data_paths = _merge_agent_data_files(restored_paths, uploaded_paths)
     history = [
-        AgentMessage(role=item["role"], content=item.get("content") or "")
-        for item in (previous_discussion.get("messages", []) if previous_discussion else [])
-        if item.get("role") in {"user", "assistant"} and (item.get("content") or "").strip()
+        AgentMessage(role=str(item["role"]), content=str(item.get("content") or ""))
+        for item in rolling_context.recent_messages
     ]
     output_dir = _agent_session_root(active_discussion_id)
     output_dir.mkdir(parents=True, exist_ok=True)
     registry = create_agent_tool_registry(data_paths, output_dir, vision_llm=llm)
     state = AgentState(
         user_query=message,
+        memory_summary=rolling_context.memory_summary,
         data_paths=[str(path) for path in data_paths],
         output_dir=str(output_dir),
         messages=history,
@@ -1237,7 +1318,7 @@ async def agent_profile_stream_endpoint(
                 "name": path.name,
                 "content": path.relative_to(PROJECT_ROOT).as_posix(),
             }
-            for path in data_paths
+            for path in uploaded_paths
         ]
         saved_discussion_id = await asyncio.to_thread(
             save_discussion_message,

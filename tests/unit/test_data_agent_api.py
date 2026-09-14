@@ -305,3 +305,90 @@ def test_deleting_discussion_removes_its_artifact_workspace(monkeypatch, tmp_pat
 
     assert result == {"deleted": True}
     assert not root.exists()
+
+
+def test_agent_restores_existing_session_attachments(monkeypatch, tmp_path):
+    monkeypatch.setattr(main, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(main, "ARTIFACTS_ROOT", tmp_path / "artifacts")
+    old_input = (
+        tmp_path
+        / "artifacts"
+        / "agent_sessions"
+        / "discussion-restore"
+        / ".runs"
+        / "old-run"
+        / "input"
+    )
+    old_input.mkdir(parents=True)
+    source = old_input / "sales.csv"
+    source.write_text("x,y\n1,2\n", encoding="utf-8")
+    entries = [
+        {
+            "role": "user",
+            "metadata": {
+                "attachments": [
+                    {
+                        "kind": "data",
+                        "name": "sales.csv",
+                        "content": (
+                            "artifacts/agent_sessions/discussion-restore/"
+                            ".runs/old-run/input/sales.csv"
+                        ),
+                    }
+                ]
+            },
+        }
+    ]
+
+    restored = main._restore_agent_data_files(entries, "discussion-restore")
+
+    assert restored == [source.resolve()]
+
+
+def test_agent_ignores_missing_and_out_of_session_attachments(monkeypatch, tmp_path):
+    monkeypatch.setattr(main, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(main, "ARTIFACTS_ROOT", tmp_path / "artifacts")
+    outside = tmp_path / "outside.csv"
+    outside.write_text("x\n1\n", encoding="utf-8")
+    entries = [
+        {
+            "role": "user",
+            "metadata": {
+                "attachments": [
+                    {"kind": "data", "name": "outside.csv", "content": "outside.csv"},
+                    {
+                        "kind": "data",
+                        "name": "missing.csv",
+                        "content": (
+                            "artifacts/agent_sessions/discussion-safe/"
+                            ".runs/old/input/missing.csv"
+                        ),
+                    },
+                    {"kind": "text", "name": "inline.txt", "content": "not-a-path"},
+                ]
+            },
+        }
+    ]
+
+    restored = main._restore_agent_data_files(entries, "discussion-safe")
+
+    assert restored == []
+
+
+def test_agent_new_upload_replaces_same_named_restored_attachment(tmp_path):
+    restored = tmp_path / "old" / "sales.csv"
+    uploaded = tmp_path / "new" / "sales.csv"
+    other = tmp_path / "old" / "weather.csv"
+
+    merged = main._merge_agent_data_files([restored, other], [uploaded])
+
+    assert merged == [other, uploaded]
+
+
+def test_agent_restored_attachments_respect_active_file_limit(monkeypatch, tmp_path):
+    monkeypatch.setattr(main, "MAX_AGENT_ATTACHMENTS", 2)
+    restored = [tmp_path / f"old-{index}.csv" for index in range(3)]
+
+    merged = main._merge_agent_data_files(restored, [])
+
+    assert merged == restored[-2:]

@@ -67,6 +67,7 @@ class AgentState(BaseModel):
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
     user_query: str
+    memory_summary: str | None = None
     data_paths: list[str] = Field(default_factory=list)
     output_dir: str | None = None
     messages: list[AgentMessage] = Field(default_factory=list)
@@ -80,6 +81,17 @@ class AgentState(BaseModel):
         if not value.strip():
             raise ValueError("用户问题不能为空")
         return value
+
+    @field_validator("memory_summary")
+    @classmethod
+    def validate_memory_summary(cls, value: str | None) -> str | None:
+        """清理滚动记忆摘要并拒绝空白摘要。"""
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("滚动记忆摘要不能为空")
+        return normalized
 
     @field_validator("data_paths")
     @classmethod
