@@ -1164,7 +1164,7 @@ async def agent_profile_stream_endpoint(
     ]
     output_dir = _agent_session_root(active_discussion_id)
     output_dir.mkdir(parents=True, exist_ok=True)
-    registry = create_agent_tool_registry(data_paths, output_dir)
+    registry = create_agent_tool_registry(data_paths, output_dir, vision_llm=llm)
     state = AgentState(
         user_query=message,
         data_paths=[str(path) for path in data_paths],
@@ -1206,6 +1206,17 @@ async def agent_profile_stream_endpoint(
                         break
                     payload = _agent_event_payload(event)
                     trace.append(payload)
+                    if (
+                        isinstance(event, Observation)
+                        and event.tool_name == "inspect_image"
+                        and not event.success
+                        and event.error == "当前模型不支持识图"
+                    ):
+                        yield json.dumps(
+                            {"type": "error", "detail": event.error},
+                            ensure_ascii=False,
+                        ) + "\n"
+                        return
                     yield json.dumps(payload, ensure_ascii=False) + "\n"
         except TimeoutError:
             yield json.dumps({"type": "error", "detail": "Agent 运行超时，请稍后重试。"}, ensure_ascii=False) + "\n"

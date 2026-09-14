@@ -1,4 +1,5 @@
 import { memo, useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 
 import {
   fetchBrainstormDiscussion,
@@ -145,7 +146,7 @@ const ArtifactPreview = memo(function ArtifactPreview({
 
   const sheet = data?.kind === 'xlsx' ? data.sheets[activeSheet] : null
 
-  return (
+  return createPortal(
     <div className="artifact-preview-mask" onMouseDown={onClose}>
       <section
         className="artifact-preview-dialog"
@@ -220,7 +221,8 @@ const ArtifactPreview = memo(function ArtifactPreview({
           {(truncated || data?.truncated) && <p className="artifact-preview-note">文件较大，当前仅展示部分内容。</p>}
         </div>
       </section>
-    </div>
+    </div>,
+    document.body,
   )
 })
 

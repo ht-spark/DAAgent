@@ -41,8 +41,11 @@ class Harness:
         started_at = time.monotonic()
         try:
             tool = self._registry.resolve(action.tool_name)
-            result = self._sandbox.execute(tool, action.arguments)
-        except (ToolNotFoundError, SandboxError) as exc:
+            if tool.run_in_process:
+                result = tool.invoke(action.arguments)
+            else:
+                result = self._sandbox.execute(tool, action.arguments)
+        except (ToolNotFoundError, SandboxError, ValueError, RuntimeError) as exc:
             return Observation(
                 tool_name=action.tool_name,
                 success=False,

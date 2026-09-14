@@ -7,7 +7,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
-from typing import TypeAlias
+from typing import Any, TypeAlias
 
 from pydantic import JsonValue
 
@@ -84,17 +84,19 @@ class RegisteredTool:
 
     spec: ToolSpec
     handler: ToolHandler
-    context: Mapping[str, JsonValue] = field(default_factory=dict)
+    context: Mapping[str, Any] = field(default_factory=dict)
+    run_in_process: bool = False
 
     def __post_init__(self) -> None:
         """拒绝不可调用的执行函数。"""
         if not callable(self.handler):
             raise TypeError("工具处理器必须可调用")
         context = dict(self.context)
-        try:
-            json.dumps(context, ensure_ascii=False, allow_nan=False)
-        except (TypeError, ValueError) as exc:
-            raise ValueError("工具运行上下文必须是合法 JSON") from exc
+        if not self.run_in_process:
+            try:
+                json.dumps(context, ensure_ascii=False, allow_nan=False)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("工具运行上下文必须是合法 JSON") from exc
         object.__setattr__(self, "context", MappingProxyType(context))
 
     @property
@@ -151,6 +153,25 @@ class ToolRegistry:
         if spec.name in self._tools:
             raise DuplicateToolError(f"工具已注册: {spec.name}")
         tool = RegisteredTool(spec=spec, handler=handler, context=context or {})
+        self._tools[spec.name] = tool
+        return tool
+
+    def register_in_process(
+        self,
+        spec: ToolSpec,
+        handler: ToolHandler,
+        *,
+        context: Mapping[str, Any] | None = None,
+    ) -> RegisteredTool:
+        """注册必须在主进程执行的工具，例如复用当前 LLM 的视觉调用。"""
+        if spec.name in self._tools:
+            raise DuplicateToolError(f"工具已注册: {spec.name}")
+        tool = RegisteredTool(
+            spec=spec,
+            handler=handler,
+            context=context or {},
+            run_in_process=True,
+        )
         self._tools[spec.name] = tool
         return tool
 
@@ -268,12 +289,15 @@ def create_data_profile_registry(
 def create_agent_tool_registry(
     authorized_paths: Sequence[str | Path],
     output_dir: str | Path,
+    *,
+    vision_llm: Any | None = None,
 ) -> ToolRegistry:
     """创建同时支持确定性工具和动态 Python 的 Agent 注册表。
 
     Args:
         authorized_paths: 当前运行允许读取的数据文件路径，可以为空。
         output_dir: 当前会话允许生成产物的目录。
+        vision_llm: 当前会话模型；提供时为图片附件注册识图工具。
 
     Returns:
         根据附件情况注册数据工具，并始终注册 Python 代码执行能力。
@@ -353,6 +377,45 @@ def create_agent_tool_registry(
             "output_dir": str(output_dir),
         },
     )
+    image_paths = tuple(
+        path
+        for path in bound_paths
+        if Path(path).suffix.lower() in {".gif", ".jpeg", ".jpg", ".png", ".webp"}
+    )
+    if image_paths and vision_llm is not None:
+        from .image_tools import inspect_image
+
+        registry.register_in_process(
+            ToolSpec(
+                name="inspect_image",
+                description=(
+                    "调用当前视觉模型查看一张已上传图片。适用于读取图片中的文字、"
+                    "表格、公式、图表、几何关系和建模约束。file_name 必须从"
+                    " available_data_files 中逐字选择，question 应说明需要提取或"
+                    "核实的具体内容。"
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "file_name": {
+                            "type": "string",
+                            "description": "已授权图片的文件名",
+                        },
+                        "question": {
+                            "type": "string",
+                            "description": "需要模型回答的图片问题",
+                        },
+                    },
+                    "required": ["file_name", "question"],
+                    "additionalProperties": False,
+                },
+            ),
+            inspect_image,
+            context={
+                "llm": vision_llm,
+                "authorized_paths": [str(path) for path in image_paths],
+            },
+        )
     return registry
 
 
