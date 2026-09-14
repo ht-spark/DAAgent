@@ -377,6 +377,61 @@ def create_agent_tool_registry(
             "output_dir": str(output_dir),
         },
     )
+    from .artifact_inspection import inspect_artifact
+
+    registry.register(
+        ToolSpec(
+            name="inspect_artifact",
+            description=(
+                "读取并复核当前会话中已经生成的文本、代码、Markdown、JSON 或 CSV "
+                "产物。生成或修改代码及文本产物后，在最终回答前调用此工具确认实际"
+                "文件内容；relative_path 必须来自工具返回的 artifacts 或 path。"
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "relative_path": {
+                        "type": "string",
+                        "description": "当前会话产物目录内的相对路径",
+                    },
+                },
+                "required": ["relative_path"],
+                "additionalProperties": False,
+            },
+        ),
+        inspect_artifact,
+        context={"output_dir": str(output_dir)},
+    )
+    if vision_llm is not None:
+        from .image_tools import inspect_generated_image
+
+        registry.register_in_process(
+            ToolSpec(
+                name="inspect_generated_image",
+                description=(
+                    "调用当前视觉模型复核已经生成的图片产物。生成或修改图片后，在"
+                    "最终回答前调用此工具检查图表数据表达、标题、坐标轴、图例、布局"
+                    "和遮挡；relative_path 必须来自 execute_python 返回的 artifacts。"
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "relative_path": {
+                            "type": "string",
+                            "description": "当前会话图片产物的相对路径",
+                        },
+                        "question": {
+                            "type": "string",
+                            "description": "需要复核的具体视觉问题",
+                        },
+                    },
+                    "required": ["relative_path", "question"],
+                    "additionalProperties": False,
+                },
+            ),
+            inspect_generated_image,
+            context={"llm": vision_llm, "output_dir": str(output_dir)},
+        )
     image_paths = tuple(
         path
         for path in bound_paths

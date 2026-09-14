@@ -9,8 +9,6 @@ type Props = {
   onHistory: () => void
   discussionId: string | null
   onDiscussionId: (id: string) => void
-  onOpenDiscussionHistory: () => void
-  onNewDiscussion: () => void
 }
 
 export default function NewTask({
@@ -19,8 +17,6 @@ export default function NewTask({
   onHistory,
   discussionId,
   onDiscussionId,
-  onOpenDiscussionHistory,
-  onNewDiscussion,
 }: Props) {
   // 结果页保留原有查看体验
   if (task.step === 'result' && task.runId) {
@@ -42,8 +38,6 @@ export default function NewTask({
       onDiscussionId={onDiscussionId}
       resumeRunId={task.step === 'progress' ? task.runId : null}
       onViewResult={(id) => setTask({ step: 'result', runId: id })}
-      onOpenHistory={onOpenDiscussionHistory}
-      onNewChat={onNewDiscussion}
     />
   )
 }

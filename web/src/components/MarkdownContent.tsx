@@ -11,10 +11,21 @@ function normalizeMathDelimiters(content: string): string {
     .replace(/\\\(([\s\S]*?)\\\)/g, (_match, math: string) => `$${math}$`)
 }
 
-export default function MarkdownContent({ content }: { content: string }) {
+/** 可选：把 Markdown 里的相对资源地址改写为可访问 URL（预览产物图片用） */
+export default function MarkdownContent({
+  content,
+  transformUrl,
+}: {
+  content: string
+  transformUrl?: (url: string) => string
+}) {
   return (
     <div className="markdown-content">
-      <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm, remarkMath]}
+        rehypePlugins={[rehypeKatex]}
+        urlTransform={transformUrl ? (url) => transformUrl(url) : undefined}
+      >
         {normalizeMathDelimiters(content)}
       </ReactMarkdown>
     </div>

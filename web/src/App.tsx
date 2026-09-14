@@ -124,8 +124,6 @@ export default function App() {
             onHistory={() => setModelingView('history')}
             discussionId={discussionId}
             onDiscussionId={setDiscussionId}
-            onOpenDiscussionHistory={() => setModelingView('discussion-history')}
-            onNewDiscussion={() => setDiscussionId(null)}
           />
         )}
         {section === 'modeling' && modelingView === 'discussion-history' && (

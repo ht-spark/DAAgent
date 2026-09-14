@@ -11,7 +11,7 @@ from pydantic import JsonValue
 
 from .registry import ToolArgumentsError
 
-__all__ = ["IMAGE_SUFFIXES", "inspect_image"]
+__all__ = ["IMAGE_SUFFIXES", "inspect_generated_image", "inspect_image"]
 
 IMAGE_SUFFIXES = frozenset({".gif", ".jpeg", ".jpg", ".png", ".webp"})
 _MIME_TYPES = {
@@ -36,10 +36,6 @@ def inspect_image(
 
     Returns:
         包含文件名和模型分析文本的 JSON 结果。
-
-    Raises:
-        ToolArgumentsError: 参数、文件名或授权范围不符合约定。
-        RuntimeError: 当前模型不能完成视觉调用。
     """
     if set(arguments) != {"file_name", "question"}:
         raise ToolArgumentsError("inspect_image 只接受必填参数 file_name 和 question")
@@ -55,6 +51,49 @@ def inspect_image(
     if not isinstance(raw_paths, Sequence) or llm is None:
         raise RuntimeError(VISION_UNSUPPORTED_ERROR)
     image_path = _resolve_authorized_image(file_name.strip(), raw_paths)
+    return _analyze_image(llm, image_path, question.strip())
+
+
+def inspect_generated_image(
+    arguments: Mapping[str, JsonValue],
+    context: Mapping[str, Any],
+) -> JsonValue:
+    """使用当前模型检查一张已经生成的图片产物。
+
+    Args:
+        arguments: Agent 提供的产物相对路径和检查问题。
+        context: 包含当前聊天模型和产物目录的运行上下文。
+
+    Returns:
+        包含产物路径和模型分析文本的 JSON 结果。
+    """
+    if set(arguments) != {"relative_path", "question"}:
+        raise ToolArgumentsError(
+            "inspect_generated_image 只接受必填参数 relative_path 和 question"
+        )
+    relative_path = arguments.get("relative_path")
+    question = arguments.get("question")
+    if not isinstance(relative_path, str) or not relative_path.strip():
+        raise ToolArgumentsError("inspect_generated_image 缺少有效的 relative_path")
+    if not isinstance(question, str) or not question.strip():
+        raise ToolArgumentsError("inspect_generated_image 缺少有效的 question")
+    output_dir = context.get("output_dir")
+    llm = context.get("llm")
+    if not isinstance(output_dir, str) or not output_dir.strip() or llm is None:
+        raise RuntimeError(VISION_UNSUPPORTED_ERROR)
+
+    from .artifact_inspection import resolve_generated_artifact
+
+    image_path = resolve_generated_artifact(output_dir, relative_path.strip())
+    if image_path.suffix.lower() not in IMAGE_SUFFIXES:
+        raise ToolArgumentsError(f"产物不是支持的图片格式: {relative_path}")
+    result = _analyze_image(llm, image_path, question.strip())
+    result["path"] = image_path.relative_to(Path(output_dir).resolve()).as_posix()
+    return result
+
+
+def _analyze_image(llm: Any, image_path: Path, question: str) -> dict[str, str]:
+    """把本地图片发送给当前模型并提取视觉分析文本。"""
     suffix = image_path.suffix.lower()
     encoded = base64.b64encode(image_path.read_bytes()).decode("ascii")
     data_url = f"data:{_MIME_TYPES[suffix]};base64,{encoded}"
@@ -63,8 +102,8 @@ def inspect_image(
             "type": "text",
             "text": (
                 "请直接查看图片并回答问题。应明确区分图片中可确认的内容与不确定内容；"
-                "涉及表格、公式、坐标轴或约束条件时尽量准确转录。\n\n"
-                f"问题：{question.strip()}"
+                "涉及表格、公式、坐标轴、图例或布局时尽量准确检查。\n\n"
+                f"问题：{question}"
             ),
         },
         {"type": "image_url", "image_url": {"url": data_url}},

@@ -190,6 +190,7 @@ def test_agent_registry_always_exposes_dynamic_python(tmp_path) -> None:
     assert [spec.name for spec in registry.specs()] == [
         "write_artifact",
         "execute_python",
+        "inspect_artifact",
     ]
     result = registry.resolve("execute_python").invoke(
         {"code": "print('ok')\nresult = {'value': 2 + 3}"}
@@ -210,6 +211,7 @@ def test_agent_registry_combines_data_and_code_tools(tmp_path) -> None:
         "inspect_data_rows",
         "write_artifact",
         "execute_python",
+        "inspect_artifact",
     ]
 
 

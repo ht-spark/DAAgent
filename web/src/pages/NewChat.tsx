@@ -1,4 +1,4 @@
-import { memo, useEffect, useRef, useState } from 'react'
+import { memo, useEffect, useRef, useState, type ClipboardEvent } from 'react'
 import { createPortal } from 'react-dom'
 
 import {
@@ -14,7 +14,7 @@ import {
   type BrainstormSource,
   type KnowledgeBaseSummary,
 } from '../api'
-import { loadActiveId, loadConfigs, type ApiConfig } from '../apiConfigs'
+import { loadConfigs, type ApiConfig } from '../apiConfigs'
 import MarkdownContent from '../components/MarkdownContent'
 import ChatModeling from './ChatModeling'
 
@@ -25,6 +25,13 @@ type Message = {
   content: string
   sources?: BrainstormSource[]
   trace?: AgentTraceEvent[]
+}
+
+const CLIPBOARD_IMAGE_EXTENSIONS: Record<string, string> = {
+  'image/gif': 'gif',
+  'image/jpeg': 'jpg',
+  'image/png': 'png',
+  'image/webp': 'webp',
 }
 
 function describeObservation(event: Extract<AgentTraceEvent, { type: 'agent_observation' }>): string {
@@ -89,6 +96,32 @@ function artifactUrl(artifact: AgentArtifact, action: 'files' | 'previews'): str
   return artifact.discussion_id
     ? `/api/agent/discussions/${encodeURIComponent(artifact.discussion_id)}/${action}/${path}`
     : `/api/agent/runs/${artifact.run_id}/${action}/${path}`
+}
+
+function resolveArtifactAssetUrl(artifact: AgentArtifact, src: string): string {
+  if (!src) return src
+  if (
+    src.startsWith('data:') ||
+    src.startsWith('blob:') ||
+    src.startsWith('/') ||
+    /^[a-z][a-z0-9+.-]*:/i.test(src)
+  ) {
+    return src
+  }
+
+  const baseDir = artifact.path.includes('/')
+    ? artifact.path.slice(0, artifact.path.lastIndexOf('/'))
+    : ''
+  const segments: string[] = []
+  for (const segment of `${baseDir}/${src}`.split('/')) {
+    if (!segment || segment === '.') continue
+    if (segment === '..') {
+      segments.pop()
+      continue
+    }
+    segments.push(segment)
+  }
+  return artifactUrl({ ...artifact, path: segments.join('/') }, 'files')
 }
 
 const ArtifactPreview = memo(function ArtifactPreview({
@@ -171,7 +204,12 @@ const ArtifactPreview = memo(function ArtifactPreview({
           {!loading && !error && kind === 'image' && <img src={previewUrl} alt={artifact.name} />}
           {!loading && !error && kind === 'pdf' && <iframe src={previewUrl} title={artifact.name} />}
           {!loading && !error && kind === 'markdown' && (
-            <article className="artifact-preview-markdown"><MarkdownContent content={text} /></article>
+            <article className="artifact-preview-markdown">
+              <MarkdownContent
+                content={text}
+                transformUrl={(src) => resolveArtifactAssetUrl(artifact, src)}
+              />
+            </article>
           )}
           {!loading && !error && kind === 'code' && <pre><code>{text}</code></pre>}
           {!loading && !error && data?.kind === 'docx' && (
@@ -326,8 +364,6 @@ type Props = {
   initialProblem?: string
   resumeRunId?: string | null
   onViewResult: (runId: string) => void
-  onOpenHistory?: () => void
-  onNewChat?: () => void
 }
 
 export default function NewChat({
@@ -337,8 +373,6 @@ export default function NewChat({
   initialProblem = '',
   resumeRunId,
   onViewResult,
-  onOpenHistory,
-  onNewChat,
 }: Props) {
   const [mode, setMode] = useState<Mode>(resumeRunId ? 'modeling' : initialMode)
   const [draft, setDraft] = useState('')
@@ -361,24 +395,19 @@ export default function NewChat({
   const fileInputRef = useRef<HTMLInputElement>(null)
   const listRef = useRef<HTMLDivElement>(null)
 
-  function applyApiConfigs(configs: ApiConfig[], activeId: string | null) {
+  function applyApiConfigs(configs: ApiConfig[]) {
     setApiConfigs(configs)
-    if (configs.length === 0) {
-      setSelectedConfigId('')
-      return
-    }
-    const preferred = configs.find((c) => c.id === activeId) ?? configs[0]
     setSelectedConfigId((current) =>
-      configs.some((c) => c.id === current) ? current : preferred.id,
+      configs.some((config) => config.id === current) ? current : (configs[0]?.id ?? ''),
     )
   }
 
   useEffect(() => {
     let cancelled = false
-    applyApiConfigs(loadConfigs(), loadActiveId())
+    applyApiConfigs(loadConfigs())
     void syncApiSettingsCache().then((synced) => {
       if (!synced || cancelled) return
-      applyApiConfigs(loadConfigs(), loadActiveId())
+      applyApiConfigs(loadConfigs())
     })
     return () => {
       cancelled = true
@@ -466,6 +495,26 @@ export default function NewChat({
     setMode(nextMode)
     setFiles([])
     if (fileInputRef.current) fileInputRef.current.value = ''
+  }
+
+  function handlePaste(event: ClipboardEvent<HTMLTextAreaElement>) {
+    if (isSubmitting) return
+    const timestamp = Date.now()
+    const pastedImages = Array.from(event.clipboardData.items)
+      .filter((item) => item.kind === 'file' && item.type.startsWith('image/'))
+      .map((item) => item.getAsFile())
+      .filter((file): file is File => file !== null)
+      .map((file, index) => {
+        const extension = CLIPBOARD_IMAGE_EXTENSIONS[file.type] ?? 'png'
+        return new File(
+          [file],
+          `clipboard-image-${timestamp}-${index + 1}.${extension}`,
+          { type: file.type || 'image/png', lastModified: timestamp },
+        )
+      })
+    if (!pastedImages.length) return
+    event.preventDefault()
+    setFiles((current) => [...current, ...pastedImages])
   }
 
   async function submit() {
@@ -596,11 +645,6 @@ export default function NewChat({
             ← 返回灵感讨论
           </button>
           <span className="new-chat-mode-hint">建模任务 · 上传资料后启动完整建模流程</span>
-          {onOpenHistory && (
-            <button type="button" className="rag-btn" onClick={onOpenHistory}>
-              历史讨论
-            </button>
-          )}
         </div>
         <ChatModeling
           key={resumeRunId ?? 'modeling'}
@@ -610,6 +654,7 @@ export default function NewChat({
           knowledgeBases={knowledgeBases}
           knowledgeBaseIds={knowledgeBaseIds}
           onKnowledgeBaseIdsChange={setKnowledgeBaseIds}
+          apiConfig={apiConfigs.find((config) => config.id === selectedConfigId) ?? null}
         />
       </div>
     )
@@ -630,18 +675,6 @@ export default function NewChat({
             aria-label="讨论名称"
           />
           {mode !== 'agent' && <p>混合检索 · 引用可追溯 · 灵感迸发</p>}
-        </div>
-        <div className="rag-top-actions">
-          {onOpenHistory && (
-            <button type="button" className="rag-btn" onClick={onOpenHistory}>
-              历史讨论
-            </button>
-          )}
-          {onNewChat && (
-            <button type="button" className="rag-btn" onClick={onNewChat}>
-              新会话
-            </button>
-          )}
         </div>
       </header>
 
@@ -703,13 +736,14 @@ export default function NewChat({
               <textarea
                 value={draft}
                 onChange={(event) => setDraft(event.target.value)}
+                onPaste={handlePaste}
                 onKeyDown={(event) => {
                   if (event.key === 'Enter' && !event.shiftKey) {
                     event.preventDefault()
                     void submit()
                   }
                 }}
-                placeholder={mode === 'agent' ? '直接提问，或上传数据、文档和图片让 Agent 自主分析…' : '输入待讨论的建模问题、假设或分析方向…'}
+                placeholder={mode === 'agent' ? '直接提问，或上传/粘贴数据、文档和图片让 Agent 自主分析…' : '输入问题，或直接 Ctrl+V 粘贴图片…'}
                 rows={2}
               />
               <div className="rag-composer-bar">
@@ -728,7 +762,7 @@ export default function NewChat({
                     onClick={() => selectMode('agent')}
                     disabled={isSubmitting}
                   >
-                    自主 Agent
+                    数分Agent
                   </button>
                 </div>
                 {mode === 'inspiration' && <details className="rag-kb-picker">

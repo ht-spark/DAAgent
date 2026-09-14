@@ -3,17 +3,13 @@ import {
   ApiConfig,
   loadConfigs,
   saveConfigs,
-  loadActiveId,
-  saveActiveId,
   newId,
-  maskKey,
   ExternalService,
   ExternalServiceConfig,
   loadExternalServiceConfigs,
   saveExternalServiceConfigs,
   REASONING_EFFORT_OPTIONS,
   isReasoningEffort,
-  reasoningEffortLabel,
 } from '../apiConfigs'
 import { persistApiSettings, syncApiSettingsCache } from '../api'
 
@@ -50,7 +46,6 @@ const SERVICE_META: Record<ExternalService, { name: string; keyLabel: string; hi
 
 export default function ApiManager() {
   const [configs, setConfigs] = useState<ApiConfig[]>([])
-  const [activeId, setActiveId] = useState<string | null>(null)
   const [editing, setEditing] = useState<Partial<ApiConfig>>(EMPTY)
   const [isNew, setIsNew] = useState(false)
   const [serviceConfigs, setServiceConfigs] = useState<Record<ExternalService, ExternalServiceConfig>>(
@@ -81,14 +76,12 @@ export default function ApiManager() {
 
   useEffect(() => {
     setConfigs(loadConfigs())
-    setActiveId(loadActiveId())
     setServiceConfigs(loadExternalServiceConfigs())
     // 后端本地文件是权威存储：同步成功后覆盖界面与浏览器缓存
     let cancelled = false
     syncApiSettingsCache().then((synced) => {
       if (!synced || cancelled) return
       setConfigs(loadConfigs())
-      setActiveId(loadActiveId())
       setServiceConfigs(loadExternalServiceConfigs())
     })
     return () => {
@@ -96,14 +89,12 @@ export default function ApiManager() {
     }
   }, [])
 
-  function persist(next: ApiConfig[], nextActive: string | null) {
+  function persist(next: ApiConfig[]) {
     setConfigs(next)
     saveConfigs(next)
-    setActiveId(nextActive)
-    saveActiveId(nextActive)
     void persistApiSettings({
       configs: next,
-      activeId: nextActive,
+      activeId: null,
       externalServices: serviceConfigs,
     })
   }
@@ -158,15 +149,14 @@ export default function ApiManager() {
         createdAt: Date.now(),
       }
       const next = [...configs, c]
-      const nextActive = activeId ?? c.id
-      persist(next, nextActive)
+      persist(next)
     } else if (editing.id) {
       const next = configs.map((c) =>
         c.id === editing.id
           ? { ...c, name, provider, apiKey, baseUrl, model, maxTokens, temperature, reasoningEffort }
           : c,
       )
-      persist(next, activeId)
+      persist(next)
     }
     cancelEdit()
   }
@@ -174,13 +164,9 @@ export default function ApiManager() {
   function remove(id: string) {
     if (!confirm('确认删除这个配置？')) return
     const next = configs.filter((c) => c.id !== id)
-    const nextActive = activeId === id ? (next[0]?.id ?? null) : activeId
-    persist(next, nextActive)
+    persist(next)
   }
 
-  function setActive(id: string) {
-    persist(configs, id)
-  }
 
   /** 扩展服务输入防抖：停止输入 400ms 后才写后端文件 */
   function schedulePersist(snapshot: Parameters<typeof persistApiSettings>[0]) {
@@ -202,7 +188,7 @@ export default function ApiManager() {
     }
     setServiceConfigs(next)
     saveExternalServiceConfigs(next)
-    schedulePersist({ configs, activeId, externalServices: next })
+    schedulePersist({ configs, activeId: null, externalServices: next })
   }
 
   return (
@@ -235,7 +221,7 @@ export default function ApiManager() {
             <header className="api-modal-head">
               <div>
                 <h2 id="api-editor-title">{isNew ? '新增 API 配置' : '编辑 API 配置'}</h2>
-                <p className="api-modal-lead">填写服务商与密钥信息，保存后可作为默认模型使用。</p>
+                <p className="api-modal-lead">填写服务商、模型与密钥信息；使用哪个模型请在输入框下方选择。</p>
               </div>
               <button
                 type="button"
@@ -376,7 +362,7 @@ export default function ApiManager() {
       <section className="api-section" aria-labelledby="model-api-heading">
         <div className="api-section-head">
           <h2 id="model-api-heading">模型服务</h2>
-          <p>选择默认配置后，新建任务会自动带入。</p>
+          <p>在这里维护可用模型；实际使用的模型请在输入框下方选择。</p>
         </div>
 
         {configs.length === 0 ? (
@@ -387,71 +373,41 @@ export default function ApiManager() {
               </svg>
             </div>
             <p className="api-empty-title">还没有保存任何 API</p>
-            <p className="api-empty-desc">添加第一个模型服务后，新建任务会自动带入。</p>
+            <p className="api-empty-desc">添加模型服务后，即可在输入框下方选择使用。</p>
             <button type="button" className="api-btn primary" onClick={startNew}>
               新增配置
             </button>
           </div>
         ) : (
-          <div className="api-grid">
-            {configs.map((c) => {
-              const isActive = c.id === activeId
-              const mark = (c.name || c.provider || '?').trim().slice(0, 1).toUpperCase()
-              return (
-                <div key={c.id} className={`api-card ${isActive ? 'active' : ''}`}>
-                  <div className="api-card-head">
-                    <div className="api-name">
-                      <span className="api-name-mark" aria-hidden="true">{mark}</span>
-                      <span className="api-name-text">{c.name}</span>
-                    </div>
-                    {isActive && <span className="api-badge">当前使用</span>}
-                  </div>
-                  <div className="api-meta">
-                    <div>
-                      <span className="k">服务商</span>
-                      <span className="v">{PROVIDER_LABELS[c.provider] ?? c.provider}</span>
-                    </div>
-                    <div>
-                      <span className="k">模型</span>
-                      <span className="v">{c.model || '未填写'}</span>
-                    </div>
-                    <div>
-                      <span className="k">Base URL</span>
-                      <span className="v" title={c.baseUrl || undefined}>{c.baseUrl || '默认'}</span>
-                    </div>
-                    <div>
-                      <span className="k">Key</span>
-                      <span className="v mono">{c.apiKey ? maskKey(c.apiKey) : '未填写'}</span>
-                    </div>
-                    <div>
-                      <span className="k">最大输出</span>
-                      <span className="v">{c.maxTokens ?? 20000} tokens</span>
-                    </div>
-                    <div>
-                      <span className="k">Temperature</span>
-                      <span className="v">{c.temperature ?? 0.3}</span>
-                    </div>
-                    <div>
-                      <span className="k">思考程度</span>
-                      <span className="v">{reasoningEffortLabel(c.reasoningEffort)}</span>
-                    </div>
-                  </div>
-                  <div className="api-actions">
-                    {!isActive && (
-                      <button type="button" className="api-btn primary" onClick={() => setActive(c.id)}>
-                        设为默认
-                      </button>
-                    )}
-                    <button type="button" className="api-btn" onClick={() => startEdit(c)}>
-                      编辑
-                    </button>
-                    <button type="button" className="api-btn danger" onClick={() => remove(c.id)}>
-                      删除
-                    </button>
+          <div className="api-model-list">
+            {configs.map((c) => (
+              <div className="api-model-row" key={c.id}>
+                <div className="api-model-identity">
+                  <span className="api-model-mark" aria-hidden="true">{(c.model || c.name || 'M').slice(0, 1).toUpperCase()}</span>
+                  <div className="api-model-copy">
+                    <strong title={c.model || c.name}>{c.model || c.name || '未命名模型'}</strong>
+                    <span>{PROVIDER_LABELS[c.provider] ?? c.provider}</span>
                   </div>
                 </div>
-              )
-            })}
+                <div className="api-model-actions">
+                  <button
+                    type="button"
+                    onClick={() => startEdit(c)}
+                    aria-label={`编辑 ${c.model || c.name || '模型'}`}
+                  >
+                    编辑
+                  </button>
+                  <button
+                    type="button"
+                    className="danger"
+                    onClick={() => remove(c.id)}
+                    aria-label={`删除 ${c.model || c.name || '模型'}`}
+                  >
+                    删除
+                  </button>
+                </div>
+              </div>
+            ))}
           </div>
         )}
       </section>
@@ -459,7 +415,7 @@ export default function ApiManager() {
       <section className="api-section" aria-labelledby="external-api-heading">
         <div className="api-section-head">
           <h2 id="external-api-heading">扩展服务</h2>
-          <p>用于联网检索与文档转换，不参与默认模型选择。</p>
+          <p>用于联网检索与文档转换，与模型选择相互独立。</p>
         </div>
         <div className="api-grid">
           {(Object.keys(SERVICE_META) as ExternalService[]).map((service) => {

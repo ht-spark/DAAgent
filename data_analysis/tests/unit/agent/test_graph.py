@@ -250,3 +250,55 @@ def test_graph_can_write_code_observe_and_rethink(tmp_path) -> None:
     assert state.observations[0].tool_name == "execute_python"
     assert state.observations[0].result["result"] == {"sum": 15}
     assert '"sum": 15' in llm.calls[1][-1][1]
+
+def test_graph_generates_artifact_inspects_it_then_finishes(tmp_path) -> None:
+    """Agent 应把生成产物的实际内容交回下一轮后再结束。"""
+    output_dir = tmp_path / "output"
+    registry = create_agent_tool_registry([], output_dir)
+    code_action = json.dumps(
+        {
+            "type": "action",
+            "thought": "先生成代码产物",
+            "tool_name": "execute_python",
+            "arguments": {
+                "code": (
+                    "path = ARTIFACTS.path('solution.py')\n"
+                    "path.write_text('result = 6 * 7\\n', encoding='utf-8')\n"
+                    "result = {'created': 'solution.py'}"
+                )
+            },
+        },
+        ensure_ascii=False,
+    )
+    inspect_action = json.dumps(
+        {
+            "type": "action",
+            "thought": "读取实际文件复核",
+            "tool_name": "inspect_artifact",
+            "arguments": {"relative_path": "solution.py"},
+        },
+        ensure_ascii=False,
+    )
+    llm = ScriptedLlm(
+        [
+            code_action,
+            inspect_action,
+            '{"type":"finish","thought":"代码内容已复核",'
+            '"answer":"代码产物已生成并检查。"}',
+        ]
+    )
+    state = AgentState(user_query="生成计算 6 乘 7 的代码")
+
+    finish = run_graph(
+        state,
+        AgentLoop(llm, registry.specs(), "生成后必须读取产物复核"),
+        Harness(registry),
+    )
+
+    assert finish.answer == "代码产物已生成并检查。"
+    assert [item.tool_name for item in state.observations] == [
+        "execute_python",
+        "inspect_artifact",
+    ]
+    assert "result = 6 * 7" in state.observations[1].result["content"]
+    assert "result = 6 * 7" in llm.calls[2][-1][1]

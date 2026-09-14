@@ -1208,7 +1208,7 @@ async def agent_profile_stream_endpoint(
                     trace.append(payload)
                     if (
                         isinstance(event, Observation)
-                        and event.tool_name == "inspect_image"
+                        and event.tool_name in {"inspect_image", "inspect_generated_image"}
                         and not event.success
                         and event.error == "当前模型不支持识图"
                     ):

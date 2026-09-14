@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { confirmBudget, createRun, checkBackendOnline, getRun, getRunMonitor, getPaper, getFigures, renameRun, submitClarification, type KnowledgeBaseSummary, type RunMonitor } from '../api'
-import { loadConfigs, loadActiveId, ApiConfig } from '../apiConfigs'
+import type { ApiConfig } from '../apiConfigs'
 import { NODE_CN, fmtQid, formatCurrentStep, formatProgressLine, nextProgressQuestionId } from '../progressFormat'
 
 type MsgKind = 'info' | 'progress' | 'error' | 'success' | 'warn' | 'result'
@@ -522,6 +522,7 @@ type Props = {
   knowledgeBases?: KnowledgeBaseSummary[]
   knowledgeBaseIds?: string[]
   onKnowledgeBaseIdsChange?: (knowledgeBaseIds: string[]) => void
+  apiConfig: ApiConfig | null
 }
 
 let _seq = 1
@@ -534,6 +535,7 @@ export default function ChatModeling({
   knowledgeBases = [],
   knowledgeBaseIds = ['default'],
   onKnowledgeBaseIdsChange,
+  apiConfig,
 }: Props) {
   const [messages, setMessages] = useState<ChatMsg[]>([])
   const [problemText, setProblemText] = useState(initialProblem)
@@ -542,8 +544,8 @@ export default function ChatModeling({
   const [phase, setPhase] = useState<Phase>(resumeRunId ? 'running' : 'compose')
   const [runId, setRunId] = useState<string | null>(resumeRunId ?? null)
   const [busy, setBusy] = useState(false)
-  const [activeCfg, setActiveCfg] = useState<ApiConfig | null>(null)
-  const [activeName, setActiveName] = useState('')
+  const activeCfg = apiConfig
+  const activeName = apiConfig?.name ?? ''
   const [budgetReq, setBudgetReq] = useState<BudgetReq | null>(null)
   const [budgetDraft, setBudgetDraft] = useState<Record<string, number>>({})
   const [budgetBusy, setBudgetBusy] = useState(false)
@@ -578,14 +580,6 @@ export default function ChatModeling({
     setMessages((m) => [...m, { id: nextId(), role, text, kind, ts: Date.now(), result }])
   }
 
-  // 读取当前激活的 API 配置（与 Submit 页同一来源）
-  useEffect(() => {
-    const configs = loadConfigs()
-    const activeId = loadActiveId()
-    const active = configs.find((c) => c.id === activeId) ?? configs[0] ?? null
-    setActiveCfg(active)
-    setActiveName(active?.name ?? '')
-  }, [])
 
   // 首条消息 + （接管模式下）加载历史进度并订阅实时流
   // 使用 ref 守卫防止 React.StrictMode 开发模式下双执行导致欢迎消息重复
@@ -1023,7 +1017,7 @@ export default function ChatModeling({
       return
     }
     if (!activeCfg) {
-      setSubmitError('尚未配置 API，请先到 API 管理添加并设为默认。')
+      setSubmitError('尚未选择模型，请先在输入框下方选择一个已配置模型。')
       return
     }
     setBusy(true)
@@ -1186,7 +1180,7 @@ export default function ChatModeling({
             </div>
           )}
           <div className="task-setup-footer">
-            <p className={submitError ? 'task-setup-error' : ''}>{submitError || (activeName ? `将使用 ${activeName}${activeCfg?.model ? ` / ${activeCfg.model}` : ''}` : '请先在 API 管理中设置可用配置')}</p>
+            <p className={submitError ? 'task-setup-error' : ''}>{submitError || (activeName ? `将使用 ${activeName}${activeCfg?.model ? ` / ${activeCfg.model}` : ''}` : '请先在 API 管理中添加模型，并在输入框下方选择')}</p>
             <button className="task-start-button" onClick={handleStart} disabled={busy}>{busy ? '正在创建任务…' : '开始建模'}</button>
           </div>
         </section>
