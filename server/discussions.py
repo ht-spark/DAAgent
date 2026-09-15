@@ -11,15 +11,16 @@ from data_analysis.context.rolling_memory import COMPACTION_KIND
 from server import store
 
 
-def list_discussions() -> list[dict[str, Any]]:
-    """按最近更新返回会话摘要（侧栏「最近」/历史讨论）。"""
+def list_discussions(project_id: str | None = None) -> list[dict[str, Any]]:
+    """按最近更新返回会话摘要，可按项目筛选。"""
     return [
         {
             "id": item["id"],
             "title": item["title"],
+            "project_id": item.get("project_id"),
             "updated_at": item["updated_at"],
         }
-        for item in store.list_sessions()
+        for item in store.list_sessions(project_id=project_id)
     ]
 
 
@@ -46,6 +47,8 @@ def get_discussion(discussion_id: str) -> dict[str, Any] | None:
     return {
         "id": session["id"],
         "title": session["title"],
+        "project_id": session.get("project_id"),
+        "cwd": session.get("cwd"),
         "created_at": session.get("created_at"),
         "updated_at": session["updated_at"],
         "messages": messages,
@@ -71,11 +74,27 @@ def save_discussion_message(
     knowledge_base_ids: list[str] | None = None,
     mode: str = "inspiration",
     assistant_metadata: dict[str, Any] | None = None,
+    project_id: str | None = None,
+    cwd: str | None = None,
 ) -> str:
     """追加一轮 user/assistant 消息，返回会话 id。"""
+    normalized_title = (title or user_message or "新讨论").strip()[:80]
     session_id = discussion_id or store.create_session(
-        (title or user_message or "新讨论").strip()[:80]
+        normalized_title,
+        project_id=project_id,
+        cwd=cwd,
     )
+    existing = store.get_session(session_id)
+    if existing is None:
+        store.create_session(
+            normalized_title,
+            session_id=session_id,
+            project_id=project_id,
+            cwd=cwd,
+        )
+    elif project_id is not None and cwd is not None:
+        if not store.bind_session_project(session_id, project_id, cwd):
+            raise ValueError("会话已经绑定到其他项目")
     if title and title.strip():
         store.rename_session(session_id, title)
 

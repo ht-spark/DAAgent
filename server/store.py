@@ -33,9 +33,19 @@ def _connect() -> sqlite3.Connection:
         conn.row_factory = sqlite3.Row
         conn.executescript(
             """
+            CREATE TABLE IF NOT EXISTS projects (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                root_path TEXT NOT NULL,
+                root_key TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS sessions (
                 id TEXT PRIMARY KEY,
                 title TEXT NOT NULL,
+                project_id TEXT,
+                cwd TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
@@ -54,6 +64,18 @@ def _connect() -> sqlite3.Connection:
             CREATE INDEX IF NOT EXISTS idx_messages_session
                 ON messages(session_id, seq);
             """
+        )
+        session_columns = {
+            str(row["name"])
+            for row in conn.execute("PRAGMA table_info(sessions)").fetchall()
+        }
+        if "project_id" not in session_columns:
+            conn.execute("ALTER TABLE sessions ADD COLUMN project_id TEXT")
+        if "cwd" not in session_columns:
+            conn.execute("ALTER TABLE sessions ADD COLUMN cwd TEXT")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sessions_project "
+            "ON sessions(project_id, updated_at)"
         )
         conn.execute("PRAGMA foreign_keys = ON")
         conn.commit()
@@ -77,15 +99,117 @@ def _session_row(conn: sqlite3.Connection, session_id: str) -> sqlite3.Row | Non
     ).fetchone()
 
 
-def create_session(title: str, session_id: str | None = None) -> str:
+def create_project(title: str, root_path: str, root_key: str) -> str:
+    """创建项目注册记录并返回项目标识。"""
+    project_id = uuid.uuid4().hex
+    normalized_title = (title or "未命名项目").strip()[:80] or "未命名项目"
+    ts = now_iso()
+    with _lock:
+        conn = _connect()
+        conn.execute(
+            """
+            INSERT INTO projects
+                (id, title, root_path, root_key, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (project_id, normalized_title, root_path, root_key, ts, ts),
+        )
+        conn.commit()
+    return project_id
+
+
+def get_project(project_id: str) -> dict[str, Any] | None:
+    """按标识读取项目注册记录。"""
+    with _lock:
+        row = _connect().execute(
+            "SELECT * FROM projects WHERE id=?", (project_id,)
+        ).fetchone()
+    return _project_dict(row) if row else None
+
+
+def get_project_by_root_key(root_key: str) -> dict[str, Any] | None:
+    """按规范路径键读取项目。"""
+    with _lock:
+        row = _connect().execute(
+            "SELECT * FROM projects WHERE root_key=?", (root_key,)
+        ).fetchone()
+    return _project_dict(row) if row else None
+
+
+def list_projects() -> list[dict[str, Any]]:
+    """按最近更新时间列出已注册项目。"""
+    with _lock:
+        rows = _connect().execute(
+            "SELECT * FROM projects ORDER BY updated_at DESC"
+        ).fetchall()
+    return [_project_dict(row) for row in rows]
+
+
+def rename_project(project_id: str, title: str) -> bool:
+    """修改项目显示名称，不改变项目目录。"""
+    normalized = (title or "").strip()[:80]
+    if not normalized:
+        return False
+    with _lock:
+        conn = _connect()
+        cursor = conn.execute(
+            "UPDATE projects SET title=?, updated_at=? WHERE id=?",
+            (normalized, now_iso(), project_id),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+
+
+def delete_project(project_id: str) -> bool:
+    """取消项目注册并撤销会话目录绑定，不删除真实文件。"""
+    with _lock:
+        conn = _connect()
+        conn.execute(
+            "UPDATE sessions SET project_id=NULL, cwd=NULL WHERE project_id=?",
+            (project_id,),
+        )
+        cursor = conn.execute("DELETE FROM projects WHERE id=?", (project_id,))
+        conn.commit()
+        return cursor.rowcount > 0
+
+
+def bind_session_project(session_id: str, project_id: str, cwd: str) -> bool:
+    """把尚未绑定的会话固定到一个项目目录。"""
+    with _lock:
+        conn = _connect()
+        row = _session_row(conn, session_id)
+        if row is None:
+            return False
+        if row["project_id"] is not None:
+            return row["project_id"] == project_id and row["cwd"] == cwd
+        conn.execute(
+            "UPDATE sessions SET project_id=?, cwd=?, updated_at=? WHERE id=?",
+            (project_id, cwd, now_iso(), session_id),
+        )
+        conn.commit()
+        return True
+
+
+def create_session(
+    title: str,
+    session_id: str | None = None,
+    *,
+    project_id: str | None = None,
+    cwd: str | None = None,
+) -> str:
+    """创建会话，可选地固定到一个已注册项目。"""
     sid = session_id or uuid.uuid4().hex
     title = (title or "未命名会话").strip()[:80] or "未命名会话"
     ts = now_iso()
     with _lock:
         conn = _connect()
         conn.execute(
-            "INSERT INTO sessions (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
-            (sid, title, ts, ts),
+            """
+            INSERT INTO sessions
+                (id, title, project_id, cwd, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (sid, title, project_id, cwd, ts, ts),
         )
         conn.commit()
     return sid
@@ -103,26 +227,45 @@ def get_session(session_id: str) -> dict[str, Any] | None:
     return {
         "id": row["id"],
         "title": row["title"],
+        "project_id": row["project_id"],
+        "cwd": row["cwd"],
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
         "messages": [_message_dict(m) for m in messages],
     }
 
 
-def list_sessions(limit: int = 100) -> list[dict[str, Any]]:
+def list_sessions(
+    limit: int = 100,
+    project_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """列出会话；提供项目标识时仅返回该项目的会话。"""
     with _lock:
-        rows = _connect().execute(
-            "SELECT * FROM sessions ORDER BY updated_at DESC LIMIT ?",
-            (limit,),
-        ).fetchall()
+        conn = _connect()
+        if project_id is None:
+            rows = conn.execute(
+                "SELECT * FROM sessions ORDER BY updated_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT * FROM sessions
+                WHERE project_id=?
+                ORDER BY updated_at DESC LIMIT ?
+                """,
+                (project_id, limit),
+            ).fetchall()
     return [
         {
-            "id": r["id"],
-            "title": r["title"],
-            "created_at": r["created_at"],
-            "updated_at": r["updated_at"],
+            "id": row["id"],
+            "title": row["title"],
+            "project_id": row["project_id"],
+            "cwd": row["cwd"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
         }
-        for r in rows
+        for row in rows
     ]
 
 
@@ -276,6 +419,18 @@ def list_tool_messages(kind: str | None = None, limit: int = 100) -> list[dict[s
     if kind:
         items = [m for m in items if (m.get("metadata") or {}).get("kind") == kind]
     return items
+
+
+def _project_dict(row: sqlite3.Row) -> dict[str, Any]:
+    """把项目数据库记录转换为普通字典。"""
+    return {
+        "id": row["id"],
+        "title": row["title"],
+        "root_path": row["root_path"],
+        "root_key": row["root_key"],
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
 
 
 def _message_dict(row: sqlite3.Row) -> dict[str, Any]:

@@ -197,6 +197,7 @@ def _safe_environment() -> dict[str, str]:
         for name in allowed_names
         if name in os.environ
     }
+    environment["PYTHONPATH"] = str(Path(__file__).resolve().parents[2])
     environment["PYTHONIOENCODING"] = "utf-8"
     environment["PYTHONUTF8"] = "1"
     return environment

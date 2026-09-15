@@ -28,6 +28,7 @@ def execute_python_code(
     *,
     data_paths: Sequence[str | Path],
     output_dir: str | Path,
+    workspace_root: str | Path | None = None,
 ) -> dict[str, JsonValue]:
     """执行模型生成的 Python 代码并收集观察结果。
 
@@ -39,6 +40,7 @@ def execute_python_code(
         code: 要运行的 Python 源代码。
         data_paths: 当前运行授权的数据文件路径。
         output_dir: 当前会话授权的产物目录。
+        workspace_root: 当前项目目录；为空表示会话未绑定项目。
 
     Returns:
         标准输出、标准错误、结构化结果及当前产物清单。
@@ -65,6 +67,11 @@ def execute_python_code(
         "DATA_FILES": [str(path) for path in resolved_paths],
         "DATA_FILE_MAP": data_file_map,
         "OUTPUT_DIR": str(target_dir),
+        "WORKSPACE_DIR": (
+            str(Path(workspace_root).resolve(strict=True))
+            if workspace_root is not None
+            else None
+        ),
         "ARTIFACTS": workspace,
         "result": None,
     }

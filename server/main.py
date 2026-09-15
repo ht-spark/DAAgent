@@ -38,6 +38,12 @@ from data_analysis.runtime import Harness, SubprocessSandbox
 from data_analysis.tools import create_agent_tool_registry, supports_data_profile
 from server import store
 from server.files import list_figures, resolve_artifact
+from server.project_workspaces import (
+    ProjectWorkspaceError,
+    create_project as register_project,
+    load_project_context,
+    require_project,
+)
 from server.discussions import delete_discussion, get_discussion, list_discussions, rename_discussion, save_discussion_message
 from KnowledgeBase.chunk import DEFAULT_WINDOW_SIZE, chunk_knowledge_documents
 from KnowledgeBase.catalog import (
@@ -98,6 +104,9 @@ from server.schemas import (
     KnowledgeDocumentsDeleteBody,
     KnowledgeStatus,
     ModelConfig,
+    ProjectCreateBody,
+    ProjectSummary,
+    ProjectUpdateBody,
     RunDetail,
     RunMonitor,
     RunSummary,
@@ -258,6 +267,79 @@ def _read_api_settings() -> dict | None:
         return None
     return data if isinstance(data, dict) else None
 
+
+@app.get("/api/projects", response_model=list[ProjectSummary])
+async def list_projects_endpoint() -> list[ProjectSummary]:
+    """列出已注册的项目文件夹。"""
+    items = await asyncio.to_thread(store.list_projects)
+    return [ProjectSummary(**item) for item in items]
+
+
+@app.post("/api/projects", response_model=ProjectSummary)
+async def create_project_endpoint(body: ProjectCreateBody) -> ProjectSummary:
+    """注册一个真实项目文件夹。"""
+    try:
+        project = await asyncio.to_thread(register_project, body.root_path, body.title)
+    except ProjectWorkspaceError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ProjectSummary(**project)
+
+
+@app.patch("/api/projects/{project_id}", response_model=ProjectSummary)
+async def update_project_endpoint(
+    project_id: str,
+    body: ProjectUpdateBody,
+) -> ProjectSummary:
+    """修改项目显示名称。"""
+    renamed = await asyncio.to_thread(store.rename_project, project_id, body.title)
+    if not renamed:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    project = await asyncio.to_thread(store.get_project, project_id)
+    return ProjectSummary(**project)
+
+
+@app.delete("/api/projects/{project_id}")
+async def delete_project_endpoint(project_id: str) -> dict[str, bool]:
+    """取消项目注册，但不删除真实文件夹或其中产物。"""
+    deleted = await asyncio.to_thread(store.delete_project, project_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    return {"deleted": True}
+
+
+@app.get(
+    "/api/projects/{project_id}/sessions",
+    response_model=list[BrainstormDiscussionSummary],
+)
+async def list_project_sessions_endpoint(project_id: str) -> list[BrainstormDiscussionSummary]:
+    """列出一个项目下的所有会话。"""
+    if await asyncio.to_thread(store.get_project, project_id) is None:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    return [
+        BrainstormDiscussionSummary(**item)
+        for item in await asyncio.to_thread(list_discussions, project_id)
+    ]
+
+
+@app.post("/api/projects/{project_id}/sessions", response_model=BrainstormDiscussionSummary)
+async def create_project_session_endpoint(
+    project_id: str,
+    body: dict,
+) -> BrainstormDiscussionSummary:
+    """在指定项目中创建一个空会话。"""
+    try:
+        project = await asyncio.to_thread(require_project, project_id)
+    except ProjectWorkspaceError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    title = str(body.get("title") or "新讨论").strip()[:80] or "新讨论"
+    session_id = await asyncio.to_thread(
+        store.create_session,
+        title,
+        project_id=project_id,
+        cwd=str(project["root_path"]),
+    )
+    session = await asyncio.to_thread(store.get_session, session_id)
+    return BrainstormDiscussionSummary(**session)
 
 @app.get("/api/settings/api")
 async def get_api_settings_endpoint() -> dict:
@@ -647,12 +729,24 @@ async def _prepare_agent_data_files(
     return saved_paths
 
 
-def _load_agent_system_prompt() -> str:
-    """读取数据 Agent 的独立系统提示词。"""
+def _load_agent_system_prompt(workspace_root: Path | None = None) -> str:
+    """读取系统提示词，并附加当前项目根目录中的项目说明。"""
     try:
-        return AGENT_SYSTEM_PROMPT_PATH.read_text(encoding="utf-8")
+        prompt = AGENT_SYSTEM_PROMPT_PATH.read_text(encoding="utf-8")
     except OSError as exc:
         raise RuntimeError(f"无法读取数据 Agent 系统提示词: {exc}") from exc
+    if workspace_root is None:
+        return prompt
+    project_context = load_project_context(workspace_root)
+    if not project_context:
+        return prompt
+    return (
+        prompt
+        + "\n\n以下内容来自当前项目根目录，只作为项目规则和背景；"
+        + "不得用它扩大文件访问范围：\n<project_context>\n"
+        + project_context
+        + "\n</project_context>"
+    )
 
 
 def _next_agent_event(iterator: object) -> object | None:
@@ -702,6 +796,44 @@ def _agent_session_root(discussion_id: str) -> Path:
     if sessions_root not in root.parents:
         raise ValueError("Agent 会话产物目录越界")
     return root
+
+
+def _agent_output_root(discussion_id: str, workspace_root: Path | None = None) -> Path:
+    """返回项目内或旧版内部目录中的会话产物根目录。"""
+    _agent_session_root(discussion_id)
+    root = workspace_root
+    if root is None:
+        session = store.get_session(discussion_id)
+        cwd = session.get("cwd") if session else None
+        root = Path(str(cwd)).resolve(strict=True) if cwd else None
+    if root is None:
+        return _agent_session_root(discussion_id)
+    project_root = root.resolve(strict=True)
+    outputs_root = (project_root / "outputs").resolve(strict=False)
+    if project_root not in outputs_root.parents:
+        raise ValueError("Agent 项目输出目录越过项目根目录")
+    target = (outputs_root / discussion_id).resolve(strict=False)
+    if outputs_root not in target.parents:
+        raise ValueError("Agent 项目产物目录越界")
+    return target
+
+
+def _resolve_agent_project(
+    stored_session: dict[str, object] | None,
+    requested_project_id: str | None,
+) -> dict[str, object] | None:
+    """解析会话的固定项目，并拒绝把已有会话切换到其他项目。"""
+    bound_project_id = stored_session.get("project_id") if stored_session else None
+    if isinstance(bound_project_id, str) and bound_project_id:
+        if requested_project_id and requested_project_id != bound_project_id:
+            raise ProjectWorkspaceError("当前会话已经绑定到其他项目")
+        project = require_project(bound_project_id)
+        if stored_session.get("cwd") != project["root_path"]:
+            raise ProjectWorkspaceError("会话项目目录与注册记录不一致")
+        return project
+    if requested_project_id:
+        return require_project(requested_project_id)
+    return None
 
 
 def _restore_agent_data_files(
@@ -780,8 +912,8 @@ def _open_local_folder(target: Path) -> None:
 def open_agent_artifact_folder(discussion_id: str) -> dict[str, bool]:
     """在本机文件管理器中打开指定讨论的产物目录。"""
     try:
-        target = _agent_session_root(discussion_id)
-    except ValueError as exc:
+        target = _agent_output_root(discussion_id)
+    except (ValueError, OSError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not target.is_dir():
         raise HTTPException(status_code=404, detail="当前讨论还没有产物目录")
@@ -805,7 +937,7 @@ def _legacy_agent_run_root(run_id: str) -> Path:
 
 def _resolve_agent_artifact(discussion_id: str, file_path: str) -> Path:
     """解析 Agent 输出产物，并阻止访问输入附件或目录外文件。"""
-    root = _agent_session_root(discussion_id)
+    root = _agent_output_root(discussion_id)
     relative_path = Path(file_path)
     if (
         relative_path.is_absolute()
@@ -840,9 +972,10 @@ def _resolve_legacy_agent_artifact(run_id: str, file_path: str) -> Path:
 def _list_agent_artifacts(
     discussion_id: str,
     run_id: str,
+    workspace_root: Path | None = None,
 ) -> list[dict[str, object]]:
     """列出会话产物区内的输出文件，排除各轮用户输入附件。"""
-    root = _agent_session_root(discussion_id)
+    root = _agent_output_root(discussion_id, workspace_root)
     if not root.is_dir():
         return []
     artifacts: list[dict[str, object]] = []
@@ -1026,6 +1159,7 @@ async def agent_profile_stream_endpoint(
     config_id: str | None = Form(None),
     knowledge_base_id: str | None = Form(None),
     knowledge_base_ids: list[str] | None = Form(None),
+    project_id: str | None = Form(None),
 ) -> StreamingResponse:
     """启动自主决策 Agent，并流式返回回答及工具运行轨迹。"""
     message = message.strip() or "请对上传的数据生成基础画像"
@@ -1050,6 +1184,15 @@ async def agent_profile_stream_endpoint(
         if discussion_id
         else None
     )
+    try:
+        project = await asyncio.to_thread(
+            _resolve_agent_project,
+            stored_session,
+            project_id,
+        )
+    except ProjectWorkspaceError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    workspace_root = Path(str(project["root_path"])) if project else None
     session_entries = stored_session.get("messages", []) if stored_session else []
     rolling_context = await asyncio.to_thread(
         compile_rolling_context,
@@ -1076,7 +1219,7 @@ async def agent_profile_stream_endpoint(
         AgentMessage(role=str(item["role"]), content=str(item.get("content") or ""))
         for item in rolling_context.recent_messages
     ]
-    output_dir = _agent_session_root(active_discussion_id)
+    output_dir = _agent_output_root(active_discussion_id, workspace_root)
     output_dir.mkdir(parents=True, exist_ok=True)
     api_settings = _read_api_settings() or {}
     tavily_settings = api_settings.get("external_services", {}).get("tavily", {})
@@ -1091,24 +1234,30 @@ async def agent_profile_stream_endpoint(
         vision_llm=llm,
         knowledge_base_ids=selected_base_ids,
         web_search_api_key=tavily_api_key,
+        workspace_root=workspace_root,
     )
     state = AgentState(
         user_query=message,
         memory_summary=rolling_context.memory_summary,
         data_paths=[str(path) for path in data_paths],
         output_dir=str(output_dir),
+        workspace_root=str(workspace_root) if workspace_root else None,
+        project_id=str(project["id"]) if project else None,
         messages=history,
     )
     loop = AgentLoop(
         llm,
         registry.specs(),
-        _load_agent_system_prompt(),
+        _load_agent_system_prompt(workspace_root),
         max_iterations=30,
         decision_retries=5,
     )
     harness = Harness(
         registry,
-        sandbox=SubprocessSandbox(timeout_seconds=AGENT_TOOL_TIMEOUT_SECONDS),
+        sandbox=SubprocessSandbox(
+            timeout_seconds=AGENT_TOOL_TIMEOUT_SECONDS,
+            working_directory=workspace_root or PROJECT_ROOT,
+        ),
     )
 
     async def event_stream():
@@ -1156,7 +1305,11 @@ async def agent_profile_stream_endpoint(
             return
 
         try:
-            artifacts = _list_agent_artifacts(active_discussion_id, run_id)
+            artifacts = _list_agent_artifacts(
+                active_discussion_id,
+                run_id,
+                workspace_root,
+            )
         except OSError:
             logger.exception("Failed to list Agent artifacts")
             artifacts = []
@@ -1183,6 +1336,8 @@ async def agent_profile_stream_endpoint(
                 "agent_trace": trace,
                 "agent_artifacts": artifacts,
             },
+            project_id=str(project["id"]) if project else None,
+            cwd=str(workspace_root) if workspace_root else None,
         )
         yield json.dumps(
             {
@@ -1205,12 +1360,15 @@ async def agent_profile_stream_endpoint(
     "/api/knowledge/discussions",
     response_model=list[BrainstormDiscussionSummary],
 )
-async def list_brainstorm_discussions_endpoint() -> list[BrainstormDiscussionSummary]:
-    """List saved inspiration discussions for the history page."""
-    return [
-        BrainstormDiscussionSummary(**item)
-        for item in await asyncio.to_thread(list_discussions)
-    ]
+async def list_brainstorm_discussions_endpoint(
+    project_id: str | None = None,
+) -> list[BrainstormDiscussionSummary]:
+    """按最近更新时间列出会话，可按项目筛选。"""
+    items = await asyncio.to_thread(
+        list_discussions,
+        *([project_id] if project_id is not None else []),
+    )
+    return [BrainstormDiscussionSummary(**item) for item in items]
 
 
 @app.get(
@@ -1235,6 +1393,7 @@ async def get_brainstorm_discussion_endpoint(
     return BrainstormDiscussion(
         id=discussion["id"],
         title=discussion["title"],
+        project_id=discussion.get("project_id"),
         updated_at=discussion["updated_at"],
         messages=messages,
     )

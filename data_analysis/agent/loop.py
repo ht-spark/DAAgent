@@ -47,6 +47,8 @@ class AgentStateView(Protocol):
     messages: Sequence[Any]
     observations: Sequence[Any]
     data_paths: Sequence[str]
+    workspace_root: str | None
+    project_id: str | None
     iteration: int
 
 
@@ -253,6 +255,8 @@ class AgentLoop:
             "iteration": state.iteration,
             "has_data_files": bool(state.data_paths),
             "available_data_files": [Path(path).name for path in state.data_paths],
+            "project_id": getattr(state, "project_id", None),
+            "workspace_enabled": bool(getattr(state, "workspace_root", None)),
             "observations": list(state.observations),
         }
         messages.append(

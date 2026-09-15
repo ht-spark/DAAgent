@@ -2,20 +2,26 @@ import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
 
 import {
+  createProject,
   deleteBrainstormDiscussion,
+  deleteProject,
   fetchBrainstormDiscussions,
+  fetchProjects,
   renameBrainstormDiscussion,
   type BrainstormDiscussionSummary,
+  type ProjectSummary,
 } from '../api'
 
 type Props = {
   section: string
   collapsed: boolean
   activeDiscussionId: string | null
+  activeProjectId: string | null
+  onProjectChange: (projectId: string | null) => void
   onHome: () => void
   onModeling: () => void
   onBrainstorm: () => void
-  onOpenDiscussion: (id: string) => void
+  onOpenDiscussion: (id: string, projectId: string | null) => void
   onApi: () => void
   onDocs: () => void
   onSettings: () => void
@@ -46,6 +52,8 @@ export default function Sidebar({
   section,
   collapsed,
   activeDiscussionId,
+  activeProjectId,
+  onProjectChange,
   onHome,
   onModeling,
   onBrainstorm,
@@ -56,6 +64,8 @@ export default function Sidebar({
   onDiscussionDeleted,
 }: Props) {
   const [discussions, setDiscussions] = useState<BrainstormDiscussionSummary[]>([])
+  const [projects, setProjects] = useState<ProjectSummary[]>([])
+  const [projectError, setProjectError] = useState('')
   const [menuState, setMenuState] = useState<{
     id: string
     top: number
@@ -67,10 +77,19 @@ export default function Sidebar({
   const [busy, setBusy] = useState(false)
 
   useEffect(() => {
-    void fetchBrainstormDiscussions()
+    void fetchProjects()
+      .then((items) => {
+        setProjects(items)
+        if (!activeProjectId && items.length) onProjectChange(items[0].id)
+      })
+      .catch(() => setProjects([]))
+  }, [])
+
+  useEffect(() => {
+    void fetchBrainstormDiscussions(activeProjectId)
       .then(setDiscussions)
       .catch(() => setDiscussions([]))
-  }, [section, activeDiscussionId])
+  }, [section, activeDiscussionId, activeProjectId])
 
   useEffect(() => {
     if (!menuState) return
@@ -94,9 +113,36 @@ export default function Sidebar({
     }
   }, [menuState])
 
+  async function handleAddProject() {
+    const rootPath = window.prompt('请输入项目文件夹的绝对路径，例如 D:\\Projects\\DataProject')?.trim()
+    if (!rootPath) return
+    const title = window.prompt('项目名称（可留空使用文件夹名）')?.trim()
+    setProjectError('')
+    try {
+      const project = await createProject(rootPath, title)
+      setProjects(await fetchProjects())
+      onProjectChange(project.id)
+    } catch (error) {
+      setProjectError(error instanceof Error ? error.message : '添加项目失败')
+    }
+  }
+
+  async function handleRemoveProject() {
+    const project = projects.find((item) => item.id === activeProjectId)
+    if (!project || !window.confirm(`移除项目「${project.title}」？真实文件夹和产物不会被删除。`)) return
+    setProjectError('')
+    try {
+      await deleteProject(project.id)
+      const remaining = await fetchProjects()
+      setProjects(remaining)
+      onProjectChange(remaining[0]?.id ?? null)
+    } catch (error) {
+      setProjectError(error instanceof Error ? error.message : '移除项目失败')
+    }
+  }
   async function refresh() {
     try {
-      setDiscussions(await fetchBrainstormDiscussions())
+      setDiscussions(await fetchBrainstormDiscussions(activeProjectId))
     } catch {
       /* keep current list on failure */
     }
@@ -166,6 +212,21 @@ export default function Sidebar({
 
       <div className="rail-section">
         <div className="rail-label sidebar-collapse-hide">工作区</div>
+        <div className="project-switcher sidebar-collapse-hide">
+          <select
+            value={activeProjectId ?? ''}
+            onChange={(event) => onProjectChange(event.target.value || null)}
+            aria-label="当前项目"
+          >
+            <option value="">全部项目（新会话不绑定）</option>
+            {projects.map((project) => (
+              <option key={project.id} value={project.id}>{project.title}</option>
+            ))}
+          </select>
+          <button type="button" onClick={() => void handleAddProject()} title="添加项目">＋</button>
+          <button type="button" onClick={() => void handleRemoveProject()} disabled={!activeProjectId} title="移除项目">−</button>
+        </div>
+        {projectError && <p className="project-switcher-error sidebar-collapse-hide">{projectError}</p>}
         <button
           className={`nav-item ${section === 'modeling' ? 'active' : ''}`}
           onClick={onModeling}
@@ -230,7 +291,7 @@ export default function Sidebar({
                   <button
                     type="button"
                     className="session-open"
-                    onClick={() => onOpenDiscussion(item.id)}
+                    onClick={() => onOpenDiscussion(item.id, item.project_id ?? null)}
                     title={item.title}
                   >
                     {CHAT_ICON}

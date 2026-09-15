@@ -22,6 +22,11 @@ from .data_tools import (
 from .errors import DuplicateToolError, ToolArgumentsError, ToolNotFoundError
 from .knowledge_tools import MAX_KNOWLEDGE_QUERY_CHARS, search_knowledge_base
 from .web_search import MAX_WEB_SEARCH_QUERY_CHARS, search_web
+from .workspace_tools import (
+    list_workspace_files,
+    read_workspace_file,
+    search_workspace_text,
+)
 
 __all__ = [
     "DuplicateToolError",
@@ -284,6 +289,7 @@ def create_agent_tool_registry(
     vision_llm: Any | None = None,
     knowledge_base_ids: Sequence[str] = (),
     web_search_api_key: str | None = None,
+    workspace_root: str | Path | None = None,
 ) -> ToolRegistry:
     """创建同时支持确定性工具和动态 Python 的 Agent 注册表。
 
@@ -293,6 +299,7 @@ def create_agent_tool_registry(
         vision_llm: 当前会话模型；提供时为图片附件注册识图工具。
         knowledge_base_ids: 用户为当前会话预选的知识库 ID。
         web_search_api_key: 服务端保存的 Tavily API 密钥；不会暴露给模型。
+        workspace_root: 当前项目的只读文件根目录；为空时不注册项目工具。
 
     Returns:
         根据附件情况注册数据工具，并始终注册 Python 代码执行能力。
@@ -362,6 +369,61 @@ def create_agent_tool_registry(
         search_web,
         context={"api_key": web_search_api_key or ""},
     )
+    if workspace_root is not None:
+        workspace_context = {"workspace_root": str(workspace_root)}
+        registry.register(
+            ToolSpec(
+                name="list_workspace_files",
+                description=(
+                    "列出当前项目目录中的文件。只读取项目目录，自动跳过 .git、"
+                    ".venv、node_modules、outputs 和缓存目录。"
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "relative_dir": {"type": "string", "default": "."},
+                        "pattern": {"type": "string", "default": "*"},
+                    },
+                    "additionalProperties": False,
+                },
+            ),
+            _run_list_workspace_files,
+            context=workspace_context,
+        )
+        registry.register(
+            ToolSpec(
+                name="read_workspace_file",
+                description=(
+                    "读取当前项目目录内一个 UTF-8 文本文件。路径必须来自"
+                    " list_workspace_files，不能使用绝对路径或 '..'。"
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {"relative_path": {"type": "string", "minLength": 1}},
+                    "required": ["relative_path"],
+                    "additionalProperties": False,
+                },
+            ),
+            _run_read_workspace_file,
+            context=workspace_context,
+        )
+        registry.register(
+            ToolSpec(
+                name="search_workspace_text",
+                description="在当前项目的 UTF-8 文本文件中搜索固定字符串。",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "minLength": 1},
+                        "pattern": {"type": "string", "default": "*"},
+                    },
+                    "required": ["query"],
+                    "additionalProperties": False,
+                },
+            ),
+            _run_search_workspace_text,
+            context=workspace_context,
+        )
     registry.register(
         ToolSpec(
             name="write_artifact",
@@ -407,7 +469,8 @@ def create_agent_tool_registry(
                 "运行针对当前任务动态编写的 Python 代码，并把 stdout、stderr、"
                 "result 和产物清单返回给下一轮思考。代码中可直接使用 DATA_FILES"
                 "（授权文件路径列表）、DATA_FILE_MAP（文件名到路径）、OUTPUT_DIR"
-                "（产物目录）和 ARTIFACTS（安全产物工作区）；应将关键结论赋给"
+                "（产物目录）、WORKSPACE_DIR（当前项目目录，未绑定时为空）和"
+                " ARTIFACTS（安全产物工作区）；应将关键结论赋给"
                 " JSON 可序列化变量 result。"
             ),
             parameters={
@@ -428,6 +491,7 @@ def create_agent_tool_registry(
         context={
             "authorized_paths": [str(path) for path in bound_paths],
             "output_dir": str(output_dir),
+            "workspace_root": str(workspace_root) if workspace_root else "",
         },
     )
     from .artifact_inspection import inspect_artifact
@@ -527,6 +591,66 @@ def create_agent_tool_registry(
     return registry
 
 
+def _workspace_root(context: Mapping[str, JsonValue], tool_name: str) -> str:
+    """从工具上下文读取当前项目根目录。"""
+    root = context.get("workspace_root")
+    if not isinstance(root, str) or not root.strip():
+        raise ToolArgumentsError(f"{tool_name} 缺少有效的项目目录上下文")
+    return root
+
+
+def _run_list_workspace_files(
+    arguments: Mapping[str, JsonValue],
+    context: Mapping[str, JsonValue],
+) -> JsonValue:
+    """执行项目文件列表工具。"""
+    if set(arguments) - {"relative_dir", "pattern"}:
+        raise ToolArgumentsError("list_workspace_files 收到未声明参数")
+    relative_dir = arguments.get("relative_dir", ".")
+    pattern = arguments.get("pattern", "*")
+    if not isinstance(relative_dir, str) or not isinstance(pattern, str):
+        raise ToolArgumentsError("relative_dir 和 pattern 必须是字符串")
+    return list_workspace_files(
+        _workspace_root(context, "list_workspace_files"),
+        relative_dir,
+        pattern,
+    )
+
+
+def _run_read_workspace_file(
+    arguments: Mapping[str, JsonValue],
+    context: Mapping[str, JsonValue],
+) -> JsonValue:
+    """执行项目文本文件读取工具。"""
+    if set(arguments) != {"relative_path"}:
+        raise ToolArgumentsError("read_workspace_file 只接受 relative_path")
+    relative_path = arguments.get("relative_path")
+    if not isinstance(relative_path, str) or not relative_path.strip():
+        raise ToolArgumentsError("relative_path 必须是非空字符串")
+    return read_workspace_file(
+        _workspace_root(context, "read_workspace_file"),
+        relative_path,
+    )
+
+
+def _run_search_workspace_text(
+    arguments: Mapping[str, JsonValue],
+    context: Mapping[str, JsonValue],
+) -> JsonValue:
+    """执行项目文本搜索工具。"""
+    if set(arguments) - {"query", "pattern"} or "query" not in arguments:
+        raise ToolArgumentsError("search_workspace_text 需要 query，可选 pattern")
+    query = arguments.get("query")
+    pattern = arguments.get("pattern", "*")
+    if not isinstance(query, str) or not query.strip() or not isinstance(pattern, str):
+        raise ToolArgumentsError("query 必须是非空字符串，pattern 必须是字符串")
+    return search_workspace_text(
+        _workspace_root(context, "search_workspace_text"),
+        query,
+        pattern,
+    )
+
+
 def _run_profile_data(
     arguments: Mapping[str, JsonValue],
     context: Mapping[str, JsonValue],
@@ -590,6 +714,7 @@ def _run_python_code(
         code,
         data_paths=raw_paths,
         output_dir=output_dir,
+        workspace_root=context.get("workspace_root") or None,
     )
 
 

@@ -142,3 +142,21 @@ def test_harness_writes_artifact_in_subprocess(tmp_path) -> None:
     assert (output_dir / "reports" / "result.md").read_text(
         encoding="utf-8"
     ) == "# 运行结果\n\n已完成。"
+
+def test_sandbox_runs_workspace_tool_from_external_project_directory(tmp_path) -> None:
+    workspace = tmp_path / "external-project"
+    workspace.mkdir()
+    (workspace / "notes.txt").write_text("项目资料", encoding="utf-8")
+    registry = create_agent_tool_registry(
+        [],
+        workspace / "outputs" / "session-1",
+        workspace_root=workspace,
+    )
+    sandbox = SubprocessSandbox(working_directory=workspace)
+
+    result = sandbox.execute(
+        registry.resolve("list_workspace_files"),
+        {"pattern": "*.txt"},
+    )
+
+    assert result["files"][0]["path"] == "notes.txt"

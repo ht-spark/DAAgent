@@ -327,9 +327,38 @@ export async function getKnowledgeChunkEmbedProgress(): Promise<KnowledgeChunkEm
   return res.json()
 }
 
+export type ProjectSummary = {
+  id: string
+  title: string
+  root_path: string
+  created_at: string
+  updated_at: string
+}
+
+export async function fetchProjects(): Promise<ProjectSummary[]> {
+  const res = await fetch('/api/projects')
+  if (!res.ok) throw new Error(await extractDetail(res, '获取项目列表失败'))
+  return res.json()
+}
+
+export async function createProject(rootPath: string, title?: string): Promise<ProjectSummary> {
+  const res = await fetch('/api/projects', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ root_path: rootPath, title: title || null }),
+  })
+  if (!res.ok) throw new Error(await extractDetail(res, '添加项目失败'))
+  return res.json()
+}
+
+export async function deleteProject(projectId: string): Promise<void> {
+  const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}`, { method: 'DELETE' })
+  if (!res.ok) throw new Error(await extractDetail(res, '移除项目失败'))
+}
 export type BrainstormDiscussionSummary = {
   id: string
   title: string
+  project_id?: string | null
   updated_at: string
 }
 
@@ -401,6 +430,7 @@ export async function streamDataAgentMessage(
   },
   configId?: string | null,
   knowledgeBaseIds?: string[],
+  projectId?: string | null,
 ): Promise<void> {
   const form = new FormData()
   form.append('message', message)
@@ -408,6 +438,7 @@ export async function streamDataAgentMessage(
   if (discussionId) form.append('discussion_id', discussionId)
   if (configId) form.append('config_id', configId)
   knowledgeBaseIds?.forEach((id) => form.append('knowledge_base_ids', id))
+  if (projectId) form.append('project_id', projectId)
   files.forEach((file) => form.append('files', file))
 
   let res: Response
@@ -462,8 +493,9 @@ export async function streamDataAgentMessage(
   }
 }
 
-export async function fetchBrainstormDiscussions(): Promise<BrainstormDiscussionSummary[]> {
-  const res = await fetch('/api/knowledge/discussions')
+export async function fetchBrainstormDiscussions(projectId?: string | null): Promise<BrainstormDiscussionSummary[]> {
+  const query = projectId ? `?${new URLSearchParams({ project_id: projectId })}` : ''
+  const res = await fetch(`/api/knowledge/discussions${query}`)
   if (!res.ok) throw new Error(await extractDetail(res, '获取讨论历史失败'))
   return res.json()
 }

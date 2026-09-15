@@ -70,6 +70,8 @@ class AgentState(BaseModel):
     memory_summary: str | None = None
     data_paths: list[str] = Field(default_factory=list)
     output_dir: str | None = None
+    workspace_root: str | None = None
+    project_id: str | None = None
     messages: list[AgentMessage] = Field(default_factory=list)
     observations: list[Observation] = Field(default_factory=list)
     iteration: int = Field(default=0, ge=0)
@@ -108,12 +110,12 @@ class AgentState(BaseModel):
                 seen.add(path)
         return normalized
 
-    @field_validator("output_dir")
+    @field_validator("output_dir", "workspace_root", "project_id")
     @classmethod
-    def validate_output_dir(cls, value: str | None) -> str | None:
-        """拒绝空白输出目录；目录授权由运行时负责。"""
+    def validate_optional_context(cls, value: str | None) -> str | None:
+        """拒绝空白的项目和目录上下文字段。"""
         if value is not None and not value.strip():
-            raise ValueError("输出目录不能为空")
+            raise ValueError("项目上下文字段不能为空")
         return value
 
     def append_message(self, role: Literal["user", "assistant"], content: str) -> None:

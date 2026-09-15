@@ -196,6 +196,7 @@ class BrainstormDiscussionSummary(BaseModel):
 
     id: str
     title: str
+    project_id: str | None = None
     updated_at: str
 
 
@@ -212,5 +213,28 @@ class BrainstormDiscussion(BaseModel):
 
     id: str
     title: str
+    project_id: str | None = None
     updated_at: str
     messages: list[BrainstormDiscussionMessage] = Field(default_factory=list)
+
+class ProjectCreateBody(BaseModel):
+    """注册项目文件夹的请求。"""
+
+    root_path: str = Field(min_length=1, max_length=1000)
+    title: str | None = Field(default=None, max_length=80)
+
+
+class ProjectUpdateBody(BaseModel):
+    """修改项目显示名称的请求。"""
+
+    title: str = Field(min_length=1, max_length=80)
+
+
+class ProjectSummary(BaseModel):
+    """一个已注册项目文件夹。"""
+
+    id: str
+    title: str
+    root_path: str
+    created_at: str
+    updated_at: str

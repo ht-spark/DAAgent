@@ -8,6 +8,7 @@ type Props = {
   setTask: (t: { step: TaskStep; runId: string | null }) => void
   onHistory: () => void
   discussionId: string | null
+  projectId: string | null
   onDiscussionId: (id: string) => void
 }
 
@@ -16,6 +17,7 @@ export default function NewTask({
   setTask,
   onHistory,
   discussionId,
+  projectId,
   onDiscussionId,
 }: Props) {
   // 结果页保留原有查看体验
@@ -35,6 +37,7 @@ export default function NewTask({
   return (
     <NewChat
       discussionId={discussionId}
+      projectId={projectId}
       onDiscussionId={onDiscussionId}
       resumeRunId={task.step === 'progress' ? task.runId : null}
       onViewResult={(id) => setTask({ step: 'result', runId: id })}

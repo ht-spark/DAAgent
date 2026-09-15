@@ -28,6 +28,12 @@ from .registry import (
     create_data_profile_registry,
 )
 from .web_search import MAX_WEB_SEARCH_QUERY_CHARS, search_web
+from .workspace_tools import (
+    WorkspacePathError,
+    list_workspace_files,
+    read_workspace_file,
+    search_workspace_text,
+)
 
 __all__ = [
     "ArtifactExistsError",
@@ -54,4 +60,8 @@ __all__ = [
     "search_web",
     "supports_data_profile",
     "write_artifact",
+    "WorkspacePathError",
+    "list_workspace_files",
+    "read_workspace_file",
+    "search_workspace_text",
 ]

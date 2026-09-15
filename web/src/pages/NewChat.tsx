@@ -355,6 +355,7 @@ const ChatMessage = memo(function ChatMessage({
 
 type Props = {
   discussionId: string | null
+  projectId: string | null
   onDiscussionId: (id: string) => void
   resumeRunId?: string | null
   onViewResult: (runId: string) => void
@@ -362,6 +363,7 @@ type Props = {
 
 export default function NewChat({
   discussionId,
+  projectId,
   onDiscussionId,
   resumeRunId,
   onViewResult,
@@ -537,6 +539,7 @@ export default function NewChat({
         },
         selectedConfigId || null,
         knowledgeBaseIds,
+        projectId,
       )
     } catch (error) {
       setMessages((current) => current.map(

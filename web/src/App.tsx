@@ -28,6 +28,7 @@ export default function App() {
   const [modelingView, setModelingView] = useState<ModelingView>('new')
   const [brainstormView, setBrainstormView] = useState<BrainstormView>('knowledge-hub')
   const [discussionId, setDiscussionId] = useState<string | null>(null)
+  const [activeProjectId, setActiveProjectId] = useState<string | null>(null)
   const [activeKnowledgeBaseId, setActiveKnowledgeBaseId] = useState<string | undefined>()
   const [chunkEmbeddingOptions, setChunkEmbeddingOptions] = useState<ChunkEmbeddingOptions>({
     strategy: 'semantic',
@@ -78,6 +79,11 @@ export default function App() {
         section={section}
         collapsed={sidebarCollapsed}
         activeDiscussionId={discussionId}
+        activeProjectId={activeProjectId}
+        onProjectChange={(projectId) => {
+          setActiveProjectId(projectId)
+          startNew()
+        }}
         onHome={() => startNew()}
         onModeling={() => startNew()}
         onBrainstorm={() => {
@@ -86,7 +92,8 @@ export default function App() {
           setSection('brainstorm')
           setBrainstormView('knowledge-hub')
         }}
-        onOpenDiscussion={(id) => {
+        onOpenDiscussion={(id, projectId) => {
+          setActiveProjectId(projectId)
           setDiscussionId(id)
           setTask({ step: 'submit', runId: null })
           setSection('modeling')
@@ -122,6 +129,7 @@ export default function App() {
             setTask={setTask}
             onHistory={() => setModelingView('history')}
             discussionId={discussionId}
+            projectId={activeProjectId}
             onDiscussionId={setDiscussionId}
           />
         )}
