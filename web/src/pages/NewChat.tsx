@@ -6,24 +6,21 @@ import {
   getKnowledgeBases,
   openAgentArtifactFolder,
   renameBrainstormDiscussion,
-  streamBrainstormMessage,
   streamDataAgentMessage,
   syncApiSettingsCache,
   type AgentArtifact,
   type AgentTraceEvent,
-  type BrainstormSource,
   type KnowledgeBaseSummary,
 } from '../api'
 import { loadConfigs, type ApiConfig } from '../apiConfigs'
 import MarkdownContent from '../components/MarkdownContent'
 import ChatModeling from './ChatModeling'
 
-type Mode = 'inspiration' | 'agent' | 'modeling'
+type Mode = 'agent' | 'modeling'
 
 type Message = {
   role: 'assistant' | 'user'
   content: string
-  sources?: BrainstormSource[]
   trace?: AgentTraceEvent[]
 }
 
@@ -34,10 +31,30 @@ const CLIPBOARD_IMAGE_EXTENSIONS: Record<string, string> = {
   'image/webp': 'webp',
 }
 
+const MAX_OBSERVATION_ERROR_LENGTH = 220
+
+function summarizeObservationError(error: string | null | undefined): string {
+  if (!error) return '未提供错误详情'
+
+  const errorSection = error
+    .split(/(?:---\s*)?(?:执行|运行)输出(?:\s*---)?\s*[:：]?/i, 1)[0]
+    .trim()
+  const errorLines = errorSection.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
+  const coreError = (errorLines.length > 1 ? errorLines.at(-1) : errorSection)
+    ?.replace(/\s+/g, ' ')
+    .trim() || ''
+  if (!coreError) return '运行输出过长，已隐藏具体内容'
+  if (coreError.length <= MAX_OBSERVATION_ERROR_LENGTH) return coreError
+  return `${coreError.slice(0, MAX_OBSERVATION_ERROR_LENGTH).trimEnd()}…`
+}
+
 function describeObservation(event: Extract<AgentTraceEvent, { type: 'agent_observation' }>): string {
-  if (!event.success) return event.error || '工具执行失败'
+  if (!event.success) return summarizeObservationError(event.error)
   const summary = event.summary
   if (!summary) return `工具执行完成，耗时 ${event.duration_ms} ms`
+  if (typeof summary.match_count === 'number') {
+    return `知识库命中 ${summary.match_count} 个相关片段，耗时 ${event.duration_ms} ms`
+  }
   const missingRate = typeof summary.missing_rate === 'number'
     ? `，缺失率 ${(summary.missing_rate * 100).toFixed(1)}%`
     : ''
@@ -311,13 +328,9 @@ const AgentInlineProcess = memo(function AgentInlineProcess({
 
 const ChatMessage = memo(function ChatMessage({
   message,
-  onSourceClick,
-  activeSourceKey,
   running = false,
 }: {
   message: Message
-  onSourceClick?: (key: string) => void
-  activeSourceKey?: string | null
   running?: boolean
 }) {
   if (!message.content && !message.trace?.length) return null
@@ -335,23 +348,6 @@ const ChatMessage = memo(function ChatMessage({
         ) : (
           <div className="rag-msg-plain">{message.content}</div>
         )}
-        {message.sources && message.sources.length > 0 && (
-          <div className="rag-hit-row">
-            {message.sources.map((source, sourceIndex) => {
-              const key = `${source.document_id || 'doc'}-${sourceIndex}`
-              return (
-                <button
-                  type="button"
-                  key={key}
-                  className={`rag-hit ${activeSourceKey === key ? 'active' : ''}`}
-                  onClick={() => onSourceClick?.(key)}
-                >
-                  [{sourceIndex + 1}] {source.source_file || '未命名文档'}
-                </button>
-              )
-            })}
-          </div>
-        )}
       </div>
     </div>
   )
@@ -360,8 +356,6 @@ const ChatMessage = memo(function ChatMessage({
 type Props = {
   discussionId: string | null
   onDiscussionId: (id: string) => void
-  initialMode?: Mode
-  initialProblem?: string
   resumeRunId?: string | null
   onViewResult: (runId: string) => void
 }
@@ -369,19 +363,15 @@ type Props = {
 export default function NewChat({
   discussionId,
   onDiscussionId,
-  initialMode = 'inspiration',
-  initialProblem = '',
   resumeRunId,
   onViewResult,
 }: Props) {
-  const [mode, setMode] = useState<Mode>(resumeRunId ? 'modeling' : initialMode)
+  const [mode, setMode] = useState<Mode>(resumeRunId ? 'modeling' : 'agent')
   const [draft, setDraft] = useState('')
   const [messages, setMessages] = useState<Message[]>([])
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [files, setFiles] = useState<File[]>([])
   const [title, setTitle] = useState('新讨论')
-  const [activeSourceKey, setActiveSourceKey] = useState<string | null>(null)
-  const [activeSources, setActiveSources] = useState<BrainstormSource[]>([])
   const [agentTrace, setAgentTrace] = useState<AgentTraceEvent[]>([])
   const [agentArtifacts, setAgentArtifacts] = useState<AgentArtifact[]>([])
   const [previewArtifact, setPreviewArtifact] = useState<AgentArtifact | null>(null)
@@ -430,8 +420,6 @@ export default function NewChat({
     if (!discussionId) {
       setMessages([])
       setTitle('新讨论')
-      setActiveSources([])
-      setActiveSourceKey(null)
       setAgentTrace([])
       setAgentArtifacts([])
       return
@@ -445,16 +433,10 @@ export default function NewChat({
         const savedRoutes = savedMetadata?.knowledge_base_ids
           ?? (savedMetadata?.knowledge_base_id ? [savedMetadata.knowledge_base_id] : [])
         if (savedRoutes.length) setKnowledgeBaseIds(savedRoutes)
-        const latestModeMessage = [...discussion.messages]
+        const latestAgentMessage = [...discussion.messages]
           .reverse()
-          .find((message) => message.metadata?.mode)
-        if (latestModeMessage?.metadata?.mode === 'agent') {
-          setMode('agent')
-          setAgentTrace(latestModeMessage.metadata.agent_trace ?? [])
-        } else {
-          setMode('inspiration')
-          setAgentTrace([])
-        }
+          .find((message) => message.metadata?.mode === 'agent')
+        setAgentTrace(latestAgentMessage?.metadata?.agent_trace ?? [])
         const artifactsByPath = new Map<string, AgentArtifact>()
         discussion.messages.forEach((message) => {
           message.metadata?.agent_artifacts?.forEach((artifact) => {
@@ -466,14 +448,10 @@ export default function NewChat({
           discussion.messages.map((m) => ({
             role: m.role,
             content: m.content,
-            sources: m.sources?.length ? m.sources : undefined,
             trace: m.metadata?.agent_trace,
           })),
         )
         setTitle(discussion.title)
-        const lastWithSources = [...discussion.messages].reverse().find((m) => m.sources?.length)
-        setActiveSources(lastWithSources?.sources ?? [])
-        setActiveSourceKey(null)
       })
       .catch((error) =>
         setMessages([
@@ -489,13 +467,6 @@ export default function NewChat({
     const el = listRef.current
     if (el) el.scrollTop = el.scrollHeight
   }, [messages])
-
-  function selectMode(nextMode: Exclude<Mode, 'modeling'>) {
-    if (nextMode === mode) return
-    setMode(nextMode)
-    setFiles([])
-    if (fileInputRef.current) fileInputRef.current.value = ''
-  }
 
   function handlePaste(event: ClipboardEvent<HTMLTextAreaElement>) {
     if (isSubmitting) return
@@ -531,83 +502,49 @@ export default function NewChat({
       { role: 'assistant', content: '' },
     ])
     try {
-      if (mode === 'agent') {
-        setAgentTrace([])
-        setActiveSources([])
-        await streamDataAgentMessage(
-          message,
-          discussionId,
-          title,
-          attachedFiles,
-          {
-            onStarted: () => undefined,
-            onTrace: (event) => {
-              setAgentTrace((current) => [...current, event])
-              setMessages((current) => current.map(
-                (item, index) => index === current.length - 1
-                  ? { ...item, trace: [...(item.trace ?? []), event] }
-                  : item,
-              ))
-            },
-            onToken: (content) => {
-              setMessages((current) => current.map(
-                (item, index) => index === current.length - 1
-                  ? { ...item, content: `${item.content}${content}` }
-                  : item,
-              ))
-            },
-            onDone: (savedDiscussionId, _runId, artifacts) => {
-              setAgentArtifacts((current) => [
-                ...current.filter(
-                  (item) => !artifacts.some((artifact) => artifact.path === item.path),
-                ),
-                ...artifacts,
-              ])
-              onDiscussionId(savedDiscussionId)
-            },
+      setAgentTrace([])
+      await streamDataAgentMessage(
+        message,
+        discussionId,
+        title,
+        attachedFiles,
+        {
+          onStarted: () => undefined,
+          onTrace: (event) => {
+            setAgentTrace((current) => [...current, event])
+            setMessages((current) => current.map(
+              (item, index) => index === current.length - 1
+                ? { ...item, trace: [...(item.trace ?? []), event] }
+                : item,
+            ))
           },
-          selectedConfigId || null,
-        )
-      } else {
-        await streamBrainstormMessage(
-          message,
-          discussionId,
-          title,
-          attachedFiles,
-          {
-            onSources: (sources) => {
-              setActiveSources(sources)
-              setActiveSourceKey(null)
-              setMessages((current) =>
-                current.map((item, index) =>
-                  index === current.length - 1 ? { ...item, sources } : item,
-                ),
-              )
-            },
-            onToken: (content) => {
-              setMessages((current) =>
-                current.map((item, index) =>
-                  index === current.length - 1
-                    ? { ...item, content: `${item.content}${content}` }
-                    : item,
-                ),
-              )
-            },
-            onDone: onDiscussionId,
+          onToken: (content) => {
+            setMessages((current) => current.map(
+              (item, index) => index === current.length - 1
+                ? { ...item, content: `${item.content}${content}` }
+                : item,
+            ))
           },
-          selectedConfigId || null,
-          knowledgeBaseIds,
-        )
-      }
+          onDone: (savedDiscussionId, _runId, artifacts) => {
+            setAgentArtifacts((current) => [
+              ...current.filter(
+                (item) => !artifacts.some((artifact) => artifact.path === item.path),
+              ),
+              ...artifacts,
+            ])
+            onDiscussionId(savedDiscussionId)
+          },
+        },
+        selectedConfigId || null,
+        knowledgeBaseIds,
+      )
     } catch (error) {
       setMessages((current) => current.map(
         (item, index) => index === current.length - 1
           ? {
               ...item,
               role: 'assistant',
-              content: error instanceof Error
-                ? error.message
-                : mode === 'agent' ? 'Agent 暂不可用。' : '灵感讨论服务暂不可用。',
+              content: error instanceof Error ? error.message : 'Agent 暂不可用。',
             }
           : item,
       ))
@@ -641,15 +578,14 @@ export default function NewChat({
     return (
       <div className="page page-fill chat-page new-chat-mode">
         <div className="new-chat-mode-bar">
-          <button type="button" className="rag-btn" onClick={() => setMode('inspiration')}>
-            ← 返回灵感讨论
+          <button type="button" className="rag-btn" onClick={() => setMode('agent')}>
+            ← 返回数分 Agent
           </button>
           <span className="new-chat-mode-hint">建模任务 · 上传资料后启动完整建模流程</span>
         </div>
         <ChatModeling
           key={resumeRunId ?? 'modeling'}
           resumeRunId={resumeRunId}
-          initialProblem={initialProblem}
           onViewResult={onViewResult}
           knowledgeBases={knowledgeBases}
           knowledgeBaseIds={knowledgeBaseIds}
@@ -659,8 +595,6 @@ export default function NewChat({
       </div>
     )
   }
-
-  const lastAssistantSources = activeSources
 
   return (
     <div className="page-fill new-chat-page rag-agent" aria-label="新建聊天">
@@ -674,7 +608,6 @@ export default function NewChat({
             onBlur={() => void saveTitle()}
             aria-label="讨论名称"
           />
-          {mode !== 'agent' && <p>混合检索 · 引用可追溯 · 灵感迸发</p>}
         </div>
       </header>
 
@@ -686,12 +619,10 @@ export default function NewChat({
                 <ChatMessage
                   key={`${message.role}-${index}`}
                   message={message}
-                  activeSourceKey={activeSourceKey}
-                  onSourceClick={(key) => setActiveSourceKey(key)}
-                  running={mode === 'agent' && isSubmitting && index === messages.length - 1}
+                  running={isSubmitting && index === messages.length - 1}
                 />
               ))}
-              {messages.length === 0 && mode === 'agent' && (
+              {messages.length === 0 && (
                 <div className="agent-empty-state">
                   <img className="agent-empty-logo" src="/logo.png" alt="" aria-hidden="true" />
                   <h2>今天想分析什么？</h2>
@@ -699,11 +630,11 @@ export default function NewChat({
               )}
               {isSubmitting
                 && messages[messages.length - 1]?.content === ''
-                && (mode !== 'agent' || agentTrace.length === 0) && (
+                && agentTrace.length === 0 && (
                 <div className="rag-msg assistant">
                   <span className="rag-avatar">M</span>
                   <div className="rag-msg-body">
-                    <span className="rag-typing" aria-label={mode === 'agent' ? 'Agent 运行中' : '检索中'}>
+                    <span className="rag-typing" aria-label="Agent 运行中">
                       <i />
                       <i />
                       <i />
@@ -743,29 +674,11 @@ export default function NewChat({
                     void submit()
                   }
                 }}
-                placeholder={mode === 'agent' ? '直接提问，或上传/粘贴数据、文档和图片让 Agent 自主分析…' : '输入问题，或直接 Ctrl+V 粘贴图片…'}
+                placeholder="直接提问，或上传/粘贴数据、文档和图片让 Agent 自主分析…"
                 rows={2}
               />
               <div className="rag-composer-bar">
-                <div className="rag-mode-switch" role="group" aria-label="选择工作模式">
-                  <button
-                    type="button"
-                    className={mode === 'inspiration' ? 'active' : ''}
-                    onClick={() => selectMode('inspiration')}
-                    disabled={isSubmitting}
-                  >
-                    知识库
-                  </button>
-                  <button
-                    type="button"
-                    className={mode === 'agent' ? 'active' : ''}
-                    onClick={() => selectMode('agent')}
-                    disabled={isSubmitting}
-                  >
-                    数分Agent
-                  </button>
-                </div>
-                {mode === 'inspiration' && <details className="rag-kb-picker">
+                <details className="rag-kb-picker">
                   <summary title="选择本轮检索使用的知识库">
                     {knowledgeBaseIds.length === 1
                       ? knowledgeBases.find((base) => base.id === knowledgeBaseIds[0])?.name ?? '选择知识库'
@@ -793,23 +706,21 @@ export default function NewChat({
                       </label>
                     ))}
                   </div>
-                </details>}
+                </details>
                 <button
                   type="button"
                   className="rag-btn"
                   onClick={() => fileInputRef.current?.click()}
                   disabled={isSubmitting}
                 >
-                  {mode === 'agent' ? '添加附件' : '上传文件'}{files.length ? ` · ${files.length}` : ''}
+                  添加附件{files.length ? ` · ${files.length}` : ''}
                 </button>
                 <input
                   ref={fileInputRef}
                   hidden
                   type="file"
                   multiple
-                  accept={mode === 'agent'
-                    ? '.csv,.xlsx,.xls,.json,.jsonl,.ndjson,.pdf,.docx,.md,.markdown,.png,.jpg,.jpeg,.webp,.gif,.bmp,.tif,.tiff'
-                    : '.pdf,.docx,.md,.markdown,.txt,.json,.csv,.xlsx,.xlsm,.png,.jpg,.jpeg,.webp,.gif'}
+                  accept=".csv,.xlsx,.xls,.json,.jsonl,.ndjson,.pdf,.docx,.md,.markdown,.png,.jpg,.jpeg,.webp,.gif,.bmp,.tif,.tiff"
                   onChange={(event) => setFiles(Array.from(event.target.files ?? []))}
                 />
                 {apiConfigs.length > 0 ? (
@@ -862,21 +773,21 @@ export default function NewChat({
 
         <aside
           className={`rag-sources ${sourcesCollapsed ? 'is-collapsed' : ''}`}
-          aria-label={mode === 'agent' ? '输出产物' : '引用来源'}
+          aria-label="输出产物"
         >
           {sourcesCollapsed ? (
             <button
               type="button"
               className="rag-sources-expand"
               onClick={() => setSourcesCollapsed(false)}
-              title={mode === 'agent' ? '展开输出产物' : '展开引用来源'}
+              title="展开输出产物"
             >
               <span className="rag-sources-expand-text">
-                {mode === 'agent' ? '输出产物' : '引用来源'}
+                输出产物
               </span>
-              {(mode === 'agent' ? agentArtifacts.length : activeSources.length) > 0 && (
+              {agentArtifacts.length > 0 && (
                 <span className="rag-sources-expand-badge">
-                  {mode === 'agent' ? agentArtifacts.length : activeSources.length}
+                  {agentArtifacts.length}
                 </span>
               )}
             </button>
@@ -884,27 +795,25 @@ export default function NewChat({
             <>
               <div className="rag-sources-head">
                 <div>
-                  <h2>{mode === 'agent' ? '输出产物' : '引用来源'}</h2>
-                  <p>{mode === 'agent' ? 'Agent 生成的文件，可预览或下载' : '点击消息中的引用编号定位片段'}</p>
+                  <h2>输出产物</h2>
+                  <p>Agent 生成的文件，可预览或下载</p>
                 </div>
                 <div className="rag-sources-head-actions">
-                  {mode === 'agent' && (
-                    <button
-                      type="button"
-                      className="rag-open-folder"
-                      onClick={() => void openArtifactFolder()}
-                      disabled={openingArtifactFolder || (!discussionId && !agentArtifacts.some((artifact) => artifact.discussion_id))}
-                      title="在文件管理器中打开产物文件夹"
-                    >
-                      {openingArtifactFolder ? '打开中…' : '打开文件夹'}
-                    </button>
-                  )}
+                  <button
+                    type="button"
+                    className="rag-open-folder"
+                    onClick={() => void openArtifactFolder()}
+                    disabled={openingArtifactFolder || (!discussionId && !agentArtifacts.some((artifact) => artifact.discussion_id))}
+                    title="在文件管理器中打开产物文件夹"
+                  >
+                    {openingArtifactFolder ? '打开中…' : '打开文件夹'}
+                  </button>
                   <button
                     type="button"
                     className="rag-sources-collapse"
                     onClick={() => setSourcesCollapsed(true)}
-                    title={mode === 'agent' ? '收起输出产物' : '收起引用来源'}
-                    aria-label={mode === 'agent' ? '收起输出产物' : '收起引用来源'}
+                    title="收起输出产物"
+                    aria-label="收起输出产物"
                   >
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                       <path d="M9 18l6-6-6-6" strokeLinecap="round" strokeLinejoin="round" />
@@ -913,73 +822,30 @@ export default function NewChat({
                 </div>
               </div>
               <div className="rag-sources-list">
-                {mode === 'agent' && artifactFolderError && (
+                {artifactFolderError && (
                   <p className="rag-folder-error">{artifactFolderError}</p>
                 )}
-                {mode === 'agent' ? (
-                  agentArtifacts.length === 0 ? (
-                    <p className="rag-sources-empty">
-                      {isSubmitting ? 'Agent 正在处理，生成的文件会出现在这里。' : '当前讨论还没有生成可下载的产物。'}
-                    </p>
-                  ) : agentArtifacts.map((artifact) => (
-                    <article
-                      className="agent-artifact-item"
-                      key={`${artifact.run_id}-${artifact.path}`}
-                    >
-                      <span className="agent-artifact-type">{artifactType(artifact.name)}</span>
-                      <span className="agent-artifact-copy">
-                        <strong>{artifact.name}</strong>
-                        <small>{formatArtifactSize(artifact.size_bytes)}</small>
-                      </span>
-                      <span className="agent-artifact-actions">
-                        <button type="button" onClick={() => setPreviewArtifact(artifact)}>预览</button>
-                        <a href={artifactUrl(artifact, 'files')} download={artifact.name}>下载</a>
-                      </span>
-                    </article>
-                  ))
-                ) : lastAssistantSources.length === 0 ? (
-                  <p className="rag-sources-empty">发送问题后，这里会展示知识库命中片段。</p>
-                ) : (
-                  lastAssistantSources.map((source, index) => {
-                    const key = `${source.document_id || 'doc'}-${index}`
-                    return (
-                      <article
-                        key={key}
-                        className={`rag-source-card ${activeSourceKey === key ? 'active' : ''}`}
-                        onClick={() => setActiveSourceKey(key)}
-                      >
-                        <div className="rag-source-top">
-                          <span className="rag-source-id">[{index + 1}]</span>
-                          <span className="rag-source-name">{source.source_file || '未命名文档'}</span>
-                        </div>
-                        <div className="rag-source-snippet">
-                          <MarkdownContent content={source.content} />
-                        </div>
-                      </article>
-                    )
-                  })
-                )}
+                {agentArtifacts.length === 0 ? (
+                  <p className="rag-sources-empty">
+                    {isSubmitting ? 'Agent 正在处理，生成的文件会出现在这里。' : '当前讨论还没有生成可下载的产物。'}
+                  </p>
+                ) : agentArtifacts.map((artifact) => (
+                  <article
+                    className="agent-artifact-item"
+                    key={`${artifact.run_id}-${artifact.path}`}
+                  >
+                    <span className="agent-artifact-type">{artifactType(artifact.name)}</span>
+                    <span className="agent-artifact-copy">
+                      <strong>{artifact.name}</strong>
+                      <small>{formatArtifactSize(artifact.size_bytes)}</small>
+                    </span>
+                    <span className="agent-artifact-actions">
+                      <button type="button" onClick={() => setPreviewArtifact(artifact)}>预览</button>
+                      <a href={artifactUrl(artifact, 'files')} download={artifact.name}>下载</a>
+                    </span>
+                  </article>
+                ))}
               </div>
-              {mode !== 'agent' && (
-                <div className="rag-metrics">
-                  <div className="rag-metric">
-                    <b>{lastAssistantSources.length || '···'}</b>
-                    <span>命中片段</span>
-                  </div>
-                  <div className="rag-metric">
-                    <b>{Math.max(0, messages.filter((m) => m.role === 'user').length) || '···'}</b>
-                    <span>提问轮次</span>
-                  </div>
-                  <div className="rag-metric">
-                    <b>···</b>
-                    <span>检索轮次</span>
-                  </div>
-                  <div className="rag-metric">
-                    <b>···</b>
-                    <span>端到端耗时</span>
-                  </div>
-                </div>
-              )}
             </>
           )}
         </aside>

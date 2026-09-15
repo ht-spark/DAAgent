@@ -119,7 +119,7 @@ class AgentLoop:
         system_prompt: str,
         *,
         max_iterations: int = 30,
-        decision_retries: int = 1,
+        decision_retries: int = 5,
     ) -> None:
         """Initialize the decision-only loop.
 

@@ -25,6 +25,11 @@ eggs/
 .eggs/
 wheels/
 
+# 前端依赖与 Vite 预构建缓存（由 npm install / vite dev 自动生成）
+node_modules/
+web/node_modules/
+**/node_modules/.vite/
+
 # 测试与覆盖率
 .pytest_cache/
 .tests/

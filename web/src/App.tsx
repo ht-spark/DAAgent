@@ -6,7 +6,6 @@ import { applyUiSettings, loadUiSettings } from './settings'
 import NewTask from './pages/NewTask'
 import History from './pages/History'
 import ApiManager from './pages/ApiManager'
-import DiscussionHistory from './pages/DiscussionHistory'
 import Docs from './pages/Docs'
 import KnowledgeBaseHub from './pages/KnowledgeBaseHub'
 import KnowledgeBase from './pages/KnowledgeBase'
@@ -18,7 +17,7 @@ import KnowledgeBaseHistory from './pages/KnowledgeBaseHistory'
 
 type Section = 'modeling' | 'brainstorm' | 'api' | 'docs'
 type TaskStep = 'submit' | 'progress' | 'result'
-type ModelingView = 'overview' | 'new' | 'history' | 'discussion-history'
+type ModelingView = 'new' | 'history'
 type BrainstormView = 'knowledge-hub' | 'knowledge' | 'knowledge-history' | 'stats' | 'chunking' | 'chunking-progress' | 'retrieval-ready'
 
 const SYMBOLS = ['∫', '∑', '∏', '∂', '∇', '∞', 'π', 'σ', 'μ', 'λ', 'α', 'β', 'γ', 'θ', 'Δ', 'Ω']
@@ -124,14 +123,6 @@ export default function App() {
             onHistory={() => setModelingView('history')}
             discussionId={discussionId}
             onDiscussionId={setDiscussionId}
-          />
-        )}
-        {section === 'modeling' && modelingView === 'discussion-history' && (
-          <DiscussionHistory
-            onOpen={(id) => {
-              setDiscussionId(id)
-              setModelingView('new')
-            }}
           />
         )}
         {section === 'brainstorm' && brainstormView === 'knowledge-hub' && (

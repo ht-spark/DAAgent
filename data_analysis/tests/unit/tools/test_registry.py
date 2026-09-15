@@ -188,6 +188,7 @@ def test_agent_registry_always_exposes_dynamic_python(tmp_path) -> None:
     registry = create_agent_tool_registry([], tmp_path / "output")
 
     assert [spec.name for spec in registry.specs()] == [
+        "search_web",
         "write_artifact",
         "execute_python",
         "inspect_artifact",
@@ -200,6 +201,122 @@ def test_agent_registry_always_exposes_dynamic_python(tmp_path) -> None:
     assert result["result"] == {"value": 5}
 
 
+def test_agent_registry_binds_selected_knowledge_bases(monkeypatch, tmp_path) -> None:
+    from data_analysis.tools import knowledge_tools
+    from KnowledgeBase.main import RetrievedChunk
+
+    captured: dict[str, object] = {}
+
+    def retrieve(query: str, **kwargs):
+        captured.update(query=query, **kwargs)
+        return [
+            RetrievedChunk(
+                point_id=1,
+                text="指标正文",
+                context="指标口径上下文",
+                source_file="metrics.md",
+                source_path="",
+                document_id="doc-1",
+                dense_rank=1,
+                bm25_rank=1,
+                rrf_score=0.03,
+                knowledge_base_id="metrics-kb",
+            )
+        ]
+
+    monkeypatch.setattr(knowledge_tools, "retrieve_knowledge", retrieve)
+    registry = create_agent_tool_registry(
+        [],
+        tmp_path / "output",
+        knowledge_base_ids=["metrics-kb", "history-kb", "metrics-kb"],
+    )
+
+    tool = registry.resolve("search_knowledge_base")
+    result = tool.invoke({"query": "  复购率口径  "})
+
+    assert tool.run_in_process is True
+    assert captured == {
+        "query": "复购率口径",
+        "knowledge_base_ids": ["metrics-kb", "history-kb"],
+    }
+    assert result["matches"] == [
+        {
+            "content": "指标口径上下文",
+            "source_file": "metrics.md",
+            "document_id": "doc-1",
+            "knowledge_base_id": "metrics-kb",
+            "relevance_score": 0.03,
+        }
+    ]
+
+
+def test_agent_registry_exposes_web_search(monkeypatch, tmp_path) -> None:
+    from data_analysis.tools import web_search
+
+    captured: dict[str, str | None] = {}
+
+    class FakeSearchTool:
+        def __init__(self, api_key: str | None = None):
+            captured["api_key"] = api_key
+
+        def search(self, query: str):
+            return {
+                "query": query,
+                "answer": "最新公开信息",
+                "results": [
+                    {
+                        "title": "来源标题",
+                        "url": "https://example.com/source",
+                        "content": "来源摘要",
+                        "score": 0.9,
+                    }
+                ],
+            }
+
+    monkeypatch.setattr(web_search, "TavilySearchTool", FakeSearchTool)
+    tool = create_agent_tool_registry(
+        [],
+        tmp_path / "output",
+        web_search_api_key="saved-tavily-key",
+    ).resolve("search_web")
+
+    result = tool.invoke({"query": "  最近发布的数据  "})
+
+    assert tool.run_in_process is True
+    assert captured["api_key"] == "saved-tavily-key"
+    assert result["query"] == "最近发布的数据"
+    assert result["results"][0]["url"] == "https://example.com/source"
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [{}, {"query": ""}, {"query": "问题", "max_results": 10}],
+)
+def test_web_search_rejects_invalid_arguments(tmp_path, arguments) -> None:
+    tool = create_agent_tool_registry([], tmp_path / "output").resolve("search_web")
+
+    with pytest.raises(ToolArgumentsError):
+        tool.invoke(arguments)
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [{}, {"query": ""}, {"query": "问题", "knowledge_base_ids": ["other"]}],
+)
+def test_knowledge_tool_rejects_route_override_and_invalid_query(
+    tmp_path,
+    arguments,
+) -> None:
+    tool = create_agent_tool_registry(
+        [],
+        tmp_path / "output",
+        knowledge_base_ids=["metrics-kb"],
+    ).resolve("search_knowledge_base")
+
+    with pytest.raises(ToolArgumentsError):
+        tool.invoke(arguments)
+
+
 def test_agent_registry_combines_data_and_code_tools(tmp_path) -> None:
     path = tmp_path / "data.csv"
     pd.DataFrame({"销量": [1]}).to_csv(path, index=False)
@@ -209,6 +326,7 @@ def test_agent_registry_combines_data_and_code_tools(tmp_path) -> None:
     assert [spec.name for spec in registry.specs()] == [
         "profile_data",
         "inspect_data_rows",
+        "search_web",
         "write_artifact",
         "execute_python",
         "inspect_artifact",

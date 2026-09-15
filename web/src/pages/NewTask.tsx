@@ -31,7 +31,7 @@ export default function NewTask({
     )
   }
 
-  // 新建聊天：灵感迸发 RAG 对话 + 可切换到建模任务
+  // 新建聊天统一进入数分 Agent；历史建模任务仍可继续查看。
   return (
     <NewChat
       discussionId={discussionId}

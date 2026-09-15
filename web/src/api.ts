@@ -1,6 +1,5 @@
 // 与 FastAPI 后端交互的薄封装。开发期经 Vite 代理（/api -> :8000）。
 
-/** 后端是否在线（缓存结果，避免频繁探测）。 */
 import {
   ApiConfig,
   ApiSettingsSnapshot,
@@ -13,20 +12,14 @@ import {
   saveExternalServiceConfigs,
 } from './apiConfigs'
 
-let _backendOnline: boolean | null = null
-
 /**
  * 探测后端是否在线（GET /healthz）。
- * 结果缓存 10 秒，避免每次提交都额外发请求。
  */
 export async function checkBackendOnline(): Promise<boolean> {
   try {
     const res = await fetch('/healthz', { signal: AbortSignal.timeout(3000) })
-    const ok = res.ok
-    _backendOnline = ok
-    return ok
+    return res.ok
   } catch {
-    _backendOnline = false
     return false
   }
 }
@@ -334,12 +327,6 @@ export async function getKnowledgeChunkEmbedProgress(): Promise<KnowledgeChunkEm
   return res.json()
 }
 
-export type BrainstormSource = {
-  source_file: string
-  document_id: string
-  content: string
-}
-
 export type BrainstormDiscussionSummary = {
   id: string
   title: string
@@ -350,7 +337,6 @@ export type BrainstormDiscussion = BrainstormDiscussionSummary & {
   messages: Array<{
     role: 'assistant' | 'user'
     content: string
-    sources: BrainstormSource[]
     metadata?: {
       knowledge_base_id?: string
       knowledge_base_ids?: string[]
@@ -382,6 +368,7 @@ export type AgentTraceEvent = {
   type: 'agent_started'
   run_id: string
   files: string[]
+  knowledge_base_ids?: string[]
 } | {
   type: 'agent_action'
   thought: string
@@ -401,62 +388,6 @@ export type AgentTraceEvent = {
 
 const AGENT_REQUEST_TIMEOUT_MS = 3 * 60 * 60 * 1000 + 60 * 1000
 
-export async function streamBrainstormMessage(
-  message: string,
-  discussionId: string | null,
-  title: string,
-  files: File[],
-  handlers: {
-    onSources: (sources: BrainstormSource[]) => void
-    onToken: (content: string) => void
-    onDone: (discussionId: string) => void
-  },
-  configId?: string | null,
-  knowledgeBaseIds?: string[],
-): Promise<void> {
-  let res: Response
-  const form = new FormData()
-  form.append('message', message)
-  form.append('title', title)
-  if (discussionId) form.append('discussion_id', discussionId)
-  if (configId) form.append('config_id', configId)
-  knowledgeBaseIds?.forEach((id) => form.append('knowledge_base_ids', id))
-  files.forEach((file) => form.append('files', file))
-  try {
-    res = await fetch('/api/knowledge/brainstorm/stream', {
-      method: 'POST',
-      body: form,
-      signal: AbortSignal.timeout(150000),
-    })
-  } catch (error) {
-    if (error instanceof DOMException && error.name === 'TimeoutError') {
-      throw new Error('讨论请求超时：模型服务在 150 秒内未响应，请检查 API 配置或稍后重试。')
-    }
-    throw new Error('讨论服务无法连接，请确认后端服务正在运行。')
-  }
-  if (!res.ok) throw new Error(await extractDetail(res, '头脑风暴请求失败'))
-  if (!res.body) throw new Error('讨论服务未返回流式内容。')
-
-  const reader = res.body.getReader()
-  const decoder = new TextDecoder()
-  let buffer = ''
-  while (true) {
-    const { done, value } = await reader.read()
-    buffer += decoder.decode(value, { stream: !done })
-    const lines = buffer.split('\n')
-    buffer = lines.pop() ?? ''
-    for (const line of lines) {
-      if (!line) continue
-      const event = JSON.parse(line) as { type: string; content?: string; detail?: string; sources?: BrainstormSource[]; discussion_id?: string }
-      if (event.type === 'sources') handlers.onSources(event.sources ?? [])
-      if (event.type === 'token' && event.content) handlers.onToken(event.content)
-      if (event.type === 'error') throw new Error(event.detail ?? '模型服务调用失败。')
-      if (event.type === 'done' && event.discussion_id) handlers.onDone(event.discussion_id)
-    }
-    if (done) break
-  }
-}
-
 export async function streamDataAgentMessage(
   message: string,
   discussionId: string | null,
@@ -469,12 +400,14 @@ export async function streamDataAgentMessage(
     onDone: (discussionId: string, runId: string, artifacts: AgentArtifact[]) => void
   },
   configId?: string | null,
+  knowledgeBaseIds?: string[],
 ): Promise<void> {
   const form = new FormData()
   form.append('message', message)
   form.append('title', title)
   if (discussionId) form.append('discussion_id', discussionId)
   if (configId) form.append('config_id', configId)
+  knowledgeBaseIds?.forEach((id) => form.append('knowledge_base_ids', id))
   files.forEach((file) => form.append('files', file))
 
   let res: Response

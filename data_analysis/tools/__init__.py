@@ -27,6 +27,7 @@ from .registry import (
     create_agent_tool_registry,
     create_data_profile_registry,
 )
+from .web_search import MAX_WEB_SEARCH_QUERY_CHARS, search_web
 
 __all__ = [
     "ArtifactExistsError",
@@ -35,6 +36,7 @@ __all__ = [
     "CodeExecutionError",
     "DuplicateToolError",
     "MAX_INSPECT_DATA_ROWS",
+    "MAX_WEB_SEARCH_QUERY_CHARS",
     "RegisteredTool",
     "ToolArgumentsError",
     "ToolHandler",
@@ -49,6 +51,7 @@ __all__ = [
     "execute_python_code",
     "inspect_data_rows",
     "profile_data",
+    "search_web",
     "supports_data_profile",
     "write_artifact",
 ]

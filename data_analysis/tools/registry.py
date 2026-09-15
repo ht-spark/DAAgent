@@ -19,6 +19,9 @@ from .data_tools import (
     profile_data,
     supports_data_profile,
 )
+from .errors import DuplicateToolError, ToolArgumentsError, ToolNotFoundError
+from .knowledge_tools import MAX_KNOWLEDGE_QUERY_CHARS, search_knowledge_base
+from .web_search import MAX_WEB_SEARCH_QUERY_CHARS, search_web
 
 __all__ = [
     "DuplicateToolError",
@@ -38,18 +41,6 @@ ToolHandler: TypeAlias = Callable[
     [Mapping[str, JsonValue], Mapping[str, JsonValue]],
     JsonValue,
 ]
-
-
-class DuplicateToolError(ValueError):
-    """注册表中已经存在同名工具。"""
-
-
-class ToolNotFoundError(LookupError):
-    """注册表中不存在指定工具。"""
-
-
-class ToolArgumentsError(ValueError):
-    """工具收到不符合约定的调用参数。"""
 
 
 @dataclass(frozen=True)
@@ -291,6 +282,8 @@ def create_agent_tool_registry(
     output_dir: str | Path,
     *,
     vision_llm: Any | None = None,
+    knowledge_base_ids: Sequence[str] = (),
+    web_search_api_key: str | None = None,
 ) -> ToolRegistry:
     """创建同时支持确定性工具和动态 Python 的 Agent 注册表。
 
@@ -298,6 +291,8 @@ def create_agent_tool_registry(
         authorized_paths: 当前运行允许读取的数据文件路径，可以为空。
         output_dir: 当前会话允许生成产物的目录。
         vision_llm: 当前会话模型；提供时为图片附件注册识图工具。
+        knowledge_base_ids: 用户为当前会话预选的知识库 ID。
+        web_search_api_key: 服务端保存的 Tavily API 密钥；不会暴露给模型。
 
     Returns:
         根据附件情况注册数据工具，并始终注册 Python 代码执行能力。
@@ -308,6 +303,64 @@ def create_agent_tool_registry(
         create_data_profile_registry(profile_paths)
         if profile_paths
         else ToolRegistry()
+    )
+    selected_base_ids = list(dict.fromkeys(
+        base_id.strip()
+        for base_id in knowledge_base_ids
+        if isinstance(base_id, str) and base_id.strip()
+    ))
+    if selected_base_ids:
+        registry.register_in_process(
+            ToolSpec(
+                name="search_knowledge_base",
+                description=(
+                    "按需检索用户为当前会话预先选定的知识库。仅当回答依赖业务口径、"
+                    "内部资料、历史结论或其他知识库事实时调用；普通问答、纯计算或现有"
+                    "信息已经充分时不要调用。工具只会搜索已授权知识库，不能切换或扩大"
+                    "范围。返回相关片段及 source_file，回答采用检索内容时必须注明来源。"
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": MAX_KNOWLEDGE_QUERY_CHARS,
+                            "description": "围绕当前任务提出的具体检索问题",
+                        },
+                    },
+                    "required": ["query"],
+                    "additionalProperties": False,
+                },
+            ),
+            search_knowledge_base,
+            context={"knowledge_base_ids": selected_base_ids},
+        )
+    registry.register_in_process(
+        ToolSpec(
+            name="search_web",
+            description=(
+                "按需联网检索公开网页。仅当问题依赖近期变化、外部事实、最新资料或"
+                "需要可核验网页来源，而现有对话、附件和知识库信息不足时调用；不要"
+                "用它检索用户私有知识。返回摘要和 results，其中包含 title、url、"
+                "content 等来源信息；采用搜索结果回答时必须注明对应 URL。"
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": MAX_WEB_SEARCH_QUERY_CHARS,
+                        "description": "围绕当前任务提出的具体联网检索问题",
+                    },
+                },
+                "required": ["query"],
+                "additionalProperties": False,
+            },
+        ),
+        search_web,
+        context={"api_key": web_search_api_key or ""},
     )
     registry.register(
         ToolSpec(

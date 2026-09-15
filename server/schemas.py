@@ -191,15 +191,6 @@ class KnowledgeChunkEmbedProgress(BaseModel):
     error: str | None = None
 
 
-class BrainstormSource(BaseModel):
-    """One knowledge-base chunk returned for an inspiration query."""
-
-    source_file: str
-    document_id: str
-    content: str
-    knowledge_base_id: str = "default"
-
-
 class BrainstormDiscussionSummary(BaseModel):
     """Saved discussion displayed in the history list."""
 
@@ -213,7 +204,6 @@ class BrainstormDiscussionMessage(BaseModel):
 
     role: str
     content: str
-    sources: list[BrainstormSource] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
