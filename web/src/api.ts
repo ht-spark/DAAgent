@@ -430,6 +430,7 @@ export type AgentTraceEvent = {
   duration_ms: number
   summary?: Record<string, number> | null
   error?: string | null
+  details?: string
   /** search_knowledge_base 命中的来源标注 */
   sources?: KnowledgeSourceCitation[]
 }
@@ -455,6 +456,7 @@ export async function streamDataAgentMessage(
   configId?: string | null,
   knowledgeBaseIds?: string[],
   projectId?: string | null,
+  enableProjectChanges = false,
 ): Promise<void> {
   const form = new FormData()
   form.append('message', message)
@@ -463,6 +465,7 @@ export async function streamDataAgentMessage(
   if (configId) form.append('config_id', configId)
   knowledgeBaseIds?.forEach((id) => form.append('knowledge_base_ids', id))
   if (projectId) form.append('project_id', projectId)
+  if (enableProjectChanges) form.append('enable_project_changes', 'true')
   files.forEach((file) => form.append('files', file))
 
   let res: Response

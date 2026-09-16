@@ -98,10 +98,10 @@ def save_discussion_message(
     if title and title.strip():
         store.rename_session(session_id, title)
 
-    selected_base_ids = knowledge_base_ids or [knowledge_base_id]
+    selected_base_ids = knowledge_base_ids if knowledge_base_ids is not None else [knowledge_base_id]
     user_meta: dict[str, Any] = {
         "sources": [],
-        "knowledge_base_id": selected_base_ids[0],
+        "knowledge_base_id": selected_base_ids[0] if selected_base_ids else None,
         "knowledge_base_ids": selected_base_ids,
         "mode": mode,
     }
@@ -115,7 +115,7 @@ def save_discussion_message(
     )
     response_meta: dict[str, Any] = {
         "sources": sources or [],
-        "knowledge_base_id": selected_base_ids[0],
+        "knowledge_base_id": selected_base_ids[0] if selected_base_ids else None,
         "knowledge_base_ids": selected_base_ids,
         "mode": mode,
     }

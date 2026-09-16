@@ -57,6 +57,7 @@ def test_agent_upload_rejects_unsupported_file(monkeypatch, tmp_path):
         "report.docx",
         "notes.md",
         "notes.markdown",
+        "analysis.py",
         "records.json",
         "figure.png",
         "figure.jpg",
@@ -162,6 +163,22 @@ def test_merge_knowledge_sources_dedupes_by_document_and_file():
 
     assert merged == [first, second]
 
+
+def test_project_edit_and_command_results_are_visible_in_trace():
+    edit = Observation(
+        tool_name="edit_workspace_file", success=True,
+        result={"path": "src/a.py", "diff": "-old\n+new\n"},
+    )
+    command = Observation(
+        tool_name="run_project_command", success=False,
+        result={"command": "python -m pytest", "exit_code": 1,
+                "stdout": "FAILED test_a", "stderr": ""},
+        error="命令退出码 1: FAILED test_a",
+    )
+
+    assert "-old" in main._agent_event_payload(edit)["details"]
+    assert "exit_code: 1" in main._agent_event_payload(command)["details"]
+    assert "FAILED test_a" in main._agent_event_payload(command)["details"]
 
 def test_agent_code_event_exposes_generated_code_only():
     action = Action(
@@ -402,6 +419,28 @@ def test_agent_restores_existing_session_attachments(monkeypatch, tmp_path):
 
     assert restored == [source.resolve()]
 
+
+def test_agent_restores_uploaded_python_for_direct_read(monkeypatch, tmp_path):
+    monkeypatch.setattr(main, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(main, "ARTIFACTS_ROOT", tmp_path / "artifacts")
+    source = (
+        tmp_path / "artifacts" / "agent_sessions" / "discussion-python"
+        / ".runs" / "old-run" / "input" / "data_loader.py"
+    )
+    source.parent.mkdir(parents=True)
+    source.write_text("def load_data():\n    return []\n", encoding="utf-8")
+    entries = [{
+        "role": "user",
+        "metadata": {"attachments": [{
+            "kind": "file",
+            "name": "data_loader.py",
+            "content": "artifacts/agent_sessions/discussion-python/.runs/old-run/input/data_loader.py",
+        }]},
+    }]
+
+    restored = main._restore_agent_data_files(entries, "discussion-python")
+
+    assert restored == [source.resolve()]
 
 def test_agent_ignores_missing_and_out_of_session_attachments(monkeypatch, tmp_path):
     monkeypatch.setattr(main, "PROJECT_ROOT", tmp_path)

@@ -58,8 +58,12 @@ def list_workspace_files(
     return {"files": files, "truncated": truncated}
 
 
-def read_workspace_file(workspace_root: str | Path, relative_path: str) -> dict[str, Any]:
+def read_workspace_file(
+    workspace_root: str | Path, relative_path: str, offset: int = 1, limit: int = 500
+) -> dict[str, Any]:
     """读取项目内一个有限大小的 UTF-8 文本文件。"""
+    if offset < 1 or not 1 <= limit <= 500:
+        raise ValueError("offset 必须大于 0，limit 必须在 1 到 500 之间")
     root = Path(workspace_root).resolve(strict=True)
     target = resolve_workspace_path(root, relative_path)
     if not target.is_file():
@@ -73,10 +77,15 @@ def read_workspace_file(workspace_root: str | Path, relative_path: str) -> dict[
         text = content[:MAX_WORKSPACE_FILE_BYTES].decode("utf-8-sig")
     except UnicodeDecodeError as exc:
         raise WorkspacePathError("项目文件不是可读取的 UTF-8 文本") from exc
+    lines = text.splitlines(keepends=True)
+    selected = lines[offset - 1:offset - 1 + limit]
     return {
         "path": target.relative_to(root).as_posix(),
-        "content": text,
-        "truncated": truncated,
+        "content": "".join(selected),
+        "start_line": offset,
+        "end_line": offset + len(selected) - 1,
+        "total_lines": len(lines),
+        "truncated": truncated or offset - 1 + limit < len(lines),
     }
 
 

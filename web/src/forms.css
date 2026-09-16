@@ -4355,6 +4355,16 @@
   padding: 8px 10px 10px;
 }
 
+.rag-project-changes {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--rag-text-secondary);
+  font-size: calc(12.5px * var(--app-font-ratio));
+  white-space: nowrap;
+  cursor: pointer;
+}
+.rag-project-changes input { accent-color: var(--rag-accent); }
 .rag-kb-picker {
   position: relative;
   flex: 0 0 auto;

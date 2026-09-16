@@ -480,9 +480,17 @@ const AgentInlineProcess = memo(function AgentInlineProcess({
             ) : event.type === 'agent_reasoning' ? (
               <p className="agent-inline-reasoning">{event.summary}</p>
             ) : (
-              <p className={`agent-inline-activity ${event.success ? '' : 'failed'}`}>
-                {event.success ? '完成了工具' : '工具执行失败'} · {event.tool_name} · {describeObservation(event)}
-              </p>
+              <>
+                <p className={`agent-inline-activity ${event.success ? '' : 'failed'}`}>
+                  {event.success ? '完成了工具' : '工具执行失败'} · {event.tool_name} · {describeObservation(event)}
+                </p>
+                {event.details && (
+                  <details className="agent-inline-code">
+                    <summary>查看命令输出或文件差异</summary>
+                    <pre><code>{event.details}</code></pre>
+                  </details>
+                )}
+              </>
             )}
           </div>
         ))}
@@ -570,7 +578,7 @@ type Props = {
   onViewResult: (runId: string) => void
 }
 
-/** 将选中知识库收敛到真实存在的 ID：去重、过滤无效项，必要时回退到第一个可用库。 */
+/** 将选中知识库收敛到真实存在的 ID：去重并过滤无效项。 */
 function clampKnowledgeBaseIds(
   ids: string[],
   bases: KnowledgeBaseSummary[],
@@ -578,8 +586,7 @@ function clampKnowledgeBaseIds(
   if (!bases.length) return []
   const available = new Set(bases.map((base) => base.id))
   const unique = [...new Set(ids)].filter((id) => available.has(id))
-  if (unique.length) return unique
-  return [bases[0].id]
+  return unique
 }
 
 export default function NewChat({
@@ -605,11 +612,16 @@ export default function NewChat({
   const [apiConfigs, setApiConfigs] = useState<ApiConfig[]>([])
   const [selectedConfigId, setSelectedConfigId] = useState<string>('')
   const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBaseSummary[]>([])
-  // 初始不写死 default，等接口返回后按真实目录选中
+  // 不预选知识库，用户可以选择零个或多个
   const [knowledgeBaseIds, setKnowledgeBaseIds] = useState<string[]>([])
+  const [enableProjectChanges, setEnableProjectChanges] = useState(false)
   const knowledgeBasesRef = useRef<KnowledgeBaseSummary[]>([])
   const fileInputRef = useRef<HTMLInputElement>(null)
   const listRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    setEnableProjectChanges(false)
+  }, [projectId])
 
   function applyApiConfigs(configs: ApiConfig[]) {
     setApiConfigs(configs)
@@ -634,7 +646,7 @@ export default function NewChat({
     void getKnowledgeBases().then((bases) => {
       knowledgeBasesRef.current = bases
       setKnowledgeBases(bases)
-      // 目录变化时始终把选中项收敛到真实存在的知识库
+      // 目录变化时只移除已不存在的知识库
       setKnowledgeBaseIds((current) => clampKnowledgeBaseIds(current, bases))
     })
   }, [])
@@ -653,11 +665,11 @@ export default function NewChat({
       .then((discussion) => {
         const savedMetadata = [...discussion.messages]
           .reverse()
-          .find((message) => message.metadata?.knowledge_base_ids?.length || message.metadata?.knowledge_base_id)
+          .find((message) => Array.isArray(message.metadata?.knowledge_base_ids) || message.metadata?.knowledge_base_id)
           ?.metadata
         const savedRoutes = savedMetadata?.knowledge_base_ids
           ?? (savedMetadata?.knowledge_base_id ? [savedMetadata.knowledge_base_id] : [])
-        if (savedRoutes.length) {
+        if (savedMetadata) {
           // 历史讨论可能残留 default 等已不存在的 ID，按当前目录过滤
           const bases = knowledgeBasesRef.current
           setKnowledgeBaseIds(bases.length ? clampKnowledgeBaseIds(savedRoutes, bases) : savedRoutes)
@@ -725,6 +737,7 @@ export default function NewChat({
     if ((!message && files.length === 0) || isSubmitting) return
     setDraft('')
     setIsSubmitting(true)
+    setEnableProjectChanges(false)
     const attachedFiles = files
     setFiles([])
     if (fileInputRef.current) fileInputRef.current.value = ''
@@ -783,6 +796,7 @@ export default function NewChat({
         selectedConfigId || null,
         knowledgeBaseIds,
         projectId,
+        enableProjectChanges,
       )
     } catch (error) {
       setMessages((current) => current.map(
@@ -930,7 +944,7 @@ export default function NewChat({
                       ? knowledgeBases.find((base) => base.id === knowledgeBaseIds[0])?.name ?? '选择知识库'
                       : knowledgeBaseIds.length > 1
                         ? `已选 ${knowledgeBaseIds.length} 个知识库`
-                        : '选择知识库'}
+                        : '不使用知识库'}
                     <span className="rag-kb-chevron" aria-hidden="true" />
                   </summary>
                   <div className="rag-kb-menu">
@@ -942,9 +956,7 @@ export default function NewChat({
                           disabled={isSubmitting}
                           onChange={() => setKnowledgeBaseIds((current) => {
                             if (current.includes(base.id)) {
-                              return current.length === 1
-                                ? current
-                                : current.filter((id) => id !== base.id)
+                              return current.filter((id) => id !== base.id)
                             }
                             return [...current, base.id]
                           })}
@@ -955,6 +967,17 @@ export default function NewChat({
                     ))}
                   </div>
                 </details>
+                {projectId && (
+                  <label className="rag-project-changes" title="仅本轮允许创建和精确编辑项目文件，并执行受控 Git、测试或构建命令。测试和构建会运行项目代码。">
+                    <input
+                      type="checkbox"
+                      checked={enableProjectChanges}
+                      onChange={(event) => setEnableProjectChanges(event.target.checked)}
+                      disabled={isSubmitting}
+                    />
+                    允许本轮编辑与终端（运行项目代码）
+                  </label>
+                )}
                 <button
                   type="button"
                   className="rag-btn"
@@ -968,7 +991,7 @@ export default function NewChat({
                   hidden
                   type="file"
                   multiple
-                  accept=".csv,.xlsx,.xls,.json,.jsonl,.ndjson,.pdf,.docx,.md,.markdown,.png,.jpg,.jpeg,.webp,.gif,.bmp,.tif,.tiff"
+                  accept=".csv,.xlsx,.xls,.json,.jsonl,.ndjson,.pdf,.docx,.md,.markdown,.py,.png,.jpg,.jpeg,.webp,.gif,.bmp,.tif,.tiff"
                   onChange={(event) => setFiles(Array.from(event.target.files ?? []))}
                 />
                 {apiConfigs.length > 0 ? (

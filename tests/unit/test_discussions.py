@@ -77,6 +77,15 @@ def test_saved_agent_discussion_retains_mode_and_trace():
     assert messages[1]["metadata"]["agent_trace"] == trace
 
 
+def test_agent_discussion_preserves_no_knowledge_base_selection():
+    discussion_id = discussions.save_discussion_message(
+        None, "直接分析", "已完成", [], knowledge_base_ids=[], mode="agent"
+    )
+
+    messages = discussions.get_discussion(discussion_id)["messages"]
+    assert [message["metadata"]["knowledge_base_ids"] for message in messages] == [[], []]
+    assert [message["metadata"]["knowledge_base_id"] for message in messages] == [None, None]
+
 def test_modeling_tool_message_lives_in_same_store():
     """建模 run 与聊天共用同一会话库。"""
     from server import runs

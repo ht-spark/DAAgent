@@ -140,6 +140,7 @@ AGENT_ATTACHMENT_SUFFIXES = frozenset(
         ".ndjson",
         ".pdf",
         ".png",
+        ".py",
         ".tif",
         ".tiff",
         ".webp",
@@ -844,6 +845,17 @@ def _agent_event_payload(event: Action | Observation | Finish) -> dict[str, obje
         "summary": result_summary,
         "error": event.error,
     }
+    if isinstance(event.result, dict):
+        if event.tool_name == "edit_workspace_file":
+            payload["details"] = str(event.result.get("diff", ""))[:8000]
+        elif event.tool_name == "run_project_command":
+            command = str(event.result.get("command", ""))
+            stdout = str(event.result.get("stdout", ""))
+            stderr = str(event.result.get("stderr", ""))
+            payload["details"] = (
+                f"$ {command}\nexit_code: {event.result.get('exit_code')}\n"
+                f"{stdout}\n{stderr}"
+            )[:8000]
     knowledge_sources = _knowledge_sources_from_observation(event)
     if knowledge_sources:
         payload["sources"] = knowledge_sources
@@ -1272,6 +1284,7 @@ async def agent_profile_stream_endpoint(
     knowledge_base_id: str | None = Form(None),
     knowledge_base_ids: list[str] | None = Form(None),
     project_id: str | None = Form(None),
+    enable_project_changes: bool = Form(False),
 ) -> StreamingResponse:
     """启动自主决策 Agent，并流式返回回答及工具运行轨迹。"""
     message = message.strip() or "请对上传的数据生成基础画像"
@@ -1284,7 +1297,7 @@ async def agent_profile_stream_endpoint(
             if isinstance(knowledge_base_ids, list)
             else [knowledge_base_id] if isinstance(knowledge_base_id, str) else None
         )
-        bases = require_knowledge_bases(requested_base_ids)
+        bases = require_knowledge_bases(requested_base_ids) if requested_base_ids else []
     except KnowledgeBaseCatalogError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     selected_base_ids = [base.id for base in bases]
@@ -1305,6 +1318,8 @@ async def agent_profile_stream_endpoint(
     except ProjectWorkspaceError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     workspace_root = Path(str(project["root_path"])) if project else None
+    if enable_project_changes and workspace_root is None:
+        raise HTTPException(status_code=400, detail="请先选择项目，再开启文件编辑与终端")
     session_entries = stored_session.get("messages", []) if stored_session else []
     rolling_context = await asyncio.to_thread(
         compile_rolling_context,
@@ -1355,6 +1370,7 @@ async def agent_profile_stream_endpoint(
         knowledge_base_ids=selected_base_ids,
         web_search_api_key=tavily_api_key,
         workspace_root=workspace_root,
+        enable_project_changes=enable_project_changes,
         python_executable=python_environment.executable,
         python_environment_source=python_environment.source,
         python_environment_name=python_environment.name,

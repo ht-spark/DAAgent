@@ -49,3 +49,10 @@ def test_project_registry_adds_workspace_tools_only_when_bound(tmp_path: Path):
     assert "read_workspace_file" in bound
     result = bound.resolve("list_workspace_files").invoke({"pattern": "*.md"})
     assert result["files"] == []
+
+def test_read_workspace_file_supports_line_windows(tmp_path):
+    (tmp_path / "long.py").write_text("one\ntwo\nthree\n", encoding="utf-8")
+    result = read_workspace_file(tmp_path, "long.py", offset=2, limit=1)
+    assert result["content"].splitlines() == ["two"]
+    assert result["total_lines"] == 3
+    assert result["truncated"] is True

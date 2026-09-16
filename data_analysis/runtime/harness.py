@@ -52,6 +52,17 @@ class Harness:
                 error=str(exc),
                 duration_ms=_elapsed_ms(started_at),
             )
+        if action.tool_name == "run_project_command" and isinstance(result, dict):
+            exit_code = result.get("exit_code")
+            if isinstance(exit_code, int) and exit_code != 0:
+                details = str(result.get("stderr") or result.get("stdout") or "命令执行失败")
+                return Observation(
+                    tool_name=action.tool_name,
+                    success=False,
+                    result=result,
+                    error=f"命令退出码 {exit_code}: {details[:1000]}",
+                    duration_ms=_elapsed_ms(started_at),
+                )
         return Observation(
             tool_name=action.tool_name,
             success=True,

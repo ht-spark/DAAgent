@@ -16,7 +16,13 @@ from ..python_environment import (
     resolve_python_environment,
 )
 from .artifact_tools import MAX_ARTIFACT_CONTENT_BYTES, write_artifact
+from .attachment_tools import TEXT_ATTACHMENT_SUFFIXES, read_attachment_file
 from .code_tools import execute_python_code
+from .project_edit_tools import (
+    run_create_workspace_file,
+    run_edit_workspace_file,
+    run_project_command_tool,
+)
 from .data_tools import (
     MAX_INSPECT_DATA_ROWS,
     inspect_data_rows,
@@ -294,6 +300,7 @@ def create_agent_tool_registry(
     knowledge_base_ids: Sequence[str] = (),
     web_search_api_key: str | None = None,
     workspace_root: str | Path | None = None,
+    enable_project_changes: bool = False,
     python_executable: str | Path | None = None,
     python_environment_source: str = "host",
     python_environment_name: str = "MMAgent",
@@ -321,6 +328,33 @@ def create_agent_tool_registry(
         if profile_paths
         else ToolRegistry()
     )
+    text_attachment_paths = tuple(
+        path for path in bound_paths
+        if Path(path).suffix.lower() in TEXT_ATTACHMENT_SUFFIXES
+    )
+    if text_attachment_paths:
+        registry.register(
+            ToolSpec(
+                name="read_attachment_file",
+                description=(
+                    "按 available_data_files 中的文件名读取用户上传的文本或代码附件，"
+                    "包括 .py；不执行脚本。上传附件不属于项目目录，不要用"
+                    " read_workspace_file 读取它。大文件使用 offset 和 limit 分段读取。"
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "file_name": {"type": "string", "minLength": 1},
+                        "offset": {"type": "integer", "minimum": 1, "default": 1},
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 500, "default": 300},
+                    },
+                    "required": ["file_name"],
+                    "additionalProperties": False,
+                },
+            ),
+            read_attachment_file,
+            context={"authorized_paths": [str(path) for path in text_attachment_paths]},
+        )
     selected_base_ids = list(dict.fromkeys(
         base_id.strip()
         for base_id in knowledge_base_ids
@@ -409,7 +443,11 @@ def create_agent_tool_registry(
                 ),
                 parameters={
                     "type": "object",
-                    "properties": {"relative_path": {"type": "string", "minLength": 1}},
+                    "properties": {
+                        "relative_path": {"type": "string", "minLength": 1},
+                        "offset": {"type": "integer", "minimum": 1, "default": 1},
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 500, "default": 500},
+                    },
                     "required": ["relative_path"],
                     "additionalProperties": False,
                 },
@@ -613,6 +651,33 @@ def create_agent_tool_registry(
                 "authorized_paths": [str(path) for path in image_paths],
             },
         )
+    if workspace_root is not None and enable_project_changes:
+        change_context = {
+            "workspace_root": str(workspace_root),
+            "python_executable": str(python_executable or ""),
+        }
+        project_tools = (
+            ("create_workspace_file", "在当前项目创建 UTF-8 文本或代码文件，不覆盖已有文件。",
+             {"relative_path": {"type": "string"}, "content": {"type": "string"}},
+             ["relative_path", "content"], run_create_workspace_file),
+            ("edit_workspace_file", "精确修改已有项目文本文件，old_text 必须唯一匹配，返回 diff。",
+             {"relative_path": {"type": "string"}, "old_text": {"type": "string"},
+              "new_text": {"type": "string"}},
+             ["relative_path", "old_text", "new_text"], run_edit_workspace_file),
+            ("run_project_command", "执行受控 Git、测试或构建命令，返回退出码和输出。",
+             {"command": {"type": "string", "enum": ["git status", "git diff",
+                 "python -m pytest", "npm run test", "npm run build"]}},
+             ["command"], run_project_command_tool),
+        )
+        for name, description, properties, required, handler in project_tools:
+            registry.register(
+                ToolSpec(name=name, description=description, parameters={
+                    "type": "object", "properties": properties,
+                    "required": required, "additionalProperties": False,
+                }),
+                handler,
+                context=change_context,
+            )
     return registry
 
 
@@ -647,14 +712,18 @@ def _run_read_workspace_file(
     context: Mapping[str, JsonValue],
 ) -> JsonValue:
     """执行项目文本文件读取工具。"""
-    if set(arguments) != {"relative_path"}:
-        raise ToolArgumentsError("read_workspace_file 只接受 relative_path")
+    if set(arguments) - {"relative_path", "offset", "limit"} or "relative_path" not in arguments:
+        raise ToolArgumentsError("read_workspace_file 需要 relative_path，可选 offset 和 limit")
     relative_path = arguments.get("relative_path")
     if not isinstance(relative_path, str) or not relative_path.strip():
         raise ToolArgumentsError("relative_path 必须是非空字符串")
+    offset = arguments.get("offset", 1)
+    limit = arguments.get("limit", 500)
+    if type(offset) is not int or type(limit) is not int:
+        raise ToolArgumentsError("offset 和 limit 必须是整数")
     return read_workspace_file(
         _workspace_root(context, "read_workspace_file"),
-        relative_path,
+        relative_path, offset=offset, limit=limit,
     )
 
 
