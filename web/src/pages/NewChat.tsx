@@ -11,6 +11,7 @@ import {
   type AgentArtifact,
   type AgentTraceEvent,
   type KnowledgeBaseSummary,
+  type KnowledgeSourceCitation,
 } from '../api'
 import { loadConfigs, type ApiConfig } from '../apiConfigs'
 import MarkdownContent from '../components/MarkdownContent'
@@ -22,6 +23,25 @@ type Message = {
   role: 'assistant' | 'user'
   content: string
   trace?: AgentTraceEvent[]
+  /** 本轮检索命中的知识库来源（可收起标注） */
+  sources?: KnowledgeSourceCitation[]
+}
+
+/** 从 trace 中汇总本轮知识库检索来源，按文件去重。 */
+function collectKnowledgeSources(trace: AgentTraceEvent[] | undefined): KnowledgeSourceCitation[] {
+  if (!trace?.length) return []
+  const seen = new Set<string>()
+  const sources: KnowledgeSourceCitation[] = []
+  for (const event of trace) {
+    if (event.type !== 'agent_observation' || !event.sources?.length) continue
+    for (const source of event.sources) {
+      const key = `${source.document_id ?? ''}::${source.source_file}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      sources.push(source)
+    }
+  }
+  return sources
 }
 
 const CLIPBOARD_IMAGE_EXTENSIONS: Record<string, string> = {
@@ -71,6 +91,140 @@ function artifactType(name: string): string {
   const extension = name.split('.').pop()
   return extension && extension !== name ? extension.toUpperCase() : 'FILE'
 }
+
+/** 产物目录树节点：按 path 分段构建，便于像资源管理器一样浏览。 */
+type ArtifactTreeNode = {
+  type: 'folder' | 'file'
+  name: string
+  path: string
+  children?: ArtifactTreeNode[]
+  artifact?: AgentArtifact
+}
+
+function buildArtifactTree(artifacts: AgentArtifact[]): ArtifactTreeNode[] {
+  const root: ArtifactTreeNode[] = []
+  const folderIndex = new Map<string, ArtifactTreeNode>()
+
+  const ensureFolder = (segments: string[]): ArtifactTreeNode[] => {
+    let siblings = root
+    let currentPath = ''
+    for (const segment of segments) {
+      currentPath = currentPath ? `${currentPath}/${segment}` : segment
+      let node = folderIndex.get(currentPath)
+      if (!node) {
+        node = { type: 'folder', name: segment, path: currentPath, children: [] }
+        folderIndex.set(currentPath, node)
+        siblings.push(node)
+      }
+      siblings = node.children!
+    }
+    return siblings
+  }
+
+  for (const artifact of artifacts) {
+    const parts = artifact.path.split('/').filter(Boolean)
+    if (!parts.length) continue
+    const fileName = parts[parts.length - 1]
+    const folderSegments = parts.slice(0, -1)
+    const siblings = ensureFolder(folderSegments)
+    siblings.push({
+      type: 'file',
+      name: fileName,
+      path: artifact.path,
+      artifact,
+    })
+  }
+
+  const sortNodes = (nodes: ArtifactTreeNode[]) => {
+    nodes.sort((a, b) => {
+      if (a.type !== b.type) return a.type === 'folder' ? -1 : 1
+      return a.name.localeCompare(b.name, 'zh-CN')
+    })
+    for (const node of nodes) {
+      if (node.children) sortNodes(node.children)
+    }
+  }
+  sortNodes(root)
+  return root
+}
+
+const ArtifactTree = memo(function ArtifactTree({
+  nodes,
+  depth = 0,
+  onPreview,
+}: {
+  nodes: ArtifactTreeNode[]
+  depth?: number
+  onPreview: (artifact: AgentArtifact) => void
+}) {
+  const [collapsedFolders, setCollapsedFolders] = useState<Set<string>>(new Set())
+
+  function toggleFolder(path: string) {
+    setCollapsedFolders((current) => {
+      const next = new Set(current)
+      if (next.has(path)) next.delete(path)
+      else next.add(path)
+      return next
+    })
+  }
+
+  return (
+    <ul className="artifact-tree" style={{ '--tree-depth': depth } as React.CSSProperties}>
+      {nodes.map((node) => {
+        if (node.type === 'folder') {
+          const isOpen = !collapsedFolders.has(node.path)
+          return (
+            <li key={`folder-${node.path}`} className="artifact-tree-folder">
+              <button
+                type="button"
+                className="artifact-tree-row folder"
+                onClick={() => toggleFolder(node.path)}
+                aria-expanded={isOpen}
+              >
+                <svg
+                  className={`artifact-tree-chevron ${isOpen ? 'is-open' : ''}`}
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  aria-hidden="true"
+                >
+                  <path d="M9 6l6 6-6 6" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+                <svg className="artifact-tree-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" aria-hidden="true">
+                  <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z" />
+                </svg>
+                <span className="artifact-tree-name">{node.name}</span>
+              </button>
+              {isOpen && node.children?.length ? (
+                <ArtifactTree nodes={node.children} depth={depth + 1} onPreview={onPreview} />
+              ) : null}
+            </li>
+          )
+        }
+        const artifact = node.artifact
+        if (!artifact) return null
+        return (
+          <li key={`file-${artifact.run_id}-${node.path}`}>
+            <button
+              type="button"
+              className="artifact-tree-row file"
+              onClick={() => onPreview(artifact)}
+              title={`${node.path} · ${formatArtifactSize(artifact.size_bytes)}`}
+            >
+              <svg className="artifact-tree-icon file" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" aria-hidden="true">
+                <path d="M7 3h7l5 5v13a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z" />
+                <path d="M14 3v5h5" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+              <span className="artifact-tree-name">{node.name}</span>
+              <small className="artifact-tree-size">{formatArtifactSize(artifact.size_bytes)}</small>
+            </button>
+          </li>
+        )
+      })}
+    </ul>
+  )
+})
 
 type ArtifactPreviewKind = 'image' | 'pdf' | 'markdown' | 'code' | 'docx' | 'xlsx' | 'unsupported'
 
@@ -144,9 +298,11 @@ function resolveArtifactAssetUrl(artifact: AgentArtifact, src: string): string {
 const ArtifactPreview = memo(function ArtifactPreview({
   artifact,
   onClose,
+  onOpenFolder,
 }: {
   artifact: AgentArtifact
   onClose: () => void
+  onOpenFolder?: () => void
 }) {
   const kind = artifactPreviewKind(artifact.name)
   const previewUrl = artifactUrl(artifact, 'previews')
@@ -195,6 +351,7 @@ const ArtifactPreview = memo(function ArtifactPreview({
   }, [kind, previewUrl])
 
   const sheet = data?.kind === 'xlsx' ? data.sheets[activeSheet] : null
+  const pathSegments = artifact.path.split('/').filter(Boolean)
 
   return createPortal(
     <div className="artifact-preview-mask" onMouseDown={onClose}>
@@ -207,11 +364,20 @@ const ArtifactPreview = memo(function ArtifactPreview({
       >
         <header className="artifact-preview-head">
           <div>
-            <span>{artifactType(artifact.name)}</span>
+            <nav className="artifact-preview-crumb" aria-label="文件路径">
+              {pathSegments.map((segment, index) => (
+                <span key={`${segment}-${index}`}>
+                  {index > 0 && <i aria-hidden="true">/</i>}
+                  {segment}
+                </span>
+              ))}
+            </nav>
             <h2>{artifact.name}</h2>
           </div>
           <nav aria-label="预览操作">
-            <a href={artifactUrl(artifact, 'files')} download={artifact.name}>下载</a>
+            {onOpenFolder && (
+              <button type="button" onClick={onOpenFolder}>打开文件夹</button>
+            )}
             <button type="button" onClick={onClose}>关闭</button>
           </nav>
         </header>
@@ -326,6 +492,45 @@ const AgentInlineProcess = memo(function AgentInlineProcess({
   )
 })
 
+const KnowledgeSourcePanel = memo(function KnowledgeSourcePanel({
+  sources,
+}: {
+  sources: KnowledgeSourceCitation[]
+}) {
+  if (!sources.length) return null
+  const uniqueFiles = [...new Set(sources.map((item) => item.source_file))]
+  return (
+    <details className="rag-msg-sources">
+      <summary title="展开或收起知识库来源">
+        <span className="rag-msg-sources-label">来源</span>
+        <span className="rag-msg-sources-count">
+          {uniqueFiles.length === 1
+            ? uniqueFiles[0]
+            : `知识库命中 ${uniqueFiles.length} 个文档`}
+        </span>
+        <span className="rag-msg-sources-chevron" aria-hidden="true" />
+      </summary>
+      <ol className="rag-msg-sources-list">
+        {sources.map((source, index) => (
+          <li key={`${source.document_id ?? source.source_file}-${index}`}>
+            <div className="rag-msg-sources-item-head">
+              <span className="rag-msg-sources-file">{source.source_file}</span>
+              {source.knowledge_base_id && (
+                <span className="rag-msg-sources-kb" title={source.knowledge_base_id}>
+                  知识库
+                </span>
+              )}
+            </div>
+            {source.excerpt && (
+              <p className="rag-msg-sources-excerpt">{source.excerpt}</p>
+            )}
+          </li>
+        ))}
+      </ol>
+    </details>
+  )
+})
+
 const ChatMessage = memo(function ChatMessage({
   message,
   running = false,
@@ -334,6 +539,9 @@ const ChatMessage = memo(function ChatMessage({
   running?: boolean
 }) {
   if (!message.content && !message.trace?.length) return null
+  const sources = message.sources?.length
+    ? message.sources
+    : collectKnowledgeSources(message.trace)
   return (
     <div className={`rag-msg ${message.role}`}>
       {message.role === 'assistant' && <span className="rag-avatar">M</span>}
@@ -344,6 +552,7 @@ const ChatMessage = memo(function ChatMessage({
               <AgentInlineProcess trace={message.trace} running={running} />
             )}
             {message.content && <MarkdownContent content={message.content} />}
+            {sources.length > 0 && <KnowledgeSourcePanel sources={sources} />}
           </div>
         ) : (
           <div className="rag-msg-plain">{message.content}</div>
@@ -359,6 +568,18 @@ type Props = {
   onDiscussionId: (id: string) => void
   resumeRunId?: string | null
   onViewResult: (runId: string) => void
+}
+
+/** 将选中知识库收敛到真实存在的 ID：去重、过滤无效项，必要时回退到第一个可用库。 */
+function clampKnowledgeBaseIds(
+  ids: string[],
+  bases: KnowledgeBaseSummary[],
+): string[] {
+  if (!bases.length) return []
+  const available = new Set(bases.map((base) => base.id))
+  const unique = [...new Set(ids)].filter((id) => available.has(id))
+  if (unique.length) return unique
+  return [bases[0].id]
 }
 
 export default function NewChat({
@@ -384,7 +605,9 @@ export default function NewChat({
   const [apiConfigs, setApiConfigs] = useState<ApiConfig[]>([])
   const [selectedConfigId, setSelectedConfigId] = useState<string>('')
   const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBaseSummary[]>([])
-  const [knowledgeBaseIds, setKnowledgeBaseIds] = useState<string[]>(['default'])
+  // 初始不写死 default，等接口返回后按真实目录选中
+  const [knowledgeBaseIds, setKnowledgeBaseIds] = useState<string[]>([])
+  const knowledgeBasesRef = useRef<KnowledgeBaseSummary[]>([])
   const fileInputRef = useRef<HTMLInputElement>(null)
   const listRef = useRef<HTMLDivElement>(null)
 
@@ -409,11 +632,10 @@ export default function NewChat({
 
   useEffect(() => {
     void getKnowledgeBases().then((bases) => {
+      knowledgeBasesRef.current = bases
       setKnowledgeBases(bases)
-      setKnowledgeBaseIds((current) => {
-        const available = current.filter((id) => bases.some((base) => base.id === id))
-        return available.length ? available : [bases[0]?.id ?? 'default']
-      })
+      // 目录变化时始终把选中项收敛到真实存在的知识库
+      setKnowledgeBaseIds((current) => clampKnowledgeBaseIds(current, bases))
     })
   }, [])
 
@@ -435,7 +657,11 @@ export default function NewChat({
           ?.metadata
         const savedRoutes = savedMetadata?.knowledge_base_ids
           ?? (savedMetadata?.knowledge_base_id ? [savedMetadata.knowledge_base_id] : [])
-        if (savedRoutes.length) setKnowledgeBaseIds(savedRoutes)
+        if (savedRoutes.length) {
+          // 历史讨论可能残留 default 等已不存在的 ID，按当前目录过滤
+          const bases = knowledgeBasesRef.current
+          setKnowledgeBaseIds(bases.length ? clampKnowledgeBaseIds(savedRoutes, bases) : savedRoutes)
+        }
         const latestAgentMessage = [...discussion.messages]
           .reverse()
           .find((message) => message.metadata?.mode === 'agent')
@@ -452,6 +678,9 @@ export default function NewChat({
             role: m.role,
             content: m.content,
             trace: m.metadata?.agent_trace,
+            sources: m.sources?.length
+              ? m.sources
+              : m.metadata?.sources,
           })),
         )
         setTitle(discussion.title)
@@ -516,9 +745,15 @@ export default function NewChat({
           onTrace: (event) => {
             setAgentTrace((current) => [...current, event])
             setMessages((current) => current.map(
-              (item, index) => index === current.length - 1
-                ? { ...item, trace: [...(item.trace ?? []), event] }
-                : item,
+              (item, index) => {
+                if (index !== current.length - 1) return item
+                const nextTrace = [...(item.trace ?? []), event]
+                return {
+                  ...item,
+                  trace: nextTrace,
+                  sources: collectKnowledgeSources(nextTrace),
+                }
+              },
             ))
           },
           onToken: (content) => {
@@ -528,13 +763,20 @@ export default function NewChat({
                 : item,
             ))
           },
-          onDone: (savedDiscussionId, _runId, artifacts) => {
+          onDone: (savedDiscussionId, _runId, artifacts, sources) => {
             setAgentArtifacts((current) => [
               ...current.filter(
                 (item) => !artifacts.some((artifact) => artifact.path === item.path),
               ),
               ...artifacts,
             ])
+            if (sources?.length) {
+              setMessages((current) => current.map(
+                (item, index) => index === current.length - 1
+                  ? { ...item, sources }
+                  : item,
+              ))
+            }
             onDiscussionId(savedDiscussionId)
           },
         },
@@ -686,7 +928,9 @@ export default function NewChat({
                   <summary title="选择本轮检索使用的知识库">
                     {knowledgeBaseIds.length === 1
                       ? knowledgeBases.find((base) => base.id === knowledgeBaseIds[0])?.name ?? '选择知识库'
-                      : `已选 ${knowledgeBaseIds.length} 个知识库`}
+                      : knowledgeBaseIds.length > 1
+                        ? `已选 ${knowledgeBaseIds.length} 个知识库`
+                        : '选择知识库'}
                     <span className="rag-kb-chevron" aria-hidden="true" />
                   </summary>
                   <div className="rag-kb-menu">
@@ -800,7 +1044,7 @@ export default function NewChat({
               <div className="rag-sources-head">
                 <div>
                   <h2>输出产物</h2>
-                  <p>Agent 生成的文件，可预览或下载</p>
+                  <p>项目文件夹中的产物，点击即可预览</p>
                 </div>
                 <div className="rag-sources-head-actions">
                   <button
@@ -831,31 +1075,25 @@ export default function NewChat({
                 )}
                 {agentArtifacts.length === 0 ? (
                   <p className="rag-sources-empty">
-                    {isSubmitting ? 'Agent 正在处理，生成的文件会出现在这里。' : '当前讨论还没有生成可下载的产物。'}
+                    {isSubmitting ? 'Agent 正在处理，生成的文件会出现在这里。' : '当前讨论还没有生成产物文件。'}
                   </p>
-                ) : agentArtifacts.map((artifact) => (
-                  <article
-                    className="agent-artifact-item"
-                    key={`${artifact.run_id}-${artifact.path}`}
-                  >
-                    <span className="agent-artifact-type">{artifactType(artifact.name)}</span>
-                    <span className="agent-artifact-copy">
-                      <strong>{artifact.name}</strong>
-                      <small>{formatArtifactSize(artifact.size_bytes)}</small>
-                    </span>
-                    <span className="agent-artifact-actions">
-                      <button type="button" onClick={() => setPreviewArtifact(artifact)}>预览</button>
-                      <a href={artifactUrl(artifact, 'files')} download={artifact.name}>下载</a>
-                    </span>
-                  </article>
-                ))}
+                ) : (
+                  <ArtifactTree
+                    nodes={buildArtifactTree(agentArtifacts)}
+                    onPreview={setPreviewArtifact}
+                  />
+                )}
               </div>
             </>
           )}
         </aside>
       </div>
       {previewArtifact && (
-        <ArtifactPreview artifact={previewArtifact} onClose={() => setPreviewArtifact(null)} />
+        <ArtifactPreview
+          artifact={previewArtifact}
+          onClose={() => setPreviewArtifact(null)}
+          onOpenFolder={() => void openArtifactFolder()}
+        />
       )}
     </div>
   )

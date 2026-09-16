@@ -11,6 +11,10 @@ from typing import Any, TypeAlias
 
 from pydantic import JsonValue
 
+from ..python_environment import (
+    PythonEnvironmentError,
+    resolve_python_environment,
+)
 from .artifact_tools import MAX_ARTIFACT_CONTENT_BYTES, write_artifact
 from .code_tools import execute_python_code
 from .data_tools import (
@@ -290,6 +294,9 @@ def create_agent_tool_registry(
     knowledge_base_ids: Sequence[str] = (),
     web_search_api_key: str | None = None,
     workspace_root: str | Path | None = None,
+    python_executable: str | Path | None = None,
+    python_environment_source: str = "host",
+    python_environment_name: str = "MMAgent",
 ) -> ToolRegistry:
     """创建同时支持确定性工具和动态 Python 的 Agent 注册表。
 
@@ -300,6 +307,9 @@ def create_agent_tool_registry(
         knowledge_base_ids: 用户为当前会话预选的知识库 ID。
         web_search_api_key: 服务端保存的 Tavily API 密钥；不会暴露给模型。
         workspace_root: 当前项目的只读文件根目录；为空时不注册项目工具。
+        python_executable: 运行 Agent 分析代码的已验证 Python 解释器。
+        python_environment_source: Python 环境来源。
+        python_environment_name: Python 环境显示名称。
 
     Returns:
         根据附件情况注册数据工具，并始终注册 Python 代码执行能力。
@@ -471,7 +481,10 @@ def create_agent_tool_registry(
                 "（授权文件路径列表）、DATA_FILE_MAP（文件名到路径）、OUTPUT_DIR"
                 "（产物目录）、WORKSPACE_DIR（当前项目目录，未绑定时为空）和"
                 " ARTIFACTS（安全产物工作区）；应将关键结论赋给"
-                " JSON 可序列化变量 result。"
+                " JSON 可序列化变量 result。运行环境已由项目配置自动绑定，返回值"
+                "中的 runtime 会说明实际解释器。仅当用户明确指定了环境路径，或你从"
+                "项目文件中确认了环境目录时，才传 python_environment；不要猜测路径，"
+                "也不要在代码中激活虚拟环境。"
             ),
             parameters={
                 "type": "object",
@@ -481,6 +494,15 @@ def create_agent_tool_registry(
                         "minLength": 1,
                         "maxLength": _MAX_CODE_CHARS,
                         "description": "本轮需要执行的完整 Python 源代码",
+                    },
+                    "python_environment": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 1000,
+                        "description": (
+                            "可选的虚拟环境目录或 Python 解释器路径；只允许使用用户"
+                            "明确提供的路径，或项目中已确认存在的相对路径"
+                        ),
                     },
                 },
                 "required": ["code"],
@@ -492,6 +514,9 @@ def create_agent_tool_registry(
             "authorized_paths": [str(path) for path in bound_paths],
             "output_dir": str(output_dir),
             "workspace_root": str(workspace_root) if workspace_root else "",
+            "python_executable": str(python_executable) if python_executable else "",
+            "python_environment_source": python_environment_source,
+            "python_environment_name": python_environment_name,
         },
     )
     from .artifact_inspection import inspect_artifact
@@ -699,8 +724,8 @@ def _run_python_code(
     context: Mapping[str, JsonValue],
 ) -> JsonValue:
     """执行 Agent 动态生成的 Python 代码。"""
-    if set(arguments) != {"code"}:
-        raise ToolArgumentsError("execute_python 只接受必填参数 code")
+    if not set(arguments) <= {"code", "python_environment"} or "code" not in arguments:
+        raise ToolArgumentsError("execute_python 只接受必填参数 code 和可选参数 python_environment")
     code = arguments.get("code")
     if not isinstance(code, str) or not code.strip():
         raise ToolArgumentsError("code 必须是非空字符串")
@@ -710,11 +735,34 @@ def _run_python_code(
     if not isinstance(output_dir, str) or not output_dir.strip():
         raise ToolArgumentsError("execute_python 缺少有效的产物目录上下文")
     raw_paths = _authorized_paths(context, "execute_python")
+    selected_executable = context.get("python_executable") or None
+    selected_source = str(context.get("python_environment_source") or "host")
+    selected_name = str(context.get("python_environment_name") or "MMAgent")
+    requested_environment = arguments.get("python_environment")
+    if requested_environment is not None:
+        if not isinstance(requested_environment, str) or not requested_environment.strip():
+            raise ToolArgumentsError("python_environment 必须是非空路径")
+        candidate = Path(requested_environment.strip()).expanduser()
+        workspace_root = context.get("workspace_root") or None
+        if not candidate.is_absolute():
+            if not isinstance(workspace_root, str) or not workspace_root:
+                raise ToolArgumentsError("相对环境路径只能在已绑定项目中使用")
+            candidate = Path(workspace_root) / candidate
+        try:
+            environment = resolve_python_environment(workspace_root, candidate)
+        except (OSError, PythonEnvironmentError) as exc:
+            raise ToolArgumentsError(str(exc)) from exc
+        selected_executable = environment.executable
+        selected_source = "requested"
+        selected_name = environment.name
     return execute_python_code(
         code,
         data_paths=raw_paths,
         output_dir=output_dir,
         workspace_root=context.get("workspace_root") or None,
+        python_executable=selected_executable,
+        environment_source=selected_source,
+        environment_name=selected_name,
     )
 
 

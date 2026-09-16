@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from collections.abc import Mapping
 from types import MappingProxyType
 
@@ -369,6 +370,24 @@ def test_agent_registry_rejects_invalid_python_arguments(
 
     with pytest.raises(ToolArgumentsError):
         tool.invoke(arguments)
+
+
+def test_agent_registry_accepts_user_selected_python_environment(tmp_path) -> None:
+    tool = create_agent_tool_registry(
+        [],
+        tmp_path / "output",
+        workspace_root=tmp_path,
+    ).resolve("execute_python")
+
+    result = tool.invoke(
+        {
+            "code": "import sys\nresult = {'executable': sys.executable}",
+            "python_environment": sys.executable,
+        }
+    )
+
+    assert result["runtime"]["source"] == "requested"
+    assert result["runtime"]["name"]
 
 
 def test_agent_registry_writes_artifact(tmp_path) -> None:

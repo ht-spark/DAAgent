@@ -2,21 +2,21 @@
 
 from __future__ import annotations
 
-import io
 import json
 import os
-from contextlib import redirect_stderr, redirect_stdout
+import subprocess
+import sys
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Sequence
 
-from pydantic import JsonValue, TypeAdapter, ValidationError
+from pydantic import JsonValue
 
 from .artifact_tools import ArtifactWorkspace
 
 __all__ = ["CodeExecutionError", "execute_python_code"]
 
-_JSON_ADAPTER = TypeAdapter(JsonValue)
-_MAX_CAPTURE_CHARS = 100_000
+_RUNNER_PATH = Path(__file__).resolve().parents[1] / "runtime" / "_python_code_runner.py"
+_DEFAULT_TIMEOUT_SECONDS = 7_100
 
 
 class CodeExecutionError(RuntimeError):
@@ -29,6 +29,9 @@ def execute_python_code(
     data_paths: Sequence[str | Path],
     output_dir: str | Path,
     workspace_root: str | Path | None = None,
+    python_executable: str | Path | None = None,
+    environment_source: str = "host",
+    environment_name: str = "MMAgent",
 ) -> dict[str, JsonValue]:
     """执行模型生成的 Python 代码并收集观察结果。
 
@@ -41,6 +44,9 @@ def execute_python_code(
         data_paths: 当前运行授权的数据文件路径。
         output_dir: 当前会话授权的产物目录。
         workspace_root: 当前项目目录；为空表示会话未绑定项目。
+        python_executable: 执行分析代码的 Python 解释器。
+        environment_source: 环境来源，用于向 Agent 报告。
+        environment_name: 环境显示名称，用于向 Agent 报告。
 
     Returns:
         标准输出、标准错误、结构化结果及当前产物清单。
@@ -61,81 +67,64 @@ def execute_python_code(
     missing_paths = [path.name for path in resolved_paths if not path.is_file()]
     if missing_paths:
         raise FileNotFoundError(f"授权数据文件不存在: {', '.join(missing_paths)}")
-    data_file_map = {path.name: str(path) for path in resolved_paths}
-    namespace: dict[str, Any] = {
-        "__name__": "__agent_code__",
-        "DATA_FILES": [str(path) for path in resolved_paths],
-        "DATA_FILE_MAP": data_file_map,
-        "OUTPUT_DIR": str(target_dir),
-        "WORKSPACE_DIR": (
-            str(Path(workspace_root).resolve(strict=True))
-            if workspace_root is not None
-            else None
-        ),
-        "ARTIFACTS": workspace,
-        "result": None,
+    executable = Path(python_executable or sys.executable).expanduser().resolve(strict=True)
+    if not executable.is_file():
+        raise ValueError("Python 解释器路径无效")
+    resolved_workspace = (
+        str(Path(workspace_root).resolve(strict=True))
+        if workspace_root is not None
+        else None
+    )
+    request = {
+        "code": code,
+        "data_files": [str(path) for path in resolved_paths],
+        "output_dir": str(target_dir),
+        "workspace_root": resolved_workspace,
     }
-    stdout = io.StringIO()
-    stderr = io.StringIO()
-    previous_directory = Path.cwd()
     try:
-        compiled = compile(code, "<agent-generated-code>", "exec")
-        os.chdir(target_dir)
-        with redirect_stdout(stdout), redirect_stderr(stderr):
-            exec(compiled, namespace, namespace)
-    except (Exception, SystemExit, KeyboardInterrupt) as exc:
-        captured = _captured_text(stdout, stderr)
-        detail = f"{type(exc).__name__}: {exc}"
-        if captured:
-            detail = f"{detail}\n运行输出:\n{captured}"
-        raise CodeExecutionError(detail) from exc
-    finally:
-        os.chdir(previous_directory)
-
-    return {
-        "stdout": _trim_text(stdout.getvalue()),
-        "stderr": _trim_text(stderr.getvalue()),
-        "result": _json_result(namespace.get("result")),
-        "artifacts": workspace.list_artifacts(),
-    }
-
-
-def _json_result(value: Any) -> JsonValue:
-    """优先保留结构化结果，无法序列化时返回有限长度文本。"""
+        completed = subprocess.run(
+            [str(executable), "-I", str(_RUNNER_PATH)],
+            input=json.dumps(request, ensure_ascii=False),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            cwd=target_dir,
+            env=_safe_python_environment(),
+            timeout=_DEFAULT_TIMEOUT_SECONDS,
+            shell=False,
+            check=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise CodeExecutionError("Python 代码执行超时") from exc
+    except OSError as exc:
+        raise CodeExecutionError(f"无法启动选定的 Python 环境: {exc}") from exc
+    if completed.returncode != 0:
+        detail = completed.stderr.strip()[-2_000:] or "目标 Python 异常退出"
+        raise CodeExecutionError(detail)
     try:
-        validated = _JSON_ADAPTER.validate_python(value)
-        json.dumps(validated, ensure_ascii=False, allow_nan=False)
-        return validated
-    except (ValidationError, TypeError, ValueError):
-        pass
-    if hasattr(value, "to_dict"):
-        try:
-            converted = value.to_dict(orient="records")
-        except TypeError:
-            converted = value.to_dict()
-        try:
-            validated = _JSON_ADAPTER.validate_python(converted)
-            json.dumps(validated, ensure_ascii=False, allow_nan=False)
-            return validated
-        except (ValidationError, TypeError, ValueError):
-            pass
-    try:
-        text = json.dumps(value, ensure_ascii=False, default=str)
-    except (TypeError, ValueError):
-        text = repr(value)
-    return _trim_text(text)
+        response = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise CodeExecutionError("目标 Python 没有返回合法执行结果") from exc
+    if not isinstance(response, dict) or not response.get("ok"):
+        error_type = response.get("error_type", "CodeExecutionError")
+        detail = f"{error_type}: {response.get('error') or 'Python 代码执行失败'}"
+        captured = response.get("captured")
+        if isinstance(captured, str) and captured:
+            detail += f"\n运行输出:\n{captured}"
+        raise CodeExecutionError(detail)
+    runtime = response.get("runtime") if isinstance(response.get("runtime"), dict) else {}
+    runtime.update({"source": environment_source, "name": environment_name})
+    response["runtime"] = runtime
+    response.pop("ok", None)
+    return response
 
 
-def _captured_text(stdout: io.StringIO, stderr: io.StringIO) -> str:
-    parts = [
-        text.strip()
-        for text in (stdout.getvalue(), stderr.getvalue())
-        if text.strip()
-    ]
-    return _trim_text("\n".join(parts))
-
-
-def _trim_text(value: str) -> str:
-    if len(value) <= _MAX_CAPTURE_CHARS:
-        return value
-    return value[:_MAX_CAPTURE_CHARS] + "\n…输出已截断"
+def _safe_python_environment() -> dict[str, str]:
+    """构造目标解释器所需的最小系统环境。"""
+    allowed_names = ("COMSPEC", "PATH", "PATHEXT", "SYSTEMROOT", "TEMP", "TMP", "WINDIR")
+    environment = {name: os.environ[name] for name in allowed_names if name in os.environ}
+    environment["PYTHONIOENCODING"] = "utf-8"
+    environment["PYTHONUTF8"] = "1"
+    return environment

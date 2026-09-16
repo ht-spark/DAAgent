@@ -34,7 +34,7 @@ from data_analysis.agent.graph import iter_graph
 from data_analysis.agent.loop import Action, AgentLoop, Finish
 from data_analysis.agent.state import AgentMessage, AgentState, Observation
 from data_analysis.context import compile_rolling_context
-from data_analysis.runtime import Harness, SubprocessSandbox
+from data_analysis.runtime import Harness, SubprocessSandbox, resolve_python_environment
 from data_analysis.tools import create_agent_tool_registry, supports_data_profile
 from server import store
 from server.files import list_figures, resolve_artifact
@@ -43,6 +43,7 @@ from server.project_workspaces import (
     create_project as register_project,
     load_project_context,
     require_project,
+    resolve_project_python,
 )
 from server.discussions import delete_discussion, get_discussion, list_discussions, rename_discussion, save_discussion_message
 from KnowledgeBase.chunk import DEFAULT_WINDOW_SIZE, chunk_knowledge_documents
@@ -465,7 +466,7 @@ async def update_knowledge_base_endpoint(
 
 @app.delete("/api/knowledge/bases/{knowledge_base_id}")
 async def delete_knowledge_base_endpoint(knowledge_base_id: str) -> dict[str, Any]:
-    """Delete one knowledge base together with its files and indexed vectors."""
+    """删除知识库，并同步删除其本地源文件、Markdown 与索引向量。"""
     try:
         base = require_knowledge_base(knowledge_base_id)
     except KnowledgeBaseCatalogError as exc:
@@ -476,17 +477,34 @@ async def delete_knowledge_base_endpoint(knowledge_base_id: str) -> dict[str, An
         for record in list_upload_records()
         if record.knowledge_base_id == base.id
     }
+
+    # 1) 优先删除本地文件（raw 原始件 + documents Markdown + 清单记录）
     try:
         if document_ids:
-            delete_document_vectors(document_ids)
             delete_upload_records(document_ids)
+    except KnowledgePreparationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    # 2) 向量清理失败不阻断目录删除，避免本地文件已删但库仍残留
+    if document_ids:
+        try:
+            delete_document_vectors(document_ids)
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "删除知识库 %s 时清理向量失败", base.id
+            )
+
+    # 3) 从目录移除知识库，并按剩余文件重建分块索引
+    try:
+        delete_knowledge_base(base.id)
+        if document_ids:
             chunk_knowledge_documents(
                 document_ids_by_source=_document_ids_by_source(),
                 knowledge_base_ids_by_source=_knowledge_base_ids_by_source(),
             )
-        delete_knowledge_base(base.id)
     except (KnowledgeBaseCatalogError, KnowledgePreparationError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     return {
         "deleted_id": base.id,
         "deleted_document_ids": sorted(document_ids),
@@ -818,7 +836,7 @@ def _agent_event_payload(event: Action | Observation | Finish) -> dict[str, obje
     result_summary = None
     if isinstance(event.result, dict) and isinstance(event.result.get("summary"), dict):
         result_summary = event.result["summary"]
-    return {
+    payload = {
         "type": "agent_observation",
         "tool_name": event.tool_name,
         "success": event.success,
@@ -826,6 +844,59 @@ def _agent_event_payload(event: Action | Observation | Finish) -> dict[str, obje
         "summary": result_summary,
         "error": event.error,
     }
+    knowledge_sources = _knowledge_sources_from_observation(event)
+    if knowledge_sources:
+        payload["sources"] = knowledge_sources
+    return payload
+
+
+def _knowledge_sources_from_observation(event: Observation) -> list[dict[str, str]]:
+    """从 search_knowledge_base 观察结果提取可展示的来源标注。"""
+    if event.tool_name != "search_knowledge_base" or not event.success:
+        return []
+    result = event.result
+    if not isinstance(result, dict):
+        return []
+    matches = result.get("matches")
+    if not isinstance(matches, list):
+        return []
+    sources: list[dict[str, str]] = []
+    for match in matches:
+        if not isinstance(match, dict):
+            continue
+        source_file = match.get("source_file")
+        if not isinstance(source_file, str) or not source_file.strip():
+            continue
+        content = match.get("content")
+        excerpt = content.strip()[:240] if isinstance(content, str) else ""
+        sources.append(
+            {
+                "source_file": source_file.strip(),
+                "document_id": str(match.get("document_id") or ""),
+                "knowledge_base_id": str(match.get("knowledge_base_id") or ""),
+                "excerpt": excerpt,
+            }
+        )
+    return sources
+
+
+def _merge_knowledge_sources(
+    collected: list[dict[str, str]],
+    incoming: list[dict[str, str]],
+) -> list[dict[str, str]]:
+    """按来源文件去重合并知识库引用，保留首次出现顺序。"""
+    seen: set[tuple[str, str]] = {
+        (item.get("document_id", ""), item.get("source_file", ""))
+        for item in collected
+    }
+    merged = list(collected)
+    for item in incoming:
+        key = (item.get("document_id", ""), item.get("source_file", ""))
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(item)
+    return merged
 
 
 def _agent_session_root(discussion_id: str) -> Path:
@@ -1262,6 +1333,14 @@ async def agent_profile_stream_endpoint(
     ]
     output_dir = _agent_output_root(active_discussion_id, workspace_root)
     output_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        python_environment = (
+            resolve_project_python(project)
+            if project is not None
+            else resolve_python_environment(None)
+        )
+    except ProjectWorkspaceError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     api_settings = _read_api_settings() or {}
     tavily_settings = api_settings.get("external_services", {}).get("tavily", {})
     tavily_api_key = (
@@ -1276,6 +1355,9 @@ async def agent_profile_stream_endpoint(
         knowledge_base_ids=selected_base_ids,
         web_search_api_key=tavily_api_key,
         workspace_root=workspace_root,
+        python_executable=python_environment.executable,
+        python_environment_source=python_environment.source,
+        python_environment_name=python_environment.name,
     )
     state = AgentState(
         user_query=message,
@@ -1311,6 +1393,7 @@ async def agent_profile_stream_endpoint(
         trace: list[dict[str, object]] = [started_event]
         yield json.dumps(started_event, ensure_ascii=False) + "\n"
         answer = ""
+        knowledge_sources: list[dict[str, str]] = []
         iterator = iter_graph(state, loop, harness)
         try:
             async with asyncio.timeout(AGENT_RUN_TIMEOUT_SECONDS):
@@ -1325,6 +1408,11 @@ async def agent_profile_stream_endpoint(
                         break
                     payload = _agent_event_payload(event)
                     trace.append(payload)
+                    if isinstance(event, Observation):
+                        knowledge_sources = _merge_knowledge_sources(
+                            knowledge_sources,
+                            _knowledge_sources_from_observation(event),
+                        )
                     if (
                         isinstance(event, Observation)
                         and event.tool_name in {"inspect_image", "inspect_generated_image"}
@@ -1367,7 +1455,7 @@ async def agent_profile_stream_endpoint(
             active_discussion_id,
             message,
             answer,
-            [],
+            knowledge_sources,
             title,
             attachments,
             knowledge_base_ids=selected_base_ids,
@@ -1386,6 +1474,7 @@ async def agent_profile_stream_endpoint(
                 "discussion_id": saved_discussion_id,
                 "run_id": run_id,
                 "artifacts": artifacts,
+                "sources": knowledge_sources,
             },
             ensure_ascii=False,
         ) + "\n"

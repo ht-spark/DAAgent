@@ -148,6 +148,7 @@ export default function Sidebar({
       setProjectError(error instanceof Error ? error.message : '移除项目失败')
     }
   }
+
   async function refresh() {
     try {
       setDiscussions(await fetchBrainstormDiscussions(activeProjectId))
@@ -212,7 +213,7 @@ export default function Sidebar({
         <div className="sidebar-logo" onClick={onHome} title="DAAgent 数据分析智能体">
           {LOGO}
           <div className="logo-text sidebar-collapse-hide">
-            <span className="logo-name sidebar-brand">DAAgent</span>
+            <span className="logo-name sidebar-brand"><span className="sidebar-brand-prefix">DA</span>Agent</span>
             <span className="logo-sub sidebar-sub">数据分析智能体</span>
           </div>
         </div>

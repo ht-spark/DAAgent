@@ -52,7 +52,7 @@ export default function KnowledgeBaseHistory({
 
   async function removeBase(base: KnowledgeBaseSummary) {
     const warning = base.document_count > 0
-      ? `“${base.name}”包含 ${base.document_count} 份文件和 ${base.indexed_chunks} 个向量分块。删除后不可恢复，确定继续吗？`
+      ? `“${base.name}”包含 ${base.document_count} 份文件和 ${base.indexed_chunks} 个向量分块。将同时删除磁盘上的原始文件与 Markdown，删除后不可恢复，确定继续吗？`
       : `确定删除空知识库“${base.name}”吗？`
     if (!window.confirm(warning)) return
     setBusyId(base.id)

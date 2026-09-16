@@ -20,7 +20,103 @@ type TaskStep = 'submit' | 'progress' | 'result'
 type ModelingView = 'new' | 'history'
 type BrainstormView = 'knowledge-hub' | 'knowledge' | 'knowledge-history' | 'stats' | 'chunking' | 'chunking-progress' | 'retrieval-ready'
 
+/** 顶栏「上一级 / 下一级」导航目标 */
+type NavTarget = {
+  section: Section
+  modelingView?: ModelingView
+  brainstormView?: BrainstormView
+  statsFromHistory?: boolean
+}
+
 const SYMBOLS = ['∫', '∑', '∏', '∂', '∇', '∞', 'π', 'σ', 'μ', 'λ', 'α', 'β', 'γ', 'θ', 'Δ', 'Ω']
+
+/** 当前页在信息架构中的上一级与下一级；无则为 null（箭头禁用） */
+function resolveLevelNav(options: {
+  section: Section
+  modelingView: ModelingView
+  brainstormView: BrainstormView
+  statsFromHistory: boolean
+}): { parent: NavTarget | null; next: NavTarget | null } {
+  const { section, modelingView, brainstormView, statsFromHistory } = options
+
+  if (section === 'modeling') {
+    if (modelingView === 'history') {
+      return {
+        parent: { section: 'modeling', modelingView: 'new' },
+        next: null,
+      }
+    }
+    return {
+      parent: null,
+      next: { section: 'modeling', modelingView: 'history' },
+    }
+  }
+
+  if (section === 'api' || section === 'docs') {
+    return { parent: null, next: null }
+  }
+
+  // 知识库维护链路
+  switch (brainstormView) {
+    case 'knowledge-hub':
+      return {
+        parent: null,
+        next: { section: 'brainstorm', brainstormView: 'knowledge' },
+      }
+    case 'knowledge':
+      return {
+        parent: { section: 'brainstorm', brainstormView: 'knowledge-hub' },
+        next: { section: 'brainstorm', brainstormView: 'stats', statsFromHistory: false },
+      }
+    case 'knowledge-history':
+      return {
+        parent: { section: 'brainstorm', brainstormView: 'knowledge-hub' },
+        next: null,
+      }
+    case 'stats':
+      return {
+        parent: statsFromHistory
+          ? { section: 'brainstorm', brainstormView: 'knowledge-history' }
+          : { section: 'brainstorm', brainstormView: 'knowledge' },
+        next: { section: 'brainstorm', brainstormView: 'chunking' },
+      }
+    case 'chunking':
+      return {
+        parent: { section: 'brainstorm', brainstormView: 'stats' },
+        next: { section: 'brainstorm', brainstormView: 'chunking-progress' },
+      }
+    case 'chunking-progress':
+      return {
+        parent: { section: 'brainstorm', brainstormView: 'chunking' },
+        next: { section: 'brainstorm', brainstormView: 'retrieval-ready' },
+      }
+    case 'retrieval-ready':
+      return {
+        parent: { section: 'brainstorm', brainstormView: 'chunking-progress' },
+        next: null,
+      }
+    default:
+      return { parent: null, next: null }
+  }
+}
+
+const NAV_PARENT_TITLE: Record<string, string> = {
+  'modeling-new': '新建任务',
+  'modeling-history': '历史任务',
+  'knowledge-hub': '知识库维护',
+  knowledge: '知识库更新',
+  'knowledge-history': '知识库统计',
+  stats: '资料统计',
+  chunking: '分块与嵌入设置',
+  'chunking-progress': '执行分块与嵌入',
+  'retrieval-ready': '向量检索就绪',
+}
+
+function navTargetKey(target: NavTarget): string {
+  if (target.section === 'modeling') return target.modelingView === 'history' ? 'modeling-history' : 'modeling-new'
+  if (target.section === 'brainstorm') return target.brainstormView ?? 'knowledge-hub'
+  return target.section
+}
 
 export default function App() {
   // 入口直接进入新建聊天；历史讨论在侧边栏「最近」中打开
@@ -65,6 +161,20 @@ export default function App() {
     setSection('modeling')
     setModelingView('new')
   }
+
+  function applyNavTarget(target: NavTarget) {
+    setSection(target.section)
+    if (target.modelingView) setModelingView(target.modelingView)
+    if (target.brainstormView) setBrainstormView(target.brainstormView)
+    if (target.statsFromHistory !== undefined) setStatsFromHistory(target.statsFromHistory)
+  }
+
+  const levelNav = resolveLevelNav({
+    section,
+    modelingView,
+    brainstormView,
+    statsFromHistory,
+  })
 
   return (
     <div className="shell">
@@ -124,6 +234,34 @@ export default function App() {
               <path d="M3 17h13" />
             </svg>
           </button>
+          <div className="page-level-nav" role="navigation" aria-label="页面层级导航">
+            <button
+              type="button"
+              className="page-level-nav-btn"
+              disabled={!levelNav.parent}
+              onClick={() => levelNav.parent && applyNavTarget(levelNav.parent)}
+              aria-label="上一级"
+              title={levelNav.parent ? `上一级：${NAV_PARENT_TITLE[navTargetKey(levelNav.parent)] ?? '返回'}` : '没有上一级'}
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M19 12H5" />
+                <path d="m11 18-6-6 6-6" />
+              </svg>
+            </button>
+            <button
+              type="button"
+              className="page-level-nav-btn"
+              disabled={!levelNav.next}
+              onClick={() => levelNav.next && applyNavTarget(levelNav.next)}
+              aria-label="下一级"
+              title={levelNav.next ? `下一级：${NAV_PARENT_TITLE[navTargetKey(levelNav.next)] ?? '继续'}` : '没有下一级'}
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M5 12h14" />
+                <path d="m13 6 6 6-6 6" />
+              </svg>
+            </button>
+          </div>
         </div>
         {section === 'modeling' && modelingView === 'new' && (
           <NewTask

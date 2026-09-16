@@ -148,6 +148,132 @@ def test_delete_knowledge_base_endpoint_cascades_documents_and_vectors(monkeypat
     assert calls["base"] == "default"
 
 
+def test_delete_knowledge_base_removes_local_files_from_disk(monkeypatch, tmp_path):
+    """删除知识库时必须同步删掉 raw 原始文件与 documents Markdown。"""
+    from uuid import uuid4
+
+    from KnowledgeBase import catalog as kb_catalog
+
+    raw_root = tmp_path / "raw"
+    documents_root = tmp_path / "documents"
+    raw_root.mkdir()
+    documents_root.mkdir()
+    catalog_path = tmp_path / "catalog.json"
+
+    monkeypatch.setattr(upload_file, "RAW_ROOT", raw_root)
+    monkeypatch.setattr(upload_file, "DOCUMENTS_ROOT", documents_root)
+    monkeypatch.setattr(main, "KNOWLEDGE_DOCUMENTS_ROOT", documents_root)
+
+    doc_markdown = str(uuid4())
+    doc_pdf = str(uuid4())
+    (raw_root / "note.md").write_text("# note", encoding="utf-8")
+    (documents_root / "note.md").write_text("# note", encoding="utf-8")
+    (raw_root / "report.pdf").write_bytes(b"%PDF-1.4")
+    (documents_root / "report.md").write_text("# report", encoding="utf-8")
+    upload_file._write_upload_records_payload(
+        [
+            {
+                "document_id": doc_markdown,
+                "name": "note.md",
+                "size_bytes": 6,
+                "uploaded_at": "2026-01-01T00:00:00+00:00",
+                "upload_success": True,
+                "raw_name": "note.md",
+                "output_name": "note.md",
+                "is_markdown": True,
+                "is_conversion": True,
+                "embedding_status": "pending",
+                "indexed_chunks": 0,
+                "knowledge_base_id": "target-kb",
+            },
+            {
+                "document_id": doc_pdf,
+                "name": "report.pdf",
+                "size_bytes": 8,
+                "uploaded_at": "2026-01-01T00:00:00+00:00",
+                "upload_success": True,
+                "raw_name": "report.pdf",
+                "output_name": "report.md",
+                "is_markdown": False,
+                "is_conversion": True,
+                "embedding_status": "pending",
+                "indexed_chunks": 0,
+                "knowledge_base_id": "target-kb",
+            },
+            {
+                "document_id": str(uuid4()),
+                "name": "keep.md",
+                "size_bytes": 5,
+                "uploaded_at": "2026-01-01T00:00:00+00:00",
+                "upload_success": True,
+                "raw_name": "keep.md",
+                "output_name": "keep.md",
+                "is_markdown": True,
+                "is_conversion": True,
+                "embedding_status": "pending",
+                "indexed_chunks": 0,
+                "knowledge_base_id": "other-kb",
+            },
+        ]
+    )
+    (raw_root / "keep.md").write_text("# keep", encoding="utf-8")
+    (documents_root / "keep.md").write_text("# keep", encoding="utf-8")
+
+    base = kb_catalog.create_knowledge_base("目标库", description="", catalog_path=catalog_path)
+    # create_knowledge_base 生成新 id；把清单里的目标库改成同一 id
+    records = upload_file.list_upload_records()
+    rewritten = []
+    for record in records:
+        rewritten.append(
+            {
+                "document_id": record.document_id,
+                "name": record.name,
+                "size_bytes": record.size_bytes,
+                "uploaded_at": record.uploaded_at,
+                "upload_success": record.upload_success,
+                "raw_name": record.raw_name,
+                "output_name": record.output_name,
+                "is_markdown": record.is_markdown,
+                "is_conversion": record.is_conversion,
+                "embedding_status": record.embedding_status,
+                "indexed_chunks": record.indexed_chunks,
+                "knowledge_base_id": (
+                    base.id if record.knowledge_base_id == "target-kb" else record.knowledge_base_id
+                ),
+            }
+        )
+    upload_file._write_upload_records_payload(rewritten)
+
+    monkeypatch.setattr(
+        main,
+        "require_knowledge_base",
+        lambda _id: kb_catalog.require_knowledge_base(base.id, catalog_path),
+    )
+    monkeypatch.setattr(
+        main,
+        "delete_knowledge_base",
+        lambda base_id: kb_catalog.delete_knowledge_base(base_id, catalog_path),
+    )
+    monkeypatch.setattr(main, "delete_document_vectors", lambda _ids: None)
+    monkeypatch.setattr(main, "chunk_knowledge_documents", lambda **_kwargs: None)
+    monkeypatch.setattr(main, "_document_ids_by_source", lambda: {})
+    monkeypatch.setattr(main, "_knowledge_base_ids_by_source", lambda: {})
+
+    result = asyncio.run(main.delete_knowledge_base_endpoint(base.id))
+
+    assert set(result["deleted_document_ids"]) == {doc_markdown, doc_pdf}
+    # 目标库本地文件已删除
+    assert not (raw_root / "note.md").exists()
+    assert not (raw_root / "report.pdf").exists()
+    assert not (documents_root / "note.md").exists()
+    assert not (documents_root / "report.md").exists()
+    # 其他知识库文件保留
+    assert (raw_root / "keep.md").exists()
+    assert (documents_root / "keep.md").exists()
+    remaining_ids = {item.knowledge_base_id for item in upload_file.list_upload_records()}
+    assert base.id not in remaining_ids
+
+
 def test_chunk_embed_endpoint_returns_actual_index_counts(monkeypatch, tmp_path):
     documents_root = tmp_path / "documents"
     documents_root.mkdir()

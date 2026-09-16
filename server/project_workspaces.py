@@ -5,6 +5,11 @@ import os
 from pathlib import Path
 from typing import Any
 
+from data_analysis.python_environment import (
+    PythonEnvironment,
+    PythonEnvironmentError,
+    resolve_python_environment,
+)
 from server import store
 
 MAX_PROJECT_CONTEXT_CHARS = 60_000
@@ -54,6 +59,16 @@ def require_project(project_id: str) -> dict[str, Any]:
     if root_key != project["root_key"]:
         raise ProjectWorkspaceError("项目文件夹规范路径已经变化，请重新注册")
     return {**project, "root_path": str(root)}
+
+
+def resolve_project_python(project: dict[str, Any]) -> PythonEnvironment:
+    """解析一个项目当前实际使用的 Python 环境。"""
+    try:
+        return resolve_python_environment(
+            project["root_path"],
+        )
+    except (OSError, PythonEnvironmentError) as exc:
+        raise ProjectWorkspaceError(str(exc)) from exc
 
 
 def load_project_context(root_path: str | Path) -> str | None:

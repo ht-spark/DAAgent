@@ -105,6 +105,64 @@ def test_agent_events_expose_progress_without_tool_arguments():
     assert observation_payload["summary"] == {"row_count": 2}
 
 
+def test_knowledge_search_observation_includes_source_citations():
+    observation = Observation(
+        tool_name="search_knowledge_base",
+        success=True,
+        result={
+            "summary": {"match_count": 2},
+            "matches": [
+                {
+                    "content": "扩散模型用于时间序列预测的核心机制……",
+                    "source_file": "DIFFUSION-BASED DECOUPLED.md",
+                    "document_id": "doc-1",
+                    "knowledge_base_id": "kb-1",
+                    "relevance_score": 0.9,
+                },
+                {
+                    "content": "另一段命中内容",
+                    "source_file": "RAG笔记.md",
+                    "document_id": "doc-2",
+                    "knowledge_base_id": "kb-1",
+                },
+            ],
+        },
+        duration_ms=12,
+    )
+
+    payload = main._agent_event_payload(observation)
+
+    sources = payload["sources"]
+    assert [item["source_file"] for item in sources] == [
+        "DIFFUSION-BASED DECOUPLED.md",
+        "RAG笔记.md",
+    ]
+    assert sources[0]["document_id"] == "doc-1"
+    assert sources[0]["excerpt"].startswith("扩散模型用于时间序列预测")
+
+
+def test_merge_knowledge_sources_dedupes_by_document_and_file():
+    first = {
+        "source_file": "a.md",
+        "document_id": "doc-a",
+        "knowledge_base_id": "kb",
+        "excerpt": "一",
+    }
+    second = {
+        "source_file": "b.md",
+        "document_id": "doc-b",
+        "knowledge_base_id": "kb",
+        "excerpt": "二",
+    }
+
+    merged = main._merge_knowledge_sources(
+        [first],
+        [first, second],
+    )
+
+    assert merged == [first, second]
+
+
 def test_agent_code_event_exposes_generated_code_only():
     action = Action(
         thought="计算描述统计",

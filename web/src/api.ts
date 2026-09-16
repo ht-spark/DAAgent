@@ -374,6 +374,7 @@ export type BrainstormDiscussion = BrainstormDiscussionSummary & {
   messages: Array<{
     role: 'assistant' | 'user'
     content: string
+    sources?: KnowledgeSourceCitation[]
     metadata?: {
       knowledge_base_id?: string
       knowledge_base_ids?: string[]
@@ -381,6 +382,7 @@ export type BrainstormDiscussion = BrainstormDiscussionSummary & {
       agent_run_id?: string
       agent_trace?: AgentTraceEvent[]
       agent_artifacts?: AgentArtifact[]
+      sources?: KnowledgeSourceCitation[]
     }
   }>
 }
@@ -399,6 +401,13 @@ export async function openAgentArtifactFolder(discussionId: string): Promise<voi
     { method: 'POST' },
   )
   if (!res.ok) throw new Error(await extractDetail(res, '无法打开产物文件夹'))
+}
+
+export type KnowledgeSourceCitation = {
+  source_file: string
+  document_id?: string
+  knowledge_base_id?: string
+  excerpt?: string
 }
 
 export type AgentTraceEvent = {
@@ -421,6 +430,8 @@ export type AgentTraceEvent = {
   duration_ms: number
   summary?: Record<string, number> | null
   error?: string | null
+  /** search_knowledge_base 命中的来源标注 */
+  sources?: KnowledgeSourceCitation[]
 }
 
 const AGENT_REQUEST_TIMEOUT_MS = 3 * 60 * 60 * 1000 + 60 * 1000
@@ -434,7 +445,12 @@ export async function streamDataAgentMessage(
     onStarted: (runId: string, files: string[]) => void
     onTrace: (event: AgentTraceEvent) => void
     onToken: (content: string) => void
-    onDone: (discussionId: string, runId: string, artifacts: AgentArtifact[]) => void
+    onDone: (
+      discussionId: string,
+      runId: string,
+      artifacts: AgentArtifact[],
+      sources?: KnowledgeSourceCitation[],
+    ) => void
   },
   configId?: string | null,
   knowledgeBaseIds?: string[],
@@ -483,6 +499,7 @@ export async function streamDataAgentMessage(
         discussion_id?: string
         files?: string[]
         artifacts?: AgentArtifact[]
+        sources?: KnowledgeSourceCitation[]
       } & Partial<AgentTraceEvent>
       if (event.type === 'agent_started' && event.run_id) {
         handlers.onStarted(event.run_id, event.files ?? [])
@@ -494,7 +511,7 @@ export async function streamDataAgentMessage(
       if (event.type === 'token' && event.content) handlers.onToken(event.content)
       if (event.type === 'error') throw new Error(event.detail ?? '数据 Agent 运行失败。')
       if (event.type === 'done' && event.discussion_id && event.run_id) {
-        handlers.onDone(event.discussion_id, event.run_id, event.artifacts ?? [])
+        handlers.onDone(event.discussion_id, event.run_id, event.artifacts ?? [], event.sources)
       }
     }
     if (done) break

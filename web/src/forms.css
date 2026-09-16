@@ -167,8 +167,9 @@
 .logo-text {
   display: flex;
   flex-direction: column;
-  gap: 1px;
+  gap: 0;
   min-width: 0;
+  padding-top: 1px;
 }
 .sidebar-logo-img {
   width: 48px;
@@ -182,15 +183,28 @@
   height: 40px;
 }
 .sidebar-brand {
-  font-size: calc(17px * var(--app-font-ratio));
+  color: #174334;
+  font-family: Bahnschrift, "Aptos Display", "Segoe UI Variable Display", "Trebuchet MS", sans-serif;
+  font-size: calc(20px * var(--app-font-ratio));
+  font-weight: 700;
+  font-variation-settings: "wght" 680, "wdth" 94;
+  letter-spacing: -0.9px;
+  line-height: 1.05;
+  text-rendering: geometricPrecision;
+}
+.sidebar-brand-prefix {
+  color: #d9951d;
   font-weight: 800;
-  color: #2a2416;
-  letter-spacing: -0.3px;
+  letter-spacing: -1.25px;
 }
 .sidebar-sub {
-  font-size: calc(11px * var(--app-font-ratio));
-  font-weight: 500;
-  color: #8a7f68;
+  margin-top: 3px;
+  color: #63776d;
+  font-family: "Microsoft YaHei UI", "PingFang SC", "Noto Sans SC", sans-serif;
+  font-size: calc(10px * var(--app-font-ratio));
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  line-height: 1.15;
 }
 
 .sidebar-nav {
@@ -566,6 +580,49 @@
 
 .content-top-actions .page-back-button {
   position: static;
+}
+
+/* 上一级 / 下一级 层级导航（所有子页共用） */
+.page-level-nav {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: 4px;
+}
+
+.page-level-nav-btn {
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  color: #2a2416;
+  background: transparent;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 0.2s ease, color 0.2s ease, opacity 0.2s ease;
+}
+
+.page-level-nav-btn svg {
+  width: 22px;
+  height: 22px;
+}
+
+.page-level-nav-btn:hover:not(:disabled) {
+  color: #7a5a1a;
+  background: #f3ecd8;
+}
+
+.page-level-nav-btn:disabled {
+  color: #c4bba8;
+  cursor: default;
+  opacity: 0.7;
+}
+
+.page-level-nav-btn:focus-visible {
+  outline: 2px solid rgba(184, 137, 45, 0.45);
+  outline-offset: 1px;
 }
 
 .page-back-button svg { width: 28px; height: 28px; }
@@ -4083,6 +4140,123 @@
   color: #7a5a1a;
 }
 
+/* 消息底部知识库来源标注（默认收起） */
+.rag-msg-sources {
+  margin-top: 14px;
+  border: 1px solid var(--rag-border);
+  border-radius: 10px;
+  background: rgba(255, 253, 246, 0.72);
+  overflow: hidden;
+}
+
+.rag-msg-sources > summary {
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  cursor: pointer;
+  user-select: none;
+  color: var(--rag-text-secondary);
+  font-size: calc(12px * var(--app-font-ratio));
+}
+
+.rag-msg-sources > summary::-webkit-details-marker {
+  display: none;
+}
+
+.rag-msg-sources > summary:hover {
+  background: rgba(243, 236, 216, 0.65);
+  color: var(--rag-text);
+}
+
+.rag-msg-sources-label {
+  flex-shrink: 0;
+  font-weight: 600;
+  color: #7a5a1a;
+  background: rgba(184, 137, 45, 0.12);
+  border-radius: 4px;
+  padding: 1px 6px;
+}
+
+.rag-msg-sources-count {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rag-msg-sources-chevron {
+  width: 0;
+  height: 0;
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+  border-top: 5px solid currentColor;
+  opacity: 0.7;
+  transition: transform 0.15s ease;
+  flex-shrink: 0;
+}
+
+.rag-msg-sources[open] .rag-msg-sources-chevron {
+  transform: rotate(180deg);
+}
+
+.rag-msg-sources-list {
+  margin: 0;
+  padding: 0 12px 10px;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-top: 1px solid var(--rag-border);
+  padding-top: 10px;
+}
+
+.rag-msg-sources-list li {
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.55);
+  border: 1px solid rgba(92, 72, 28, 0.08);
+}
+
+.rag-msg-sources-item-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.rag-msg-sources-file {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: calc(12.5px * var(--app-font-ratio));
+  font-weight: 600;
+  color: var(--rag-text);
+}
+
+.rag-msg-sources-kb {
+  flex-shrink: 0;
+  font-size: calc(11px * var(--app-font-ratio));
+  color: #5f7a6e;
+  background: rgba(63, 125, 110, 0.12);
+  border-radius: 4px;
+  padding: 1px 6px;
+}
+
+.rag-msg-sources-excerpt {
+  margin: 6px 0 0;
+  font-size: calc(12px * var(--app-font-ratio));
+  line-height: 1.5;
+  color: var(--rag-text-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .rag-avatar {
   width: 36px;
   height: 36px;
@@ -4698,6 +4872,117 @@
 .agent-artifact-actions button { cursor: pointer; }
 .agent-artifact-actions button:hover,
 .agent-artifact-actions a:hover { text-decoration: underline; }
+
+/* 产物目录树（资源管理器风格，点击文件预览） */
+.artifact-tree {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.artifact-tree-folder > .artifact-tree {
+  margin-left: 14px;
+  padding-left: 8px;
+  border-left: 1px solid rgba(92, 72, 28, 0.12);
+}
+
+.artifact-tree-row {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 7px 8px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--rag-text-secondary);
+  font-family: inherit;
+  font-size: calc(12.5px * var(--app-font-ratio));
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.artifact-tree-row:hover {
+  background: var(--rag-bg-hover);
+  color: var(--rag-text);
+}
+
+.artifact-tree-row.folder {
+  font-weight: 600;
+  color: var(--rag-text);
+}
+
+.artifact-tree-row.file {
+  font-weight: 500;
+}
+
+.artifact-tree-chevron {
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+  opacity: 0.65;
+  transition: transform 0.15s ease;
+}
+
+.artifact-tree-chevron.is-open {
+  transform: rotate(90deg);
+}
+
+.artifact-tree-icon {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  opacity: 0.75;
+  color: #8a7f68;
+}
+
+.artifact-tree-icon.file {
+  color: #7a5a1a;
+}
+
+.artifact-tree-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.artifact-tree-size {
+  flex-shrink: 0;
+  color: var(--rag-text-muted);
+  font-size: calc(10.5px * var(--app-font-ratio));
+}
+
+.artifact-preview-crumb {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0;
+  margin-bottom: 4px;
+  color: var(--rag-text-muted);
+  font-size: calc(11.5px * var(--app-font-ratio));
+}
+
+.artifact-preview-crumb span {
+  display: inline-flex;
+  align-items: center;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.artifact-preview-crumb i {
+  margin: 0 4px;
+  font-style: normal;
+  opacity: 0.55;
+}
 
 /* ---------- Agent 产物预览 ---------- */
 /* 预览经 createPortal 挂到 body，脱离 .new-chat-page.rag-agent 作用域，
