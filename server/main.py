@@ -307,6 +307,47 @@ async def delete_project_endpoint(project_id: str) -> dict[str, bool]:
     return {"deleted": True}
 
 
+def _open_native_folder_dialog(initial_dir: str | None = None) -> str | None:
+    """打开系统文件夹选择框，返回绝对路径；用户取消时返回 None。"""
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+    except ImportError as exc:
+        raise RuntimeError("当前环境缺少 tkinter，无法打开系统文件夹选择框") from exc
+
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        # 置顶，避免被浏览器窗口盖住
+        root.attributes("-topmost", True)
+        selected = filedialog.askdirectory(
+            title="选择或新建项目文件夹",
+            initialdir=initial_dir or str(Path.home()),
+            mustexist=False,
+        )
+    finally:
+        try:
+            root.destroy()
+        except tk.TclError:
+            pass
+
+    if not selected:
+        return None
+    return str(Path(selected).expanduser().resolve())
+
+
+@app.post("/api/system/select-folder")
+async def select_system_folder_endpoint() -> dict[str, str | None]:
+    """打开操作系统原生文件夹选择对话框，返回所选路径。"""
+    try:
+        path = await asyncio.to_thread(_open_native_folder_dialog)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 —— GUI 环境异常时给前端可读错误
+        raise HTTPException(status_code=503, detail=f"无法打开系统文件夹选择框：{exc}") from exc
+    return {"path": path}
+
+
 @app.get(
     "/api/projects/{project_id}/sessions",
     response_model=list[BrainstormDiscussionSummary],

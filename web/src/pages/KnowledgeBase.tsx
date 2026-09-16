@@ -5,7 +5,6 @@ import {
   createKnowledgeBase,
   deleteKnowledgeDocuments,
   getKnowledgeBases,
-  getKnowledgeStatus,
   type KnowledgeBaseSummary,
   type KnowledgeDocument,
   uploadKnowledgeDocument,
@@ -23,11 +22,12 @@ export default function KnowledgeBase({
   initialKnowledgeBaseId?: string
   onKnowledgeBaseIdChange?: (knowledgeBaseId: string) => void
 }) {
+  // 本页只承载「一次上传任务」：打开时列表为空，不拉取历史文件
   const [documents, setDocuments] = useState<KnowledgeDocument[]>([])
   const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBaseSummary[]>([])
   const [knowledgeBaseId, setKnowledgeBaseId] = useState(initialKnowledgeBaseId ?? '')
   const [currentPage, setCurrentPage] = useState(1)
-  const [loading, setLoading] = useState(true)
+  const [loading, setLoading] = useState(false)
   const [uploadProgress, setUploadProgress] = useState<{ total: number; done: number; currentName: string } | null>(null)
   const [error, setError] = useState('')
   const [dragOver, setDragOver] = useState(false)
@@ -54,29 +54,12 @@ export default function KnowledgeBase({
       ))
   }, [initialKnowledgeBaseId, onKnowledgeBaseIdChange])
 
+  // 切换知识库时清空本次任务列表，不加载该库历史文件
   useEffect(() => {
-    if (!knowledgeBaseId) {
-      setDocuments([])
-      setLoading(false)
-      return
-    }
-    setLoading(true)
+    setDocuments([])
     setSelectedIds(new Set())
-    getKnowledgeStatus(knowledgeBaseId)
-      .then((status) =>
-        setDocuments(
-          status.documents
-            .map((doc) => ({
-              ...doc,
-              id: doc.id || crypto.randomUUID(),
-              upload_success: doc.upload_success ?? true,
-              is_markdown: doc.is_markdown ?? false,
-              is_conversion: doc.is_conversion ?? false,
-            })),
-        ),
-      )
-      .catch((reason: unknown) => setError(reason instanceof Error ? reason.message : '无法连接知识库服务。'))
-      .finally(() => setLoading(false))
+    setCurrentPage(1)
+    setLoading(false)
   }, [knowledgeBaseId])
 
   const uploadFiles = useCallback(async (files: FileList | null | undefined) => {
@@ -213,7 +196,7 @@ export default function KnowledgeBase({
       <div className="page-head">
         <div>
           <h1 className="page-title">知识库维护</h1>
-          <p className="page-sub">上传并管理领域资料，为 RAG 检索提供上下文。</p>
+          <p className="page-sub">完成一次上传与转换任务；打开时列表为空，历史文件请到「知识库统计」查看。</p>
         </div>
         <div className="kb-route-controls">
           <label>
@@ -296,10 +279,10 @@ export default function KnowledgeBase({
           </div>
         </div>
 
-        {/* 下方：文件记录表格 */}
+        {/* 下方：本次任务文件列表（不展示历史） */}
         <div className="kb-table-section">
           <div className="kb-table-head">
-            <h2>文件记录</h2>
+            <h2>本次上传文件</h2>
             <span className="kb-table-count">
               {loading ? '读取中…' : `共 ${documents.length} 份 · 成功 ${successCount} · Markdown ${markdownCount} · 已转换 ${conversionCount}`}
             </span>
@@ -329,7 +312,7 @@ export default function KnowledgeBase({
               <tbody>
                 {!loading && documents.length === 0 && (
                   <tr>
-                    <td colSpan={8} className="kb-empty-row">暂无文件记录</td>
+                    <td colSpan={8} className="kb-empty-row">本次任务尚未上传文件</td>
                   </tr>
                 )}
                 {paginatedDocuments.map((doc) => (

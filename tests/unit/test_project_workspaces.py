@@ -69,6 +69,38 @@ def test_project_api_registers_existing_folder(tmp_path):
     assert result.title == "数据项目"
     assert result.root_path == str(tmp_path.resolve())
 
+
+def test_select_folder_endpoint_returns_path(tmp_path, monkeypatch):
+    """系统文件夹选择接口应把对话框结果原样返回。"""
+    monkeypatch.setattr(main, "_open_native_folder_dialog", lambda initial_dir=None: str(tmp_path))
+
+    result = asyncio.run(main.select_system_folder_endpoint())
+
+    assert result == {"path": str(tmp_path)}
+
+
+def test_select_folder_endpoint_cancel_returns_null(monkeypatch):
+    """用户取消选择时返回 path=null，前端据此静默返回。"""
+    monkeypatch.setattr(main, "_open_native_folder_dialog", lambda initial_dir=None: None)
+
+    result = asyncio.run(main.select_system_folder_endpoint())
+
+    assert result == {"path": None}
+
+
+def test_select_folder_endpoint_maps_gui_failure(monkeypatch):
+    """GUI 不可用时映射为 503，便于前端回退手输路径。"""
+    def _boom(initial_dir=None):
+        raise RuntimeError("当前环境缺少 tkinter，无法打开系统文件夹选择框")
+
+    monkeypatch.setattr(main, "_open_native_folder_dialog", _boom)
+
+    with pytest.raises(Exception) as exc_info:
+        asyncio.run(main.select_system_folder_endpoint())
+
+    assert getattr(exc_info.value, "status_code", None) == 503
+
+
 def test_project_output_directory_and_artifact_listing(tmp_path):
     output_dir = main._agent_output_root("session-output", tmp_path)
     output_dir.mkdir(parents=True)

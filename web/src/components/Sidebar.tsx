@@ -8,6 +8,7 @@ import {
   fetchBrainstormDiscussions,
   fetchProjects,
   renameBrainstormDiscussion,
+  selectSystemFolder,
   type BrainstormDiscussionSummary,
   type ProjectSummary,
 } from '../api'
@@ -75,6 +76,7 @@ export default function Sidebar({
   const [renameDraft, setRenameDraft] = useState('')
   const [pendingDelete, setPendingDelete] = useState<BrainstormDiscussionSummary | null>(null)
   const [busy, setBusy] = useState(false)
+  const [projectsExpanded, setProjectsExpanded] = useState(true)
 
   useEffect(() => {
     void fetchProjects()
@@ -114,12 +116,18 @@ export default function Sidebar({
   }, [menuState])
 
   async function handleAddProject() {
-    const rootPath = window.prompt('请输入项目文件夹的绝对路径，例如 D:\\Projects\\DataProject')?.trim()
-    if (!rootPath) return
-    const title = window.prompt('项目名称（可留空使用文件夹名）')?.trim()
     setProjectError('')
+    let rootPath: string | null = null
     try {
-      const project = await createProject(rootPath, title)
+      // 优先弹出系统原生文件夹选择框（与资源管理器一致）
+      rootPath = await selectSystemFolder()
+    } catch {
+      // 后端无法弹出 GUI 时退回手输路径，保证远程/无桌面场景仍可用
+      rootPath = window.prompt('无法打开系统选择框，请输入项目文件夹的绝对路径，例如 D:\\Projects\\DataProject')?.trim() || null
+    }
+    if (!rootPath) return
+    try {
+      const project = await createProject(rootPath)
       setProjects(await fetchProjects())
       onProjectChange(project.id)
     } catch (error) {
@@ -211,22 +219,6 @@ export default function Sidebar({
       </div>
 
       <div className="rail-section">
-        <div className="rail-label sidebar-collapse-hide">工作区</div>
-        <div className="project-switcher sidebar-collapse-hide">
-          <select
-            value={activeProjectId ?? ''}
-            onChange={(event) => onProjectChange(event.target.value || null)}
-            aria-label="当前项目"
-          >
-            <option value="">全部项目（新会话不绑定）</option>
-            {projects.map((project) => (
-              <option key={project.id} value={project.id}>{project.title}</option>
-            ))}
-          </select>
-          <button type="button" onClick={() => void handleAddProject()} title="添加项目">＋</button>
-          <button type="button" onClick={() => void handleRemoveProject()} disabled={!activeProjectId} title="移除项目">−</button>
-        </div>
-        {projectError && <p className="project-switcher-error sidebar-collapse-hide">{projectError}</p>}
         <button
           className={`nav-item ${section === 'modeling' ? 'active' : ''}`}
           onClick={onModeling}
@@ -248,6 +240,66 @@ export default function Sidebar({
           </svg>
           <span className="nav-text sidebar-collapse-hide">知识库</span>
         </button>
+      </div>
+
+      {/* 项目入口：分组列表形态，底层仍走 onProjectChange / add / remove */}
+      <div className="rail-section project-section">
+        <div className="project-section-head sidebar-collapse-hide">
+          <button
+            type="button"
+            className="project-section-toggle"
+            onClick={() => setProjectsExpanded((open) => !open)}
+            aria-expanded={projectsExpanded}
+          >
+            <svg
+              className={`project-section-chevron ${projectsExpanded ? 'is-open' : ''}`}
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M6 9l6 6 6-6" />
+            </svg>
+            <span>项目</span>
+          </button>
+          <div className="project-section-actions">
+            <button type="button" onClick={() => void handleAddProject()} title="添加项目" aria-label="添加项目">＋</button>
+            <button type="button" onClick={() => void handleRemoveProject()} disabled={!activeProjectId} title="移除项目" aria-label="移除项目">−</button>
+          </div>
+        </div>
+        {(projectsExpanded || collapsed) && (
+          <div className="project-list" role="list">
+            {projects.length === 0 ? (
+              <p className="project-list-empty sidebar-collapse-hide">暂无项目</p>
+            ) : (
+              projects.map((project) => {
+                const isActive = project.id === activeProjectId
+                return (
+                  <button
+                    key={project.id}
+                    type="button"
+                    role="listitem"
+                    className={`project-item ${isActive ? 'active' : ''}`}
+                    onClick={() => {
+                      if (!isActive) onProjectChange(project.id)
+                    }}
+                    title={collapsed ? project.title : undefined}
+                    aria-current={isActive ? 'true' : undefined}
+                  >
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true">
+                      <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z" />
+                    </svg>
+                    <span className="nav-text sidebar-collapse-hide">{project.title}</span>
+                  </button>
+                )
+              })
+            )}
+          </div>
+        )}
+        {projectError && <p className="project-switcher-error sidebar-collapse-hide">{projectError}</p>}
       </div>
 
       <div className="rail-section rail-recent">

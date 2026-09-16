@@ -30,6 +30,8 @@ export default function App() {
   const [discussionId, setDiscussionId] = useState<string | null>(null)
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null)
   const [activeKnowledgeBaseId, setActiveKnowledgeBaseId] = useState<string | undefined>()
+  // 标记资料统计是从「知识库统计」打开，以便返回正确页面
+  const [statsFromHistory, setStatsFromHistory] = useState(false)
   const [chunkEmbeddingOptions, setChunkEmbeddingOptions] = useState<ChunkEmbeddingOptions>({
     strategy: 'semantic',
     chunkSize: 800,
@@ -145,21 +147,26 @@ export default function App() {
           <KnowledgeBase
             initialKnowledgeBaseId={activeKnowledgeBaseId}
             onKnowledgeBaseIdChange={setActiveKnowledgeBaseId}
-            onNext={() => setBrainstormView('stats')}
+            onNext={() => {
+              setStatsFromHistory(false)
+              setBrainstormView('stats')
+            }}
           />
         )}
         {section === 'brainstorm' && brainstormView === 'knowledge-history' && (
           <KnowledgeBaseHistory
             onOpenKnowledgeBase={(knowledgeBaseId) => {
+              // 详细文件记录统一放在资料统计；维护页每次打开为空
               setActiveKnowledgeBaseId(knowledgeBaseId)
-              setBrainstormView('knowledge')
+              setStatsFromHistory(true)
+              setBrainstormView('stats')
             }}
           />
         )}
         {section === 'brainstorm' && brainstormView === 'stats' && (
           <KnowledgeBaseStats
             knowledgeBaseId={activeKnowledgeBaseId}
-            onBack={() => setBrainstormView('knowledge')}
+            onBack={() => setBrainstormView(statsFromHistory ? 'knowledge-history' : 'knowledge')}
             onNext={() => setBrainstormView('chunking')}
           />
         )}

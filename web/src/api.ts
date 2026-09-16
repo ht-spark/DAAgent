@@ -355,6 +355,14 @@ export async function deleteProject(projectId: string): Promise<void> {
   const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}`, { method: 'DELETE' })
   if (!res.ok) throw new Error(await extractDetail(res, '移除项目失败'))
 }
+
+/** 打开系统文件夹选择框；用户取消时返回 null。 */
+export async function selectSystemFolder(): Promise<string | null> {
+  const res = await fetch('/api/system/select-folder', { method: 'POST' })
+  if (!res.ok) throw new Error(await extractDetail(res, '无法打开系统文件夹选择框'))
+  const data = (await res.json()) as { path: string | null }
+  return data.path ?? null
+}
 export type BrainstormDiscussionSummary = {
   id: string
   title: string

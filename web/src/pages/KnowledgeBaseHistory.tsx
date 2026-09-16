@@ -121,7 +121,7 @@ export default function KnowledgeBaseHistory({
                     {base.created_at ? new Date(base.created_at).toLocaleDateString('zh-CN') : '旧数据'}
                   </td>
                   <td className="kb-history-open kb-base-actions">
-                    <button type="button" className="api-btn" onClick={() => onOpenKnowledgeBase(base.id)}>管理</button>
+                    <button type="button" className="api-btn" onClick={() => onOpenKnowledgeBase(base.id)}>查看文件</button>
                     <button type="button" className="api-btn" disabled={busyId === base.id} onClick={() => void editBase(base)}>编辑</button>
                     <button type="button" className="api-btn danger" disabled={busyId === base.id} onClick={() => void removeBase(base)}>删除</button>
                   </td>

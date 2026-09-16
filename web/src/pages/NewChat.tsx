@@ -379,7 +379,8 @@ export default function NewChat({
   const [previewArtifact, setPreviewArtifact] = useState<AgentArtifact | null>(null)
   const [openingArtifactFolder, setOpeningArtifactFolder] = useState(false)
   const [artifactFolderError, setArtifactFolderError] = useState('')
-  const [sourcesCollapsed, setSourcesCollapsed] = useState(false)
+  // 进入新建任务时右侧「输出产物」默认收起，有产物后用户可手动展开
+  const [sourcesCollapsed, setSourcesCollapsed] = useState(true)
   const [apiConfigs, setApiConfigs] = useState<ApiConfig[]>([])
   const [selectedConfigId, setSelectedConfigId] = useState<string>('')
   const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBaseSummary[]>([])
