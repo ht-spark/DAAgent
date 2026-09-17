@@ -98,6 +98,12 @@ class CreateRunResponse(BaseModel):
     output_dir: str
 
 
+class AgentCommandDecisionBody(BaseModel):
+    """用户对单条 Agent 项目命令的批准决定。"""
+
+    approved: bool
+
+
 class BudgetConfirmBody(BaseModel):
     """用户在弹窗中确认预算的请求体（初始任务级或每问级）。"""
 

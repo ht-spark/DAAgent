@@ -2,6 +2,7 @@ import { memo, useEffect, useRef, useState, type ClipboardEvent } from 'react'
 import { createPortal } from 'react-dom'
 
 import {
+  decideAgentCommand,
   fetchBrainstormDiscussion,
   getKnowledgeBases,
   openAgentArtifactFolder,
@@ -460,7 +461,7 @@ const AgentInlineProcess = memo(function AgentInlineProcess({
         {trace.map((event, index) => (
           <div
             className={`agent-inline-step ${event.type}`}
-            key={`${event.type}-${event.type === 'agent_started' ? event.run_id : event.type === 'agent_reasoning' ? index : event.tool_name}-${index}`}
+            key={`${event.type}-${index}`}
           >
             {event.type === 'agent_started' ? (
               <p className="agent-inline-activity">
@@ -477,6 +478,10 @@ const AgentInlineProcess = memo(function AgentInlineProcess({
                   </details>
                 )}
               </>
+            ) : event.type === 'agent_command_approval_required' ? (
+              <p className="agent-inline-activity">等待人工批准 · {event.command}</p>
+            ) : event.type === 'agent_command_approval_decision' ? (
+              <p className="agent-inline-activity">{event.approved ? '已批准命令' : '已拒绝命令'}</p>
             ) : event.type === 'agent_reasoning' ? (
               <p className="agent-inline-reasoning">{event.summary}</p>
             ) : (
@@ -614,14 +619,9 @@ export default function NewChat({
   const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBaseSummary[]>([])
   // 不预选知识库，用户可以选择零个或多个
   const [knowledgeBaseIds, setKnowledgeBaseIds] = useState<string[]>([])
-  const [enableProjectChanges, setEnableProjectChanges] = useState(false)
   const knowledgeBasesRef = useRef<KnowledgeBaseSummary[]>([])
   const fileInputRef = useRef<HTMLInputElement>(null)
   const listRef = useRef<HTMLDivElement>(null)
-
-  useEffect(() => {
-    setEnableProjectChanges(false)
-  }, [projectId])
 
   function applyApiConfigs(configs: ApiConfig[]) {
     setApiConfigs(configs)
@@ -737,7 +737,6 @@ export default function NewChat({
     if ((!message && files.length === 0) || isSubmitting) return
     setDraft('')
     setIsSubmitting(true)
-    setEnableProjectChanges(false)
     const attachedFiles = files
     setFiles([])
     if (fileInputRef.current) fileInputRef.current.value = ''
@@ -769,6 +768,14 @@ export default function NewChat({
               },
             ))
           },
+          onApprovalRequired: async (event) => {
+            const environment = event.python_environment
+              ? `\n目标环境：${event.python_environment}` : ''
+            const approved = window.confirm(
+              `Agent 请求运行项目命令。请检查后决定是否批准：\n\n${event.command}\n\n项目：${event.workspace_root}${environment}\n\n此命令可能安装依赖或执行项目代码。`,
+            )
+            await decideAgentCommand(event.approval_id, approved)
+          },
           onToken: (content) => {
             setMessages((current) => current.map(
               (item, index) => index === current.length - 1
@@ -796,7 +803,6 @@ export default function NewChat({
         selectedConfigId || null,
         knowledgeBaseIds,
         projectId,
-        enableProjectChanges,
       )
     } catch (error) {
       setMessages((current) => current.map(
@@ -967,17 +973,6 @@ export default function NewChat({
                     ))}
                   </div>
                 </details>
-                {projectId && (
-                  <label className="rag-project-changes" title="仅本轮允许创建和精确编辑项目文件，并执行受控 Git、测试或构建命令。测试和构建会运行项目代码。">
-                    <input
-                      type="checkbox"
-                      checked={enableProjectChanges}
-                      onChange={(event) => setEnableProjectChanges(event.target.checked)}
-                      disabled={isSubmitting}
-                    />
-                    允许本轮编辑与终端（运行项目代码）
-                  </label>
-                )}
                 <button
                   type="button"
                   className="rag-btn"
@@ -994,34 +989,58 @@ export default function NewChat({
                   accept=".csv,.xlsx,.xls,.json,.jsonl,.ndjson,.pdf,.docx,.md,.markdown,.py,.png,.jpg,.jpeg,.webp,.gif,.bmp,.tif,.tiff"
                   onChange={(event) => setFiles(Array.from(event.target.files ?? []))}
                 />
-                {apiConfigs.length > 0 ? (
-                  <label className="rag-model-select" title="选择对话使用的模型（来自 API 设置）">
-                    <select
-                      value={selectedConfigId}
-                      onChange={(event) => setSelectedConfigId(event.target.value)}
-                      disabled={isSubmitting}
-                      aria-label="选择模型"
-                    >
-                      {apiConfigs.map((config) => (
-                        <option key={config.id} value={config.id}>
-                          {config.model || config.name || '未命名模型'}
-                        </option>
-                      ))}
-                    </select>
-                    <svg
-                      className="rag-model-chevron"
-                      width="12"
-                      height="12"
-                      viewBox="0 0 24 24"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="2.2"
-                      aria-hidden="true"
-                    >
-                      <path d="M6 9l6 6 6-6" strokeLinecap="round" strokeLinejoin="round" />
-                    </svg>
-                  </label>
-                ) : (
+                {apiConfigs.length > 0 ? (() => {
+                  const activeModelConfig = apiConfigs.find((config) => config.id === selectedConfigId)
+                    ?? apiConfigs[0]
+                  const activeModelLabel = activeModelConfig.model || activeModelConfig.name || '未命名模型'
+                  return (
+                    <details className="rag-model-picker" title="选择对话使用的模型（来自 API 设置）">
+                      <summary className={isSubmitting ? 'is-disabled' : undefined} aria-label="选择模型">
+                        <span className="rag-model-badge" aria-hidden="true">
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+                            <path d="M12 3l1.8 4.8L19 9.6l-4.2 3.2L16.2 18 12 15.2 7.8 18l1.4-5.2L5 9.6l5.2-1.8L12 3z" strokeLinejoin="round" />
+                          </svg>
+                        </span>
+                        <span className="rag-model-name">{activeModelLabel}</span>
+                        <span className="rag-kb-chevron" aria-hidden="true" />
+                      </summary>
+                      <div className="rag-model-menu" role="listbox" aria-label="可用模型">
+                        <div className="rag-model-menu-head">选择模型</div>
+                        {apiConfigs.map((config) => {
+                          const label = config.model || config.name || '未命名模型'
+                          const isActive = config.id === activeModelConfig.id
+                          return (
+                            <button
+                              key={config.id}
+                              type="button"
+                              role="option"
+                              aria-selected={isActive}
+                              className={`rag-model-option${isActive ? ' is-active' : ''}`}
+                              disabled={isSubmitting}
+                              onClick={(event) => {
+                                setSelectedConfigId(config.id)
+                                const details = event.currentTarget.closest('details')
+                                if (details instanceof HTMLDetailsElement) details.open = false
+                              }}
+                            >
+                              <span className="rag-model-option-main">
+                                <span className="rag-model-option-name">{label}</span>
+                                {config.reasoningEffort && config.reasoningEffort !== 'off' ? (
+                                  <span className="rag-model-effort">思考 {config.reasoningEffort}</span>
+                                ) : null}
+                              </span>
+                              {isActive ? (
+                                <svg className="rag-model-check" width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                                  <path d="M5 12.5l4.5 4.5L19 7" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
+                                </svg>
+                              ) : null}
+                            </button>
+                          )
+                        })}
+                      </div>
+                    </details>
+                  )
+                })() : (
                   <span className="rag-model-empty" title="尚未在 API 管理中配置模型">
                     未配置模型
                   </span>

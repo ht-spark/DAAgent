@@ -1,4 +1,4 @@
-"""灵感讨论：基于统一 store（sessions + messages）的读写。
+"""基于统一 store（sessions + messages）的读写。
 
 对外函数签名与旧 JSON 实现保持一致，供 server.main 直接调用。
 """

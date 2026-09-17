@@ -88,7 +88,7 @@ def main() -> int:
             "error": str(exc) or "Python 代码执行失败",
             "captured": captured,
         }
-    original_stdout.write(json.dumps(response, ensure_ascii=False, allow_nan=False))
+    original_stdout.write(json.dumps(response, ensure_ascii=True, allow_nan=False))
     return 0
 
 

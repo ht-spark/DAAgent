@@ -6,25 +6,33 @@ import sys
 import pytest
 
 from data_analysis.tools.project_edit_tools import (
+    _environment_command,
     create_workspace_file,
     edit_workspace_file,
     run_project_command,
+    run_project_command_tool,
 )
 from data_analysis.tools.registry import create_agent_tool_registry
 from data_analysis.tools.workspace_tools import WorkspacePathError
 
 
-def test_project_change_tools_require_explicit_opt_in(tmp_path):
+def test_project_change_tools_are_available_when_project_is_selected(tmp_path):
     output = tmp_path / "outputs"
-    output.mkdir()
-    names = {tool.name for tool in create_agent_tool_registry([], output, workspace_root=tmp_path).specs()}
-    assert "edit_workspace_file" not in names
-    enabled = create_agent_tool_registry(
-        [], output, workspace_root=tmp_path, enable_project_changes=True,
-        python_executable=sys.executable,
+    registry = create_agent_tool_registry(
+        [], output, workspace_root=tmp_path, python_executable=sys.executable,
     )
-    assert {"create_workspace_file", "edit_workspace_file", "run_project_command"} <= {
-        tool.name for tool in enabled.specs()
+    names = {tool.name for tool in registry.specs()}
+    assert {"create_workspace_file", "edit_workspace_file", "run_project_command"} <= names
+    target = tmp_path / "existing.txt"
+    target.write_text("before", encoding="utf-8")
+    registry.resolve("edit_workspace_file").invoke({
+        "relative_path": "existing.txt", "old_text": "before", "new_text": "after",
+    })
+    assert target.read_text(encoding="utf-8") == "after"
+    assert not output.exists()
+    unbound = create_agent_tool_registry([], output)
+    assert not {"create_workspace_file", "edit_workspace_file", "run_project_command"} & {
+        tool.name for tool in unbound.specs()
     }
 
 
@@ -49,6 +57,24 @@ def test_edit_rejects_ambiguous_and_outside_paths(tmp_path):
         create_workspace_file(tmp_path, ".env", "SECRET=x")
 
 
+def test_create_and_edit_accept_absolute_path_inside_project(tmp_path):
+    target = tmp_path / "nested" / "result.md"
+    created = create_workspace_file(tmp_path, str(target), "before\n")
+    edited = edit_workspace_file(tmp_path, str(target), "before", "after")
+    assert created["created"] is True
+    assert "+after" in edited["diff"]
+    assert target.read_text(encoding="utf-8") == "after\n"
+
+
+def test_project_file_tools_reject_absolute_path_outside_project(tmp_path):
+    outside = tmp_path.parent / "outside.md"
+    with pytest.raises(WorkspacePathError, match="超出当前项目目录"):
+        create_workspace_file(tmp_path, str(outside), "not allowed")
+    with pytest.raises(WorkspacePathError, match="超出当前项目目录"):
+        edit_workspace_file(tmp_path, str(outside), "before", "after")
+    assert not outside.exists()
+
+
 def test_command_rejects_shell_and_returns_failure_to_model(tmp_path):
     with pytest.raises(ValueError, match="只允许"):
         run_project_command(tmp_path, "powershell Remove-Item *", sys.executable)
@@ -64,3 +90,38 @@ def test_git_command_rejects_parent_repository(tmp_path):
     nested.mkdir()
     with pytest.raises(ValueError, match="仓库根目录"):
         run_project_command(nested, "git status", sys.executable)
+
+
+def test_environment_commands_target_project_and_selected_python(tmp_path, monkeypatch):
+    monkeypatch.setattr("data_analysis.tools.project_edit_tools.shutil.which", lambda name: name)
+    python = str(sys.executable)
+    assert _environment_command(tmp_path, "python -m venv .venv", python) == [
+        python, "-m", "venv", str(tmp_path / ".venv"),
+    ]
+    assert _environment_command(tmp_path, "pip install pandas", python) == [
+        python, "-m", "pip", "install", "pandas",
+    ]
+    assert _environment_command(tmp_path, "uv pip install numpy", python) == [
+        "uv", "pip", "install", "--python", python, "numpy",
+    ]
+    (tmp_path / "requirements.txt").write_text("pandas\n", encoding="utf-8")
+    assert _environment_command(tmp_path, "pip install -r requirements.txt", python) == [
+        python, "-m", "pip", "install", "-r", str(tmp_path / "requirements.txt"),
+    ]
+    assert _environment_command(tmp_path, "conda create -p env python=3.11", python) == [
+        "conda", "create", "-p", str(tmp_path / "env"), "python=3.11", "-y",
+    ]
+    (tmp_path / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
+    assert _environment_command(tmp_path, "uv sync", python) == ["uv", "sync"]
+
+
+def test_environment_commands_reject_escape_and_shell_syntax(tmp_path):
+    with pytest.raises(WorkspacePathError):
+        _environment_command(tmp_path, "python -m venv ../outside", sys.executable)
+    with pytest.raises(ValueError, match="不支持的安装参数"):
+        _environment_command(tmp_path, "pip install pandas && whoami", sys.executable)
+    with pytest.raises(WorkspacePathError, match="当前项目内"):
+        run_project_command_tool(
+            {"command": "pip install pandas", "python_environment": str(tmp_path.parent)},
+            {"workspace_root": str(tmp_path), "python_executable": sys.executable},
+        )

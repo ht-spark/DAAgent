@@ -300,7 +300,6 @@ def create_agent_tool_registry(
     knowledge_base_ids: Sequence[str] = (),
     web_search_api_key: str | None = None,
     workspace_root: str | Path | None = None,
-    enable_project_changes: bool = False,
     python_executable: str | Path | None = None,
     python_environment_source: str = "host",
     python_environment_name: str = "MMAgent",
@@ -313,7 +312,7 @@ def create_agent_tool_registry(
         vision_llm: 当前会话模型；提供时为图片附件注册识图工具。
         knowledge_base_ids: 用户为当前会话预选的知识库 ID。
         web_search_api_key: 服务端保存的 Tavily API 密钥；不会暴露给模型。
-        workspace_root: 当前项目的只读文件根目录；为空时不注册项目工具。
+        workspace_root: 当前项目的文件根目录；为空时不注册项目工具。
         python_executable: 运行 Agent 分析代码的已验证 Python 解释器。
         python_environment_source: Python 环境来源。
         python_environment_name: Python 环境显示名称。
@@ -651,22 +650,22 @@ def create_agent_tool_registry(
                 "authorized_paths": [str(path) for path in image_paths],
             },
         )
-    if workspace_root is not None and enable_project_changes:
+    if workspace_root is not None:
         change_context = {
             "workspace_root": str(workspace_root),
             "python_executable": str(python_executable or ""),
         }
         project_tools = (
-            ("create_workspace_file", "在当前项目创建 UTF-8 文本或代码文件，不覆盖已有文件。",
-             {"relative_path": {"type": "string"}, "content": {"type": "string"}},
+            ("create_workspace_file", "在当前项目指定位置创建 UTF-8 文本或代码文件，不覆盖已有文件。路径可为项目相对路径或项目内绝对路径。",
+             {"relative_path": {"type": "string", "description": "项目相对路径或项目内绝对路径"}, "content": {"type": "string"}},
              ["relative_path", "content"], run_create_workspace_file),
-            ("edit_workspace_file", "精确修改已有项目文本文件，old_text 必须唯一匹配，返回 diff。",
-             {"relative_path": {"type": "string"}, "old_text": {"type": "string"},
+            ("edit_workspace_file", "精确修改已有项目文本文件，old_text 必须唯一匹配，返回 diff。路径可为项目相对路径或项目内绝对路径。",
+             {"relative_path": {"type": "string", "description": "项目相对路径或项目内绝对路径"}, "old_text": {"type": "string"},
               "new_text": {"type": "string"}},
              ["relative_path", "old_text", "new_text"], run_edit_workspace_file),
-            ("run_project_command", "执行受控 Git、测试或构建命令，返回退出码和输出。",
-             {"command": {"type": "string", "enum": ["git status", "git diff",
-                 "python -m pytest", "npm run test", "npm run build"]}},
+            ("run_project_command", "需人工逐条批准的项目命令。支持 Git 状态/差异、测试、构建，python -m venv、uv venv、conda create -p 创建项目内环境，以及 pip、uv pip、conda install、uv sync 安装依赖。命令独立运行；用 python_environment 指定后续命令的环境，不要使用无效的 shell activate。",
+             {"command": {"type": "string", "maxLength": 1000},
+              "python_environment": {"type": "string", "description": "可选，项目内已有环境目录或 Python 路径；每条命令单独指定"}},
              ["command"], run_project_command_tool),
         )
         for name, description, properties, required, handler in project_tools:

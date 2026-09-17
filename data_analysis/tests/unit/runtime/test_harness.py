@@ -168,13 +168,27 @@ def test_harness_returns_nonzero_project_command_for_rethinking(tmp_path) -> Non
     workspace.mkdir()
     registry = create_agent_tool_registry(
         [], workspace / "outputs", workspace_root=workspace,
-        enable_project_changes=True, python_executable=sys.executable,
+        python_executable=sys.executable,
     )
     observation = Harness(
-        registry, sandbox=SubprocessSandbox(working_directory=workspace)
+        registry, sandbox=SubprocessSandbox(working_directory=workspace),
+        command_approval=lambda _action: True,
     ).execute(Action(
         tool_name="run_project_command", arguments={"command": "python -m pytest"},
     ))
     assert observation.success is False
     assert observation.result["exit_code"] != 0
     assert "命令退出码" in observation.error
+
+
+def test_harness_rejects_project_command_without_approval(tmp_path) -> None:
+    registry = create_agent_tool_registry(
+        [], tmp_path / "outputs", workspace_root=tmp_path,
+        python_executable=sys.executable,
+    )
+    observation = Harness(registry).execute(Action(
+        tool_name="run_project_command", arguments={"command": "python -m pytest"},
+    ))
+    assert observation.success is False
+    assert observation.result is None
+    assert "未获人工批准" in observation.error

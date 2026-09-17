@@ -44,6 +44,17 @@ def test_execute_python_code_returns_dataframe_as_records(tmp_path) -> None:
     assert observation["result"] == [{"值": 1}, {"值": 2}]
 
 
+def test_execute_python_code_handles_surrogate_in_result(tmp_path) -> None:
+    observation = execute_python_code(
+        "value = chr(0xDCAE)\nprint(value)\nresult = {'text': value}",
+        data_paths=[],
+        output_dir=tmp_path / "output",
+    )
+
+    assert observation["stdout"] == "\udcae\n"
+    assert observation["result"] == {"text": "\udcae"}
+
+
 def test_execute_python_code_raises_actionable_error(tmp_path) -> None:
     with pytest.raises(CodeExecutionError, match="ZeroDivisionError"):
         execute_python_code(

@@ -34,7 +34,12 @@ export default function KnowledgeBase({
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [converting, setConverting] = useState(false)
   const [deleting, setDeleting] = useState(false)
+  // 新建知识库：用主题弹窗代替原生 prompt
+  const [createOpen, setCreateOpen] = useState(false)
+  const [createName, setCreateName] = useState('')
+  const [creating, setCreating] = useState(false)
   const fileInput = useRef<HTMLInputElement>(null)
+  const createInputRef = useRef<HTMLInputElement>(null)
   const uploading = uploadProgress !== null
   useEffect(() => {
     void getKnowledgeBases()
@@ -97,9 +102,21 @@ export default function KnowledgeBase({
     if (fileInput.current) fileInput.current.value = ''
   }, [knowledgeBaseId])
 
-  async function addKnowledgeBase() {
-    const name = window.prompt('请输入新知识库名称')?.trim()
-    if (!name) return
+  function openCreateDialog() {
+    setCreateName('')
+    setCreateOpen(true)
+  }
+
+  function closeCreateDialog() {
+    if (creating) return
+    setCreateOpen(false)
+    setCreateName('')
+  }
+
+  async function submitCreateKnowledgeBase() {
+    const name = createName.trim()
+    if (!name || creating) return
+    setCreating(true)
     setError('')
     try {
       const created = await createKnowledgeBase(name)
@@ -107,10 +124,32 @@ export default function KnowledgeBase({
       setKnowledgeBaseId(created.id)
       onKnowledgeBaseIdChange?.(created.id)
       setDocuments([])
+      setCreateOpen(false)
+      setCreateName('')
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : '创建知识库失败。')
+    } finally {
+      setCreating(false)
     }
   }
+
+  useEffect(() => {
+    if (!createOpen) return
+    const previous = document.activeElement
+    const timer = window.setTimeout(() => createInputRef.current?.focus(), 20)
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        closeCreateDialog()
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => {
+      window.clearTimeout(timer)
+      window.removeEventListener('keydown', onKeyDown)
+      if (previous instanceof HTMLElement) previous.focus()
+    }
+  }, [createOpen, creating])
 
   function handleDrop(event: React.DragEvent) {
     event.preventDefault()
@@ -216,7 +255,7 @@ export default function KnowledgeBase({
               ))}
             </select>
           </label>
-          <button type="button" className="api-btn" onClick={() => void addKnowledgeBase()}>
+          <button type="button" className="api-btn" onClick={openCreateDialog}>
             新建知识库
           </button>
         </div>
@@ -423,6 +462,79 @@ export default function KnowledgeBase({
           </div>
         </div>
       </div>
+
+      {createOpen && (
+        <div className="api-modal-mask" onClick={closeCreateDialog} role="presentation">
+          <div
+            className="api-modal kb-create-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="kb-create-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <header className="api-modal-head">
+              <div>
+                <h2 id="kb-create-title">新建知识库</h2>
+                <p className="api-modal-lead">输入一个便于识别的名称，创建后可直接上传文档。</p>
+              </div>
+              <button
+                type="button"
+                className="api-modal-close"
+                onClick={closeCreateDialog}
+                aria-label="关闭"
+                disabled={creating}
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true">
+                  <path d="M6 6l12 12M18 6L6 18" strokeLinecap="round" />
+                </svg>
+              </button>
+            </header>
+
+            <form
+              className="api-modal-body"
+              onSubmit={(event) => {
+                event.preventDefault()
+                void submitCreateKnowledgeBase()
+              }}
+            >
+              <div className="field">
+                <label htmlFor="kb-create-name">知识库名称</label>
+                <input
+                  ref={createInputRef}
+                  id="kb-create-name"
+                  type="text"
+                  value={createName}
+                  onChange={(event) => setCreateName(event.target.value)}
+                  placeholder="例如：产品说明书 / 行业研报"
+                  maxLength={64}
+                  disabled={creating}
+                  autoComplete="off"
+                />
+                <p className="api-field-hint">名称仅用于本地识别，不影响检索效果。</p>
+              </div>
+            </form>
+
+            <footer className="api-modal-foot">
+              <button
+                type="button"
+                className="api-cancel"
+                onClick={closeCreateDialog}
+                disabled={creating}
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                className="api-save"
+                onClick={() => void submitCreateKnowledgeBase()}
+                disabled={creating || !createName.trim()}
+              >
+                {creating ? '创建中…' : '创建'}
+              </button>
+            </footer>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

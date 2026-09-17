@@ -84,7 +84,7 @@ def execute_python_code(
     try:
         completed = subprocess.run(
             [str(executable), "-I", str(_RUNNER_PATH)],
-            input=json.dumps(request, ensure_ascii=False),
+            input=json.dumps(request, ensure_ascii=True),
             capture_output=True,
             text=True,
             encoding="utf-8",

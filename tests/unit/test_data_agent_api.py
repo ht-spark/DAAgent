@@ -12,6 +12,7 @@ from fastapi import HTTPException, UploadFile
 from data_analysis.agent.loop import Action, Finish
 from data_analysis.agent.state import Observation
 from server import main
+from server.schemas import AgentCommandDecisionBody
 from scr.math_modeling_agent import llm
 
 
@@ -24,6 +25,30 @@ def test_agent_timeout_configuration_is_separated():
     assert main.AGENT_LLM_TIMEOUT_SECONDS == 180
     assert main.AGENT_TOOL_TIMEOUT_SECONDS == 2 * 60 * 60
     assert main.AGENT_RUN_TIMEOUT_SECONDS == 3 * 60 * 60
+
+
+@pytest.mark.asyncio
+async def test_agent_command_decision_requires_pending_request():
+    with pytest.raises(HTTPException) as exc:
+        await main.decide_agent_command_endpoint(
+            "missing", AgentCommandDecisionBody(approved=True),
+        )
+    assert exc.value.status_code == 409
+
+    decision = asyncio.get_running_loop().create_future()
+    main._pending_agent_commands["test-request"] = decision
+    try:
+        result = await main.decide_agent_command_endpoint(
+            "test-request", AgentCommandDecisionBody(approved=False),
+        )
+        assert result == {"accepted": True}
+        assert await decision is False
+        with pytest.raises(HTTPException):
+            await main.decide_agent_command_endpoint(
+                "test-request", AgentCommandDecisionBody(approved=True),
+            )
+    finally:
+        main._pending_agent_commands.pop("test-request", None)
 
 
 def test_agent_uploads_are_saved_under_session_run_input_directory(monkeypatch, tmp_path):

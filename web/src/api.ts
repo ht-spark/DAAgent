@@ -433,6 +433,25 @@ export type AgentTraceEvent = {
   details?: string
   /** search_knowledge_base 命中的来源标注 */
   sources?: KnowledgeSourceCitation[]
+} | {
+  type: 'agent_command_approval_required'
+  approval_id: string
+  command: string
+  python_environment?: string | null
+  workspace_root: string
+} | {
+  type: 'agent_command_approval_decision'
+  approval_id: string
+  approved: boolean
+}
+
+export async function decideAgentCommand(approvalId: string, approved: boolean): Promise<void> {
+  const res = await fetch(`/api/agent/commands/${encodeURIComponent(approvalId)}/decision`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ approved }),
+  })
+  if (!res.ok) throw new Error(await extractDetail(res, '提交命令审批失败'))
 }
 
 const AGENT_REQUEST_TIMEOUT_MS = 3 * 60 * 60 * 1000 + 60 * 1000
@@ -445,6 +464,7 @@ export async function streamDataAgentMessage(
   handlers: {
     onStarted: (runId: string, files: string[]) => void
     onTrace: (event: AgentTraceEvent) => void
+    onApprovalRequired: (event: Extract<AgentTraceEvent, { type: 'agent_command_approval_required' }>) => Promise<void>
     onToken: (content: string) => void
     onDone: (
       discussionId: string,
@@ -456,7 +476,6 @@ export async function streamDataAgentMessage(
   configId?: string | null,
   knowledgeBaseIds?: string[],
   projectId?: string | null,
-  enableProjectChanges = false,
 ): Promise<void> {
   const form = new FormData()
   form.append('message', message)
@@ -465,7 +484,6 @@ export async function streamDataAgentMessage(
   if (configId) form.append('config_id', configId)
   knowledgeBaseIds?.forEach((id) => form.append('knowledge_base_ids', id))
   if (projectId) form.append('project_id', projectId)
-  if (enableProjectChanges) form.append('enable_project_changes', 'true')
   files.forEach((file) => form.append('files', file))
 
   let res: Response
@@ -508,8 +526,12 @@ export async function streamDataAgentMessage(
         handlers.onStarted(event.run_id, event.files ?? [])
         handlers.onTrace(event as AgentTraceEvent)
       }
-      if (event.type === 'agent_action' || event.type === 'agent_reasoning' || event.type === 'agent_observation') {
+      if (event.type === 'agent_action' || event.type === 'agent_reasoning' || event.type === 'agent_observation'
+        || event.type === 'agent_command_approval_required' || event.type === 'agent_command_approval_decision') {
         handlers.onTrace(event as AgentTraceEvent)
+      }
+      if (event.type === 'agent_command_approval_required') {
+        await handlers.onApprovalRequired(event as Extract<AgentTraceEvent, { type: 'agent_command_approval_required' }>)
       }
       if (event.type === 'token' && event.content) handlers.onToken(event.content)
       if (event.type === 'error') throw new Error(event.detail ?? '数据 Agent 运行失败。')

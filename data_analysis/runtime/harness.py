@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 
 from ..agent.loop import Action
 from ..agent.state import Observation
@@ -19,15 +20,18 @@ class Harness:
         self,
         registry: ToolRegistry,
         sandbox: SubprocessSandbox | None = None,
+        command_approval: Callable[[Action], bool] | None = None,
     ) -> None:
         """初始化执行框架。
 
         Args:
             registry: 当前运行可用的工具注册表。
             sandbox: subprocess 沙箱；缺省时创建默认实例。
+            command_approval: 项目命令的一次性人工批准检查。
         """
         self._registry = registry
         self._sandbox = sandbox or SubprocessSandbox()
+        self._command_approval = command_approval
 
     def execute(self, action: Action) -> Observation:
         """执行一个 Action 并始终转换为标准 Observation。
@@ -39,6 +43,15 @@ class Harness:
             包含结果、错误与耗时的标准化 Observation。
         """
         started_at = time.monotonic()
+        if action.tool_name == "run_project_command" and (
+            self._command_approval is None or not self._command_approval(action)
+        ):
+            return Observation(
+                tool_name=action.tool_name,
+                success=False,
+                error="项目命令未获人工批准，未执行",
+                duration_ms=_elapsed_ms(started_at),
+            )
         try:
             tool = self._registry.resolve(action.tool_name)
             if tool.run_in_process:

@@ -90,6 +90,7 @@ from scr.math_modeling_agent.llm import (
     create_llm,
 )
 from server.schemas import (
+    AgentCommandDecisionBody,
     BudgetConfirmBody,
     BrainstormDiscussion,
     BrainstormDiscussionSummary,
@@ -119,9 +120,11 @@ WEB_DIST = PROJECT_ROOT / "web" / "dist"
 API_SETTINGS_PATH = Path(__file__).resolve().parent / "api_settings.json"
 AGENT_TOOL_TIMEOUT_SECONDS = 2 * 60 * 60          # Agent 单次工具执行超时时间（2 小时）
 AGENT_RUN_TIMEOUT_SECONDS = 3 * 60 * 60           # Agent 整轮运行硬超时时间（3 小时）
+AGENT_COMMAND_APPROVAL_TIMEOUT_SECONDS = 300      # 单条项目命令等待人工批准的上限
+_pending_agent_commands: dict[str, asyncio.Future[bool]] = {}
 MAX_AGENT_ATTACHMENTS = 10                        # 数据 Agent 单次最多接收的附件数
 MAX_AGENT_ATTACHMENT_BYTES = 100 * 1024 * 1024    # 数据 Agent 单附件大小上限（20MB）
-MAX_AGENT_PREVIEW_TEXT_BYTES = 2 * 1024 * 1024   # 文本预览最多读取 2 MB
+MAX_AGENT_PREVIEW_TEXT_BYTES = 2 * 1024 * 1024    # 文本预览最多读取 2 MB
 MAX_AGENT_PREVIEW_ROWS = 200                      # 表格预览最多展示 200 行
 MAX_AGENT_PREVIEW_COLUMNS = 40                    # 表格预览最多展示 40 列
 MAX_AGENT_PREVIEW_SHEETS = 8                      # 工作簿预览最多展示 8 个工作表
@@ -1273,6 +1276,18 @@ def download_legacy_agent_artifact(run_id: str, file_path: str) -> FileResponse:
     return FileResponse(target, filename=target.name)
 
 
+@app.post("/api/agent/commands/{approval_id}/decision")
+async def decide_agent_command_endpoint(
+    approval_id: str, body: AgentCommandDecisionBody,
+) -> dict[str, bool]:
+    """仅对当前待审的一条项目命令提交一次批准或拒绝。"""
+    decision = _pending_agent_commands.get(approval_id)
+    if decision is None or decision.done():
+        raise HTTPException(status_code=409, detail="该命令已不再等待批准")
+    decision.set_result(body.approved)
+    return {"accepted": True}
+
+
 @app.post("/api/agent/chat/stream")
 @app.post("/api/agent/profile/stream", include_in_schema=False)
 async def agent_profile_stream_endpoint(
@@ -1284,7 +1299,6 @@ async def agent_profile_stream_endpoint(
     knowledge_base_id: str | None = Form(None),
     knowledge_base_ids: list[str] | None = Form(None),
     project_id: str | None = Form(None),
-    enable_project_changes: bool = Form(False),
 ) -> StreamingResponse:
     """启动自主决策 Agent，并流式返回回答及工具运行轨迹。"""
     message = message.strip() or "请对上传的数据生成基础画像"
@@ -1318,8 +1332,6 @@ async def agent_profile_stream_endpoint(
     except ProjectWorkspaceError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     workspace_root = Path(str(project["root_path"])) if project else None
-    if enable_project_changes and workspace_root is None:
-        raise HTTPException(status_code=400, detail="请先选择项目，再开启文件编辑与终端")
     session_entries = stored_session.get("messages", []) if stored_session else []
     rolling_context = await asyncio.to_thread(
         compile_rolling_context,
@@ -1347,7 +1359,6 @@ async def agent_profile_stream_endpoint(
         for item in rolling_context.recent_messages
     ]
     output_dir = _agent_output_root(active_discussion_id, workspace_root)
-    output_dir.mkdir(parents=True, exist_ok=True)
     try:
         python_environment = (
             resolve_project_python(project)
@@ -1370,7 +1381,6 @@ async def agent_profile_stream_endpoint(
         knowledge_base_ids=selected_base_ids,
         web_search_api_key=tavily_api_key,
         workspace_root=workspace_root,
-        enable_project_changes=enable_project_changes,
         python_executable=python_environment.executable,
         python_environment_source=python_environment.source,
         python_environment_name=python_environment.name,
@@ -1391,12 +1401,23 @@ async def agent_profile_stream_endpoint(
         max_iterations=30,
         decision_retries=5,
     )
+    approved_command_actions: set[int] = set()
+
+    def consume_command_approval(action: Action) -> bool:
+        """只允许已批准的同一条命令执行一次。"""
+        key = id(action)
+        if key not in approved_command_actions:
+            return False
+        approved_command_actions.remove(key)
+        return True
+
     harness = Harness(
         registry,
         sandbox=SubprocessSandbox(
             timeout_seconds=AGENT_TOOL_TIMEOUT_SECONDS,
             working_directory=workspace_root or PROJECT_ROOT,
         ),
+        command_approval=consume_command_approval,
     )
 
     async def event_stream():
@@ -1424,6 +1445,38 @@ async def agent_profile_stream_endpoint(
                         break
                     payload = _agent_event_payload(event)
                     trace.append(payload)
+                    if isinstance(event, Action) and event.tool_name == "run_project_command":
+                        approval_id = uuid.uuid4().hex
+                        decision = asyncio.get_running_loop().create_future()
+                        _pending_agent_commands[approval_id] = decision
+                        request_payload = {
+                            "type": "agent_command_approval_required",
+                            "approval_id": approval_id,
+                            "command": str(event.arguments.get("command", "")),
+                            "python_environment": event.arguments.get("python_environment"),
+                            "workspace_root": str(workspace_root),
+                        }
+                        trace.append(request_payload)
+                        yield json.dumps(payload, ensure_ascii=False) + "\n"
+                        yield json.dumps(request_payload, ensure_ascii=False) + "\n"
+                        try:
+                            approved = await asyncio.wait_for(
+                                decision, AGENT_COMMAND_APPROVAL_TIMEOUT_SECONDS,
+                            )
+                        except TimeoutError:
+                            approved = False
+                        finally:
+                            _pending_agent_commands.pop(approval_id, None)
+                        if approved:
+                            approved_command_actions.add(id(event))
+                        decision_payload = {
+                            "type": "agent_command_approval_decision",
+                            "approval_id": approval_id,
+                            "approved": approved,
+                        }
+                        trace.append(decision_payload)
+                        yield json.dumps(decision_payload, ensure_ascii=False) + "\n"
+                        continue
                     if isinstance(event, Observation):
                         knowledge_sources = _merge_knowledge_sources(
                             knowledge_sources,
