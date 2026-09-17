@@ -125,3 +125,18 @@ def test_environment_commands_reject_escape_and_shell_syntax(tmp_path):
             {"command": "pip install pandas", "python_environment": str(tmp_path.parent)},
             {"workspace_root": str(tmp_path), "python_executable": sys.executable},
         )
+
+
+def test_missing_project_environment_only_allows_bootstrap_command(tmp_path):
+    context = {
+        "workspace_root": str(tmp_path),
+        "python_executable": sys.executable,
+        "python_environment_source": "host",
+    }
+    with pytest.raises(ValueError, match="当前项目未发现 Python 环境"):
+        run_project_command_tool({"command": "pip install pandas"}, context)
+    with pytest.raises(ValueError, match="当前项目未发现 Python 环境"):
+        run_project_command_tool({"command": "python -m pytest"}, context)
+    result = run_project_command_tool({"command": "python -m venv .venv"}, context)
+    assert result["exit_code"] == 0
+    assert (tmp_path / ".venv" / "pyvenv.cfg").is_file()

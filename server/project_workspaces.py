@@ -89,3 +89,96 @@ def load_project_context(root_path: str | Path) -> str | None:
             sections.append(f"## {name}\n{excerpt}")
             remaining -= len(excerpt)
     return "\n\n".join(sections) or None
+
+
+# 项目文件树：跳过体积大、无浏览价值的目录
+FILE_TREE_SKIP_NAMES = {
+    ".git",
+    ".hg",
+    ".svn",
+    ".venv",
+    "venv",
+    "node_modules",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".tox",
+    ".eggs",
+    "dist",
+    "build",
+    ".idea",
+    ".vscode",
+}
+FILE_TREE_MAX_DEPTH = 5
+FILE_TREE_MAX_ENTRIES_PER_DIR = 400
+FILE_TREE_MAX_TOTAL_NODES = 3000
+
+
+def list_project_file_tree(project_id: str) -> dict[str, Any]:
+    """列出项目工作区文件树（仅名称与结构，不返回文件内容）。"""
+    project = require_project(project_id)
+    root = Path(project["root_path"])
+    total = 0
+
+    def walk(directory: Path, rel_prefix: str, depth: int) -> list[dict[str, Any]]:
+        nonlocal total
+        nodes: list[dict[str, Any]] = []
+        if depth > FILE_TREE_MAX_DEPTH or total >= FILE_TREE_MAX_TOTAL_NODES:
+            return nodes
+        try:
+            entries = sorted(
+                directory.iterdir(),
+                key=lambda item: (not item.is_dir(), item.name.casefold()),
+            )
+        except OSError:
+            return nodes
+
+        count = 0
+        for entry in entries:
+            if total >= FILE_TREE_MAX_TOTAL_NODES or count >= FILE_TREE_MAX_ENTRIES_PER_DIR:
+                break
+            name = entry.name
+            if name in FILE_TREE_SKIP_NAMES:
+                continue
+            rel_path = f"{rel_prefix}/{name}" if rel_prefix else name
+            try:
+                is_dir = entry.is_dir()
+                is_file = entry.is_file()
+            except OSError:
+                continue
+            if not is_dir and not is_file:
+                continue
+            total += 1
+            count += 1
+            if is_dir:
+                children = walk(entry, rel_path, depth + 1)
+                nodes.append(
+                    {
+                        "name": name,
+                        "path": rel_path,
+                        "type": "dir",
+                        "children": children,
+                    }
+                )
+            else:
+                try:
+                    size_bytes = entry.stat().st_size
+                except OSError:
+                    size_bytes = 0
+                nodes.append(
+                    {
+                        "name": name,
+                        "path": rel_path,
+                        "type": "file",
+                        "size_bytes": size_bytes,
+                    }
+                )
+        return nodes
+
+    return {
+        "project_id": project_id,
+        "title": project.get("title") or root.name,
+        "root_path": str(root),
+        "nodes": walk(root, "", 1),
+    }

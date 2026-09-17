@@ -252,6 +252,17 @@ def run_project_command_tool(arguments: dict[str, Any], context: dict[str, Any])
         raise ValueError("run_project_command 参数无效")
     executable = context["python_executable"]
     requested_environment = arguments.get("python_environment")
+    command = arguments["command"]
+    if context.get("python_environment_source") == "host" and requested_environment is None:
+        bootstrap = (
+            command in {"git status", "git diff", "npm run test", "npm run build", "uv sync", "uv venv"}
+            or command.startswith(("python -m venv ", "uv venv ", "conda create -p "))
+        )
+        if not bootstrap:
+            raise ValueError(
+                "当前项目未发现 Python 环境；不能使用 Agent 宿主环境运行该命令。"
+                "请先创建项目环境，或指定项目内的 python_environment。"
+            )
     if requested_environment is not None:
         if not isinstance(requested_environment, str) or not requested_environment.strip():
             raise ValueError("python_environment 必须是项目内环境路径")

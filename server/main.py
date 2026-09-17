@@ -41,6 +41,7 @@ from server.files import list_figures, resolve_artifact
 from server.project_workspaces import (
     ProjectWorkspaceError,
     create_project as register_project,
+    list_project_file_tree,
     load_project_context,
     require_project,
     resolve_project_python,
@@ -310,6 +311,33 @@ async def delete_project_endpoint(project_id: str) -> dict[str, bool]:
     if not deleted:
         raise HTTPException(status_code=404, detail="项目不存在")
     return {"deleted": True}
+
+
+@app.get("/api/projects/{project_id}/files/tree")
+async def list_project_files_tree_endpoint(project_id: str) -> dict[str, object]:
+    """返回项目工作区文件树（仅结构，不含文件内容）。"""
+    try:
+        tree = await asyncio.to_thread(list_project_file_tree, project_id)
+    except ProjectWorkspaceError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return tree
+
+
+@app.post("/api/projects/{project_id}/open-folder")
+async def open_project_folder_endpoint(project_id: str) -> dict[str, bool]:
+    """在本机文件管理器中打开项目根目录。"""
+    try:
+        project = await asyncio.to_thread(require_project, project_id)
+    except ProjectWorkspaceError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    target = Path(str(project["root_path"]))
+    if not target.is_dir():
+        raise HTTPException(status_code=404, detail="项目文件夹不存在")
+    try:
+        _open_local_folder(target)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return {"opened": True}
 
 
 def _open_native_folder_dialog(initial_dir: str | None = None) -> str | None:
@@ -1394,10 +1422,18 @@ async def agent_profile_stream_endpoint(
         project_id=str(project["id"]) if project else None,
         messages=history,
     )
+    system_prompt = _load_agent_system_prompt(workspace_root)
+    if workspace_root is not None and python_environment.source == "host":
+        system_prompt += (
+            "\n\n当前项目未扫描到 Python 环境。Agent 自身的 Python 仅可用于创建项目环境，"
+            "不能代表当前项目环境，也不能默认用于 execute_python 或项目依赖安装。"
+            "若已确认项目中有环境目录（包括项目根目录本身），请显式传入"
+            " python_environment；否则先创建环境或向用户说明。"
+        )
     loop = AgentLoop(
         llm,
         registry.specs(),
-        _load_agent_system_prompt(workspace_root),
+        system_prompt,
         max_iterations=30,
         decision_retries=5,
     )

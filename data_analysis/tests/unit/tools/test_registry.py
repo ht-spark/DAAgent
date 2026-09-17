@@ -391,6 +391,16 @@ def test_agent_registry_accepts_user_selected_python_environment(tmp_path) -> No
     assert result["runtime"]["name"]
 
 
+def test_bound_project_without_environment_rejects_host_python(tmp_path) -> None:
+    tool = create_agent_tool_registry(
+        [], tmp_path / "output", workspace_root=tmp_path,
+        python_executable=sys.executable, python_environment_source="host",
+    ).resolve("execute_python")
+
+    with pytest.raises(ToolArgumentsError, match="当前项目未发现 Python 环境"):
+        tool.invoke({"code": "result = 1"})
+
+
 def test_agent_registry_writes_artifact(tmp_path) -> None:
     output_dir = tmp_path / "output"
     tool = create_agent_tool_registry([], output_dir).resolve("write_artifact")

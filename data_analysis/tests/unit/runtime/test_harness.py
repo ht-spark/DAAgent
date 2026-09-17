@@ -168,7 +168,7 @@ def test_harness_returns_nonzero_project_command_for_rethinking(tmp_path) -> Non
     workspace.mkdir()
     registry = create_agent_tool_registry(
         [], workspace / "outputs", workspace_root=workspace,
-        python_executable=sys.executable,
+        python_executable=sys.executable, python_environment_source="project",
     )
     observation = Harness(
         registry, sandbox=SubprocessSandbox(working_directory=workspace),

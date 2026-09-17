@@ -356,6 +356,34 @@ export async function deleteProject(projectId: string): Promise<void> {
   if (!res.ok) throw new Error(await extractDetail(res, '移除项目失败'))
 }
 
+export type ProjectFileNode = {
+  name: string
+  path: string
+  type: 'file' | 'dir'
+  size_bytes?: number
+  children?: ProjectFileNode[]
+}
+
+export type ProjectFileTree = {
+  project_id: string
+  title: string
+  root_path: string
+  nodes: ProjectFileNode[]
+}
+
+export async function fetchProjectFileTree(projectId: string): Promise<ProjectFileTree> {
+  const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/files/tree`)
+  if (!res.ok) throw new Error(await extractDetail(res, '获取项目文件树失败'))
+  return res.json()
+}
+
+export async function openProjectFolder(projectId: string): Promise<void> {
+  const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/open-folder`, {
+    method: 'POST',
+  })
+  if (!res.ok) throw new Error(await extractDetail(res, '无法打开项目文件夹'))
+}
+
 /** 打开系统文件夹选择框；用户取消时返回 null。 */
 export async function selectSystemFolder(): Promise<string | null> {
   const res = await fetch('/api/system/select-folder', { method: 'POST' })

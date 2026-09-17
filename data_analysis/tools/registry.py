@@ -654,6 +654,7 @@ def create_agent_tool_registry(
         change_context = {
             "workspace_root": str(workspace_root),
             "python_executable": str(python_executable or ""),
+            "python_environment_source": python_environment_source,
         }
         project_tools = (
             ("create_workspace_file", "在当前项目指定位置创建 UTF-8 文本或代码文件，不覆盖已有文件。路径可为项目相对路径或项目内绝对路径。",
@@ -807,6 +808,11 @@ def _run_python_code(
     selected_source = str(context.get("python_environment_source") or "host")
     selected_name = str(context.get("python_environment_name") or "MMAgent")
     requested_environment = arguments.get("python_environment")
+    if context.get("workspace_root") and selected_source == "host" and requested_environment is None:
+        raise ToolArgumentsError(
+            "当前项目未发现 Python 环境；不能使用 Agent 宿主环境执行代码。"
+            "请先创建项目环境，或明确指定已存在的 python_environment。"
+        )
     if requested_environment is not None:
         if not isinstance(requested_environment, str) or not requested_environment.strip():
             raise ToolArgumentsError("python_environment 必须是非空路径")

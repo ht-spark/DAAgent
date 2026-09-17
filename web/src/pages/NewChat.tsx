@@ -1,18 +1,18 @@
-import { memo, useEffect, useRef, useState, type ClipboardEvent } from 'react'
-import { createPortal } from 'react-dom'
+import { memo, useEffect, useMemo, useRef, useState, type ClipboardEvent } from 'react'
 
 import {
   decideAgentCommand,
   fetchBrainstormDiscussion,
+  fetchProjectFileTree,
   getKnowledgeBases,
-  openAgentArtifactFolder,
+  openProjectFolder,
   renameBrainstormDiscussion,
   streamDataAgentMessage,
   syncApiSettingsCache,
-  type AgentArtifact,
   type AgentTraceEvent,
   type KnowledgeBaseSummary,
   type KnowledgeSourceCitation,
+  type ProjectFileNode,
 } from '../api'
 import { loadConfigs, type ApiConfig } from '../apiConfigs'
 import MarkdownContent from '../components/MarkdownContent'
@@ -82,108 +82,70 @@ function describeObservation(event: Extract<AgentTraceEvent, { type: 'agent_obse
   return `${summary.file_count ?? 0} 个文件，${summary.table_count ?? 0} 张表，${summary.row_count ?? 0} 行，${summary.column_count ?? 0} 列${missingRate}`
 }
 
-function formatArtifactSize(size: number): string {
-  if (size < 1024) return `${size} B`
-  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`
-  return `${(size / (1024 * 1024)).toFixed(1)} MB`
+/** 收集目录路径，用于「全部展开 / 全部收起」 */
+function collectDirPaths(nodes: ProjectFileNode[], acc: string[] = []): string[] {
+  for (const node of nodes) {
+    if (node.type !== 'dir') continue
+    acc.push(node.path)
+    if (node.children?.length) collectDirPaths(node.children, acc)
+  }
+  return acc
 }
 
-function artifactType(name: string): string {
-  const extension = name.split('.').pop()
-  return extension && extension !== name ? extension.toUpperCase() : 'FILE'
-}
-
-/** 产物目录树节点：按 path 分段构建，便于像资源管理器一样浏览。 */
-type ArtifactTreeNode = {
-  type: 'folder' | 'file'
-  name: string
-  path: string
-  children?: ArtifactTreeNode[]
-  artifact?: AgentArtifact
-}
-
-function buildArtifactTree(artifacts: AgentArtifact[]): ArtifactTreeNode[] {
-  const root: ArtifactTreeNode[] = []
-  const folderIndex = new Map<string, ArtifactTreeNode>()
-
-  const ensureFolder = (segments: string[]): ArtifactTreeNode[] => {
-    let siblings = root
-    let currentPath = ''
-    for (const segment of segments) {
-      currentPath = currentPath ? `${currentPath}/${segment}` : segment
-      let node = folderIndex.get(currentPath)
-      if (!node) {
-        node = { type: 'folder', name: segment, path: currentPath, children: [] }
-        folderIndex.set(currentPath, node)
-        siblings.push(node)
+function filterFileTree(nodes: ProjectFileNode[], keyword: string): ProjectFileNode[] {
+  if (!keyword) return nodes
+  const lower = keyword.trim().toLowerCase()
+  if (!lower) return nodes
+  const walk = (list: ProjectFileNode[]): ProjectFileNode[] => {
+    const result: ProjectFileNode[] = []
+    for (const node of list) {
+      const children = node.children?.length ? walk(node.children) : undefined
+      const matched = node.name.toLowerCase().includes(lower)
+        || node.path.toLowerCase().includes(lower)
+      if (matched || (children && children.length)) {
+        result.push({
+          ...node,
+          children: node.type === 'dir' ? (children ?? []) : undefined,
+        })
       }
-      siblings = node.children!
     }
-    return siblings
+    return result
   }
-
-  for (const artifact of artifacts) {
-    const parts = artifact.path.split('/').filter(Boolean)
-    if (!parts.length) continue
-    const fileName = parts[parts.length - 1]
-    const folderSegments = parts.slice(0, -1)
-    const siblings = ensureFolder(folderSegments)
-    siblings.push({
-      type: 'file',
-      name: fileName,
-      path: artifact.path,
-      artifact,
-    })
-  }
-
-  const sortNodes = (nodes: ArtifactTreeNode[]) => {
-    nodes.sort((a, b) => {
-      if (a.type !== b.type) return a.type === 'folder' ? -1 : 1
-      return a.name.localeCompare(b.name, 'zh-CN')
-    })
-    for (const node of nodes) {
-      if (node.children) sortNodes(node.children)
-    }
-  }
-  sortNodes(root)
-  return root
+  return walk(nodes)
 }
 
-const ArtifactTree = memo(function ArtifactTree({
+const ProjectFileTree = memo(function ProjectFileTree({
   nodes,
   depth = 0,
-  onPreview,
+  expanded,
+  onToggle,
+  selectedPath,
+  onSelect,
 }: {
-  nodes: ArtifactTreeNode[]
+  nodes: ProjectFileNode[]
   depth?: number
-  onPreview: (artifact: AgentArtifact) => void
+  expanded: Set<string>
+  onToggle: (path: string) => void
+  selectedPath: string | null
+  onSelect: (path: string) => void
 }) {
-  const [collapsedFolders, setCollapsedFolders] = useState<Set<string>>(new Set())
-
-  function toggleFolder(path: string) {
-    setCollapsedFolders((current) => {
-      const next = new Set(current)
-      if (next.has(path)) next.delete(path)
-      else next.add(path)
-      return next
-    })
-  }
-
+  if (!nodes.length) return null
   return (
-    <ul className="artifact-tree" style={{ '--tree-depth': depth } as React.CSSProperties}>
+    <ul className="proj-file-tree" style={{ '--tree-depth': depth } as React.CSSProperties}>
       {nodes.map((node) => {
-        if (node.type === 'folder') {
-          const isOpen = !collapsedFolders.has(node.path)
+        if (node.type === 'dir') {
+          const isOpen = expanded.has(node.path)
           return (
-            <li key={`folder-${node.path}`} className="artifact-tree-folder">
+            <li key={`dir-${node.path}`} className="proj-file-dir">
               <button
                 type="button"
-                className="artifact-tree-row folder"
-                onClick={() => toggleFolder(node.path)}
+                className="proj-file-row folder"
+                onClick={() => onToggle(node.path)}
                 aria-expanded={isOpen}
+                title={node.path}
               >
                 <svg
-                  className={`artifact-tree-chevron ${isOpen ? 'is-open' : ''}`}
+                  className={`proj-file-chevron ${isOpen ? 'is-open' : ''}`}
                   viewBox="0 0 24 24"
                   fill="none"
                   stroke="currentColor"
@@ -192,33 +154,39 @@ const ArtifactTree = memo(function ArtifactTree({
                 >
                   <path d="M9 6l6 6-6 6" strokeLinecap="round" strokeLinejoin="round" />
                 </svg>
-                <svg className="artifact-tree-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" aria-hidden="true">
+                <svg className="proj-file-icon folder" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" aria-hidden="true">
                   <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z" />
                 </svg>
-                <span className="artifact-tree-name">{node.name}</span>
+                <span className="proj-file-name">{node.name}</span>
               </button>
-              {isOpen && node.children?.length ? (
-                <ArtifactTree nodes={node.children} depth={depth + 1} onPreview={onPreview} />
+              {isOpen ? (
+                <ProjectFileTree
+                  nodes={node.children ?? []}
+                  depth={depth + 1}
+                  expanded={expanded}
+                  onToggle={onToggle}
+                  selectedPath={selectedPath}
+                  onSelect={onSelect}
+                />
               ) : null}
             </li>
           )
         }
-        const artifact = node.artifact
-        if (!artifact) return null
+        const isSelected = selectedPath === node.path
         return (
-          <li key={`file-${artifact.run_id}-${node.path}`}>
+          <li key={`file-${node.path}`}>
             <button
               type="button"
-              className="artifact-tree-row file"
-              onClick={() => onPreview(artifact)}
-              title={`${node.path} · ${formatArtifactSize(artifact.size_bytes)}`}
+              className={`proj-file-row file${isSelected ? ' is-selected' : ''}`}
+              onClick={() => onSelect(node.path)}
+              title={node.path}
             >
-              <svg className="artifact-tree-icon file" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" aria-hidden="true">
+              <span className="proj-file-chevron-spacer" aria-hidden="true" />
+              <svg className="proj-file-icon file" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" aria-hidden="true">
                 <path d="M7 3h7l5 5v13a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z" />
                 <path d="M14 3v5h5" strokeLinecap="round" strokeLinejoin="round" />
               </svg>
-              <span className="artifact-tree-name">{node.name}</span>
-              <small className="artifact-tree-size">{formatArtifactSize(artifact.size_bytes)}</small>
+              <span className="proj-file-name">{node.name}</span>
             </button>
           </li>
         )
@@ -227,226 +195,209 @@ const ArtifactTree = memo(function ArtifactTree({
   )
 })
 
-type ArtifactPreviewKind = 'image' | 'pdf' | 'markdown' | 'code' | 'docx' | 'xlsx' | 'unsupported'
-
-type ArtifactPreviewData = {
-  kind: 'docx'
-  paragraphs: string[]
-  tables: string[][][]
-  truncated: boolean
-} | {
-  kind: 'xlsx'
-  sheets: Array<{ name: string; rows: Array<Array<string | number | boolean | null>> }>
-  truncated: boolean
-}
-
-const IMAGE_PREVIEW_EXTENSIONS = new Set(['bmp', 'gif', 'jpeg', 'jpg', 'png', 'svg', 'tif', 'tiff', 'webp'])
-const CODE_PREVIEW_EXTENSIONS = new Set([
-  'bat', 'c', 'cc', 'cpp', 'cs', 'css', 'csv', 'go', 'h', 'hpp', 'htm', 'html',
-  'ini', 'ipynb', 'java', 'js', 'json', 'jsonl', 'jsx', 'log', 'ndjson', 'ps1',
-  'py', 'r', 'rmd', 'rs', 'sh', 'sql', 'toml', 'ts', 'tsx', 'txt', 'xml', 'yaml', 'yml',
-])
-
-function artifactExtension(name: string): string {
-  const extension = name.split('.').pop()
-  return extension && extension !== name ? extension.toLowerCase() : ''
-}
-
-function artifactPreviewKind(name: string): ArtifactPreviewKind {
-  const extension = artifactExtension(name)
-  if (IMAGE_PREVIEW_EXTENSIONS.has(extension)) return 'image'
-  if (extension === 'pdf') return 'pdf'
-  if (extension === 'md' || extension === 'markdown') return 'markdown'
-  if (extension === 'docx') return 'docx'
-  if (extension === 'xlsx') return 'xlsx'
-  if (CODE_PREVIEW_EXTENSIONS.has(extension)) return 'code'
-  return 'unsupported'
-}
-
-function artifactUrl(artifact: AgentArtifact, action: 'files' | 'previews'): string {
-  const path = artifact.path.split('/').map(encodeURIComponent).join('/')
-  return artifact.discussion_id
-    ? `/api/agent/discussions/${encodeURIComponent(artifact.discussion_id)}/${action}/${path}`
-    : `/api/agent/runs/${artifact.run_id}/${action}/${path}`
-}
-
-function resolveArtifactAssetUrl(artifact: AgentArtifact, src: string): string {
-  if (!src) return src
-  if (
-    src.startsWith('data:') ||
-    src.startsWith('blob:') ||
-    src.startsWith('/') ||
-    /^[a-z][a-z0-9+.-]*:/i.test(src)
-  ) {
-    return src
-  }
-
-  const baseDir = artifact.path.includes('/')
-    ? artifact.path.slice(0, artifact.path.lastIndexOf('/'))
-    : ''
-  const segments: string[] = []
-  for (const segment of `${baseDir}/${src}`.split('/')) {
-    if (!segment || segment === '.') continue
-    if (segment === '..') {
-      segments.pop()
-      continue
-    }
-    segments.push(segment)
-  }
-  return artifactUrl({ ...artifact, path: segments.join('/') }, 'files')
-}
-
-const ArtifactPreview = memo(function ArtifactPreview({
-  artifact,
-  onClose,
-  onOpenFolder,
+/** 项目文件浏览器：顶部按钮开关；收起时不占侧边栏 */
+function ProjectFileExplorer({
+  projectId,
+  collapsed,
+  onCollapse,
 }: {
-  artifact: AgentArtifact
-  onClose: () => void
-  onOpenFolder?: () => void
+  projectId: string | null
+  collapsed: boolean
+  onCollapse: () => void
 }) {
-  const kind = artifactPreviewKind(artifact.name)
-  const previewUrl = artifactUrl(artifact, 'previews')
-  const [text, setText] = useState('')
-  const [data, setData] = useState<ArtifactPreviewData | null>(null)
-  const [activeSheet, setActiveSheet] = useState(0)
-  const [loading, setLoading] = useState(!['image', 'pdf', 'unsupported'].includes(kind))
+  const [tree, setTree] = useState<{ title: string; rootPath: string; nodes: ProjectFileNode[] } | null>(null)
+  const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
-  const [truncated, setTruncated] = useState(false)
+  const [keyword, setKeyword] = useState('')
+  const [expanded, setExpanded] = useState<Set<string>>(new Set())
+  const [selectedPath, setSelectedPath] = useState<string | null>(null)
+  const [openingFolder, setOpeningFolder] = useState(false)
+  const [reloadKey, setReloadKey] = useState(0)
 
   useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') onClose()
+    if (collapsed || !projectId) {
+      setTree(null)
+      setError('')
+      return
     }
-    window.addEventListener('keydown', onKeyDown)
-    return () => window.removeEventListener('keydown', onKeyDown)
-  }, [onClose])
-
-  useEffect(() => {
-    if (kind === 'image' || kind === 'pdf' || kind === 'unsupported') return undefined
-    const controller = new AbortController()
+    let cancelled = false
     setLoading(true)
     setError('')
-    setText('')
-    setData(null)
-    setActiveSheet(0)
-    void fetch(previewUrl, { signal: controller.signal })
-      .then(async (response) => {
-        if (!response.ok) {
-          const payload = await response.json().catch(() => null) as { detail?: string } | null
-          throw new Error(payload?.detail || '预览加载失败')
-        }
-        if (kind === 'docx' || kind === 'xlsx') {
-          setData(await response.json() as ArtifactPreviewData)
-        } else {
-          setText(await response.text())
-          setTruncated(response.headers.get('X-Preview-Truncated') === 'true')
-        }
+    void fetchProjectFileTree(projectId)
+      .then((data) => {
+        if (cancelled) return
+        setTree({ title: data.title, rootPath: data.root_path, nodes: data.nodes })
+        // 默认展开第一层，便于一眼看到项目结构
+        const firstLevel = data.nodes
+          .filter((node) => node.type === 'dir')
+          .map((node) => node.path)
+        setExpanded(new Set(firstLevel))
+        setSelectedPath(null)
       })
       .catch((reason: unknown) => {
-        if (reason instanceof DOMException && reason.name === 'AbortError') return
-        setError(reason instanceof Error ? reason.message : '预览加载失败')
+        if (cancelled) return
+        setTree(null)
+        setError(reason instanceof Error ? reason.message : '无法读取项目文件树')
       })
-      .finally(() => setLoading(false))
-    return () => controller.abort()
-  }, [kind, previewUrl])
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [projectId, collapsed, reloadKey])
 
-  const sheet = data?.kind === 'xlsx' ? data.sheets[activeSheet] : null
-  const pathSegments = artifact.path.split('/').filter(Boolean)
-
-  return createPortal(
-    <div className="artifact-preview-mask" onMouseDown={onClose}>
-      <section
-        className="artifact-preview-dialog"
-        role="dialog"
-        aria-modal="true"
-        aria-label={`${artifact.name} 预览`}
-        onMouseDown={(event) => event.stopPropagation()}
-      >
-        <header className="artifact-preview-head">
-          <div>
-            <nav className="artifact-preview-crumb" aria-label="文件路径">
-              {pathSegments.map((segment, index) => (
-                <span key={`${segment}-${index}`}>
-                  {index > 0 && <i aria-hidden="true">/</i>}
-                  {segment}
-                </span>
-              ))}
-            </nav>
-            <h2>{artifact.name}</h2>
-          </div>
-          <nav aria-label="预览操作">
-            {onOpenFolder && (
-              <button type="button" onClick={onOpenFolder}>打开文件夹</button>
-            )}
-            <button type="button" onClick={onClose}>关闭</button>
-          </nav>
-        </header>
-        <div className={`artifact-preview-body kind-${kind}`}>
-          {loading && <p className="artifact-preview-state">正在加载预览…</p>}
-          {error && <p className="artifact-preview-state error">{error}</p>}
-          {!loading && !error && kind === 'image' && <img src={previewUrl} alt={artifact.name} />}
-          {!loading && !error && kind === 'pdf' && <iframe src={previewUrl} title={artifact.name} />}
-          {!loading && !error && kind === 'markdown' && (
-            <article className="artifact-preview-markdown">
-              <MarkdownContent
-                content={text}
-                transformUrl={(src) => resolveArtifactAssetUrl(artifact, src)}
-              />
-            </article>
-          )}
-          {!loading && !error && kind === 'code' && <pre><code>{text}</code></pre>}
-          {!loading && !error && data?.kind === 'docx' && (
-            <article className="artifact-preview-document">
-              {data.paragraphs.map((paragraph, index) => <p key={`${index}-${paragraph.slice(0, 24)}`}>{paragraph}</p>)}
-              {data.tables.map((table, tableIndex) => (
-                <div className="artifact-preview-table-wrap" key={`table-${tableIndex}`}>
-                  <table><tbody>{table.map((row, rowIndex) => (
-                    <tr key={`row-${rowIndex}`}>{row.map((cell, cellIndex) => (
-                      <td key={`cell-${cellIndex}`}>{cell}</td>
-                    ))}</tr>
-                  ))}</tbody></table>
-                </div>
-              ))}
-            </article>
-          )}
-          {!loading && !error && data?.kind === 'xlsx' && (
-            <div className="artifact-preview-workbook">
-              <div className="artifact-preview-tabs" role="tablist" aria-label="工作表">
-                {data.sheets.map((item, index) => (
-                  <button
-                    type="button"
-                    role="tab"
-                    aria-selected={index === activeSheet}
-                    className={index === activeSheet ? 'active' : ''}
-                    key={item.name}
-                    onClick={() => setActiveSheet(index)}
-                  >
-                    {item.name}
-                  </button>
-                ))}
-              </div>
-              {sheet && (
-                <div className="artifact-preview-table-wrap">
-                  <table><tbody>{sheet.rows.map((row, rowIndex) => (
-                    <tr key={`row-${rowIndex}`}>{row.map((cell, cellIndex) => (
-                      <td key={`cell-${cellIndex}`}>{cell === null ? '' : String(cell)}</td>
-                    ))}</tr>
-                  ))}</tbody></table>
-                </div>
-              )}
-            </div>
-          )}
-          {!loading && !error && kind === 'unsupported' && (
-            <p className="artifact-preview-state">该文件暂不支持在线预览，请下载后查看。</p>
-          )}
-          {(truncated || data?.truncated) && <p className="artifact-preview-note">文件较大，当前仅展示部分内容。</p>}
-        </div>
-      </section>
-    </div>,
-    document.body,
+  const visibleNodes = useMemo(
+    () => (tree ? filterFileTree(tree.nodes, keyword) : []),
+    [tree, keyword],
   )
-})
+
+  function toggleDir(path: string) {
+    setExpanded((current) => {
+      const next = new Set(current)
+      if (next.has(path)) next.delete(path)
+      else next.add(path)
+      return next
+    })
+  }
+
+  function expandAll() {
+    if (!tree) return
+    setExpanded(new Set(collectDirPaths(tree.nodes)))
+  }
+
+  function collapseAll() {
+    setExpanded(new Set())
+  }
+
+  async function handleOpenFolder() {
+    if (!projectId || openingFolder) return
+    setOpeningFolder(true)
+    setError('')
+    try {
+      await openProjectFolder(projectId)
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '无法打开项目文件夹')
+    } finally {
+      setOpeningFolder(false)
+    }
+  }
+
+  return (
+    <>
+      <div className="rag-sources-head proj-files-head">
+        <div>
+          <h2>项目文件</h2>
+          <p title={tree?.rootPath}>{tree?.title ?? '当前项目目录结构'}</p>
+        </div>
+        <div className="rag-sources-head-actions">
+          <button
+            type="button"
+            className="proj-file-tool"
+            onClick={() => setReloadKey((key) => key + 1)}
+            disabled={loading || !projectId}
+            title="刷新"
+            aria-label="刷新文件树"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true">
+              <path d="M20 12a8 8 0 1 1-2.3-5.7" strokeLinecap="round" />
+              <path d="M20 4v5h-5" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </button>
+          <button
+            type="button"
+            className="proj-file-tool"
+            onClick={expandAll}
+            disabled={!tree?.nodes.length}
+            title="全部展开"
+            aria-label="全部展开"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true">
+              <path d="M7 10l5 5 5-5" strokeLinecap="round" strokeLinejoin="round" />
+              <path d="M7 4h10" strokeLinecap="round" />
+              <path d="M7 20h10" strokeLinecap="round" />
+            </svg>
+          </button>
+          <button
+            type="button"
+            className="proj-file-tool"
+            onClick={collapseAll}
+            disabled={!expanded.size}
+            title="全部收起"
+            aria-label="全部收起"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true">
+              <path d="M7 14l5-5 5 5" strokeLinecap="round" strokeLinejoin="round" />
+              <path d="M7 4h10" strokeLinecap="round" />
+              <path d="M7 20h10" strokeLinecap="round" />
+            </svg>
+          </button>
+          <button
+            type="button"
+            className="proj-file-tool"
+            onClick={() => void handleOpenFolder()}
+            disabled={openingFolder || !projectId}
+            title="在文件管理器中打开"
+            aria-label="打开项目文件夹"
+          >
+            {openingFolder ? '…' : (
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true">
+                <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z" />
+              </svg>
+            )}
+          </button>
+          <button
+            type="button"
+            className="rag-sources-collapse"
+            onClick={onCollapse}
+            title="收起项目文件"
+            aria-label="收起项目文件"
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M9 18l6-6-6-6" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </button>
+        </div>
+      </div>
+
+      <div className="proj-file-search">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true">
+          <circle cx="11" cy="11" r="6" />
+          <path d="M16 16l4 4" strokeLinecap="round" />
+        </svg>
+        <input
+          type="search"
+          value={keyword}
+          onChange={(event) => setKeyword(event.target.value)}
+          placeholder="搜索文件…"
+          aria-label="搜索项目文件"
+          disabled={!tree}
+        />
+      </div>
+
+      <div className="rag-sources-list proj-file-list">
+        {error && <p className="rag-folder-error">{error}</p>}
+        {!projectId ? (
+          <p className="rag-sources-empty">请先在侧边栏选择项目文件夹。</p>
+        ) : loading ? (
+          <p className="rag-sources-empty">正在读取项目文件…</p>
+        ) : !tree?.nodes.length ? (
+          <p className="rag-sources-empty">项目文件夹为空。</p>
+        ) : !visibleNodes.length ? (
+          <p className="rag-sources-empty">没有匹配「{keyword}」的文件。</p>
+        ) : (
+          <ProjectFileTree
+            nodes={visibleNodes}
+            expanded={expanded}
+            onToggle={toggleDir}
+            selectedPath={selectedPath}
+            onSelect={setSelectedPath}
+          />
+        )}
+      </div>
+    </>
+  )
+}
 
 const AgentInlineProcess = memo(function AgentInlineProcess({
   trace,
@@ -608,11 +559,7 @@ export default function NewChat({
   const [files, setFiles] = useState<File[]>([])
   const [title, setTitle] = useState('新讨论')
   const [agentTrace, setAgentTrace] = useState<AgentTraceEvent[]>([])
-  const [agentArtifacts, setAgentArtifacts] = useState<AgentArtifact[]>([])
-  const [previewArtifact, setPreviewArtifact] = useState<AgentArtifact | null>(null)
-  const [openingArtifactFolder, setOpeningArtifactFolder] = useState(false)
-  const [artifactFolderError, setArtifactFolderError] = useState('')
-  // 进入新建任务时右侧「输出产物」默认收起，有产物后用户可手动展开
+  // 右侧项目文件面板默认收起，由顶部按钮开关
   const [sourcesCollapsed, setSourcesCollapsed] = useState(true)
   const [apiConfigs, setApiConfigs] = useState<ApiConfig[]>([])
   const [selectedConfigId, setSelectedConfigId] = useState<string>('')
@@ -652,13 +599,10 @@ export default function NewChat({
   }, [])
 
   useEffect(() => {
-    setPreviewArtifact(null)
-    setArtifactFolderError('')
     if (!discussionId) {
       setMessages([])
       setTitle('新讨论')
       setAgentTrace([])
-      setAgentArtifacts([])
       return
     }
     void fetchBrainstormDiscussion(discussionId)
@@ -678,13 +622,6 @@ export default function NewChat({
           .reverse()
           .find((message) => message.metadata?.mode === 'agent')
         setAgentTrace(latestAgentMessage?.metadata?.agent_trace ?? [])
-        const artifactsByPath = new Map<string, AgentArtifact>()
-        discussion.messages.forEach((message) => {
-          message.metadata?.agent_artifacts?.forEach((artifact) => {
-            artifactsByPath.set(artifact.path, artifact)
-          })
-        })
-        setAgentArtifacts([...artifactsByPath.values()])
         setMessages(
           discussion.messages.map((m) => ({
             role: m.role,
@@ -783,13 +720,7 @@ export default function NewChat({
                 : item,
             ))
           },
-          onDone: (savedDiscussionId, _runId, artifacts, sources) => {
-            setAgentArtifacts((current) => [
-              ...current.filter(
-                (item) => !artifacts.some((artifact) => artifact.path === item.path),
-              ),
-              ...artifacts,
-            ])
+          onDone: (savedDiscussionId, _runId, _artifacts, sources) => {
             if (sources?.length) {
               setMessages((current) => current.map(
                 (item, index) => index === current.length - 1
@@ -823,21 +754,6 @@ export default function NewChat({
     const normalizedTitle = title.trim() || '新讨论'
     setTitle(normalizedTitle)
     if (discussionId) await renameBrainstormDiscussion(discussionId, normalizedTitle)
-  }
-
-  async function openArtifactFolder() {
-    const targetDiscussionId = discussionId
-      ?? agentArtifacts.find((artifact) => artifact.discussion_id)?.discussion_id
-    if (!targetDiscussionId || openingArtifactFolder) return
-    setOpeningArtifactFolder(true)
-    setArtifactFolderError('')
-    try {
-      await openAgentArtifactFolder(targetDiscussionId)
-    } catch (error) {
-      setArtifactFolderError(error instanceof Error ? error.message : '无法打开产物文件夹')
-    } finally {
-      setOpeningArtifactFolder(false)
-    }
   }
 
   if (mode === 'modeling') {
@@ -874,6 +790,21 @@ export default function NewChat({
             onBlur={() => void saveTitle()}
             aria-label="讨论名称"
           />
+        </div>
+        <div className="rag-top-actions">
+          <button
+            type="button"
+            className={`rag-top-tool${sourcesCollapsed ? '' : ' is-active'}`}
+            onClick={() => setSourcesCollapsed((open) => !open)}
+            title={sourcesCollapsed ? '打开项目文件' : '收起项目文件'}
+            aria-label={sourcesCollapsed ? '打开项目文件' : '收起项目文件'}
+            aria-pressed={!sourcesCollapsed}
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" aria-hidden="true">
+              <rect x="3.5" y="4.5" width="17" height="15" rx="2.5" />
+              <path d="M9.5 4.5v15" strokeLinecap="round" />
+            </svg>
+          </button>
         </div>
       </header>
 
@@ -1063,80 +994,16 @@ export default function NewChat({
 
         <aside
           className={`rag-sources ${sourcesCollapsed ? 'is-collapsed' : ''}`}
-          aria-label="输出产物"
+          aria-label="项目文件"
+          aria-hidden={sourcesCollapsed}
         >
-          {sourcesCollapsed ? (
-            <button
-              type="button"
-              className="rag-sources-expand"
-              onClick={() => setSourcesCollapsed(false)}
-              title="展开输出产物"
-            >
-              <span className="rag-sources-expand-text">
-                输出产物
-              </span>
-              {agentArtifacts.length > 0 && (
-                <span className="rag-sources-expand-badge">
-                  {agentArtifacts.length}
-                </span>
-              )}
-            </button>
-          ) : (
-            <>
-              <div className="rag-sources-head">
-                <div>
-                  <h2>输出产物</h2>
-                  <p>项目文件夹中的产物，点击即可预览</p>
-                </div>
-                <div className="rag-sources-head-actions">
-                  <button
-                    type="button"
-                    className="rag-open-folder"
-                    onClick={() => void openArtifactFolder()}
-                    disabled={openingArtifactFolder || (!discussionId && !agentArtifacts.some((artifact) => artifact.discussion_id))}
-                    title="在文件管理器中打开产物文件夹"
-                  >
-                    {openingArtifactFolder ? '打开中…' : '打开文件夹'}
-                  </button>
-                  <button
-                    type="button"
-                    className="rag-sources-collapse"
-                    onClick={() => setSourcesCollapsed(true)}
-                    title="收起输出产物"
-                    aria-label="收起输出产物"
-                  >
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                      <path d="M9 18l6-6-6-6" strokeLinecap="round" strokeLinejoin="round" />
-                    </svg>
-                  </button>
-                </div>
-              </div>
-              <div className="rag-sources-list">
-                {artifactFolderError && (
-                  <p className="rag-folder-error">{artifactFolderError}</p>
-                )}
-                {agentArtifacts.length === 0 ? (
-                  <p className="rag-sources-empty">
-                    {isSubmitting ? 'Agent 正在处理，生成的文件会出现在这里。' : '当前讨论还没有生成产物文件。'}
-                  </p>
-                ) : (
-                  <ArtifactTree
-                    nodes={buildArtifactTree(agentArtifacts)}
-                    onPreview={setPreviewArtifact}
-                  />
-                )}
-              </div>
-            </>
-          )}
+          <ProjectFileExplorer
+            projectId={projectId}
+            collapsed={sourcesCollapsed}
+            onCollapse={() => setSourcesCollapsed(true)}
+          />
         </aside>
       </div>
-      {previewArtifact && (
-        <ArtifactPreview
-          artifact={previewArtifact}
-          onClose={() => setPreviewArtifact(null)}
-          onOpenFolder={() => void openArtifactFolder()}
-        />
-      )}
     </div>
   )
 }
