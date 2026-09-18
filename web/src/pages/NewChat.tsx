@@ -15,10 +15,19 @@ import {
   type ProjectFileNode,
 } from '../api'
 import { loadConfigs, type ApiConfig } from '../apiConfigs'
+import CommandApprovalDialog from '../components/CommandApprovalDialog'
 import MarkdownContent from '../components/MarkdownContent'
 import ChatModeling from './ChatModeling'
 
 type Mode = 'agent' | 'modeling'
+
+/** 待人工批准的项目命令请求（对话流内弹窗，不再使用浏览器 confirm）。 */
+type ApprovalRequest = {
+  approval_id: string
+  command: string
+  workspace_root: string
+  python_environment?: string | null
+}
 
 type Message = {
   role: 'assistant' | 'user'
@@ -569,6 +578,23 @@ export default function NewChat({
   const knowledgeBasesRef = useRef<KnowledgeBaseSummary[]>([])
   const fileInputRef = useRef<HTMLInputElement>(null)
   const listRef = useRef<HTMLDivElement>(null)
+  // 人工批准弹窗：请求内容 + 结算回调（Promise 流内等待用户点按钮）
+  const [approval, setApproval] = useState<ApprovalRequest | null>(null)
+  const approvalResolveRef = useRef<((approved: boolean) => void) | null>(null)
+
+  // 批准卡片出现在输入框上方时，保证消息区已滚到底、卡片可见
+  useEffect(() => {
+    if (!approval) return
+    const el = listRef.current
+    if (el) el.scrollTop = el.scrollHeight
+  }, [approval])
+
+  function settleApproval(approved: boolean) {
+    const resolve = approvalResolveRef.current
+    approvalResolveRef.current = null
+    setApproval(null)
+    if (resolve) resolve(approved)
+  }
 
   function applyApiConfigs(configs: ApiConfig[]) {
     setApiConfigs(configs)
@@ -706,11 +732,17 @@ export default function NewChat({
             ))
           },
           onApprovalRequired: async (event) => {
-            const environment = event.python_environment
-              ? `\n目标环境：${event.python_environment}` : ''
-            const approved = window.confirm(
-              `Agent 请求运行项目命令。请检查后决定是否批准：\n\n${event.command}\n\n项目：${event.workspace_root}${environment}\n\n此命令可能安装依赖或执行项目代码。`,
-            )
+            const approved = await new Promise<boolean>((resolve) => {
+              approvalResolveRef.current = resolve
+              setApproval({
+                approval_id: event.approval_id,
+                command: event.command,
+                workspace_root: event.workspace_root,
+                python_environment: event.python_environment,
+              })
+            })
+            approvalResolveRef.current = null
+            setApproval(null)
             await decideAgentCommand(event.approval_id, approved)
           },
           onToken: (content) => {
@@ -843,6 +875,15 @@ export default function NewChat({
           </div>
 
           <div className="rag-composer-wrap">
+            {approval ? (
+              <CommandApprovalDialog
+                command={approval.command}
+                workspaceRoot={approval.workspace_root}
+                pythonEnvironment={approval.python_environment}
+                onApprove={() => settleApproval(true)}
+                onReject={() => settleApproval(false)}
+              />
+            ) : null}
             <div className="rag-composer">
               {files.length > 0 && (
                 <div className="rag-file-chips">

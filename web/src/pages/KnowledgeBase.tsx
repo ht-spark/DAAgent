@@ -10,6 +10,7 @@ import {
   uploadKnowledgeDocument,
 } from '../api'
 import { formatKnowledgeDocumentId } from '../knowledgeDocumentId'
+import ConfirmDialog from '../components/ConfirmDialog'
 
 const PAGE_SIZE = 10
 
@@ -34,6 +35,7 @@ export default function KnowledgeBase({
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [converting, setConverting] = useState(false)
   const [deleting, setDeleting] = useState(false)
+  const [pendingDeleteDocs, setPendingDeleteDocs] = useState(false)
   // 新建知识库：用主题弹窗代替原生 prompt
   const [createOpen, setCreateOpen] = useState(false)
   const [createName, setCreateName] = useState('')
@@ -199,10 +201,18 @@ export default function KnowledgeBase({
     }
   }
 
-  async function deleteSelected() {
+  function requestDeleteSelected() {
+    if (selectedIds.size === 0 || deleting) return
+    setPendingDeleteDocs(true)
+  }
+
+  async function confirmDeleteSelected() {
     const documentIds = [...selectedIds]
-    if (documentIds.length === 0 || deleting) return
-    if (!window.confirm(`确定删除选中的 ${documentIds.length} 份知识库文件吗？`)) return
+    if (documentIds.length === 0 || deleting) {
+      setPendingDeleteDocs(false)
+      return
+    }
+    setPendingDeleteDocs(false)
 
     setDeleting(true)
     setError('')
@@ -452,7 +462,7 @@ export default function KnowledgeBase({
             <button
               className="api-btn danger"
               disabled={selectedIds.size === 0 || deleting}
-              onClick={deleteSelected}
+              onClick={requestDeleteSelected}
             >
               {deleting ? '删除中…' : `删除所选 (${selectedIds.size})`}
             </button>
@@ -535,6 +545,16 @@ export default function KnowledgeBase({
           </div>
         </div>
       )}
+
+      <ConfirmDialog
+        open={pendingDeleteDocs}
+        title="删除知识库文件"
+        description={`确定删除选中的 ${selectedIds.size} 份知识库文件吗？删除后不可恢复。`}
+        confirmLabel={deleting ? '删除中…' : '删除文件'}
+        tone="danger"
+        onConfirm={() => void confirmDeleteSelected()}
+        onCancel={() => setPendingDeleteDocs(false)}
+      />
     </div>
   )
 }

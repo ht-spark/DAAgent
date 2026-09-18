@@ -12,6 +12,7 @@ import {
   isReasoningEffort,
 } from '../apiConfigs'
 import { persistApiSettings, syncApiSettingsCache } from '../api'
+import ConfirmDialog from '../components/ConfirmDialog'
 
 const EMPTY: Omit<ApiConfig, 'id' | 'createdAt'> = {
   name: '',
@@ -53,6 +54,10 @@ export default function ApiManager() {
   )
   const persistDebounceRef = useRef<number | null>(null)
   const editorOpen = isNew || Boolean(editing.id)
+  // 编辑弹窗内联校验错误（替代浏览器 alert）
+  const [formError, setFormError] = useState('')
+  // 删除配置时的确认弹窗
+  const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null)
 
   // 弹窗打开时锁定页面滚动，关闭后恢复
   useEffect(() => {
@@ -102,16 +107,19 @@ export default function ApiManager() {
   function startNew() {
     setEditing({ ...EMPTY })
     setIsNew(true)
+    setFormError('')
   }
 
   function startEdit(c: ApiConfig) {
     setEditing({ ...c })
     setIsNew(false)
+    setFormError('')
   }
 
   function cancelEdit() {
     setEditing({ ...EMPTY })
     setIsNew(false)
+    setFormError('')
   }
 
   function save() {
@@ -127,13 +135,14 @@ export default function ApiManager() {
       : 'off'
 
     if (!Number.isInteger(maxTokens) || maxTokens < 1 || maxTokens > 200000) {
-      window.alert('最大输出 Token 必须是 1 到 200000 之间的整数。')
+      setFormError('最大输出 Token 必须是 1 到 200000 之间的整数。')
       return
     }
     if (!Number.isFinite(temperature) || temperature < 0 || temperature > 2) {
-      window.alert('Temperature 必须是 0 到 2 之间的数值。')
+      setFormError('Temperature 必须是 0 到 2 之间的数值。')
       return
     }
+    setFormError('')
 
     if (isNew) {
       const c: ApiConfig = {
@@ -161,10 +170,11 @@ export default function ApiManager() {
     cancelEdit()
   }
 
-  function remove(id: string) {
-    if (!confirm('确认删除这个配置？')) return
-    const next = configs.filter((c) => c.id !== id)
+  function confirmRemove() {
+    if (!pendingDeleteId) return
+    const next = configs.filter((c) => c.id !== pendingDeleteId)
     persist(next)
+    setPendingDeleteId(null)
   }
 
 
@@ -236,6 +246,9 @@ export default function ApiManager() {
             </header>
 
             <div className="api-modal-body">
+              {formError ? (
+                <p className="api-form-error" role="alert">{formError}</p>
+              ) : null}
               <div className="field">
                 <label htmlFor="api-name">配置名</label>
                 <input
@@ -400,7 +413,7 @@ export default function ApiManager() {
                   <button
                     type="button"
                     className="danger"
-                    onClick={() => remove(c.id)}
+                    onClick={() => setPendingDeleteId(c.id)}
                     aria-label={`删除 ${c.model || c.name || '模型'}`}
                   >
                     删除
@@ -458,6 +471,16 @@ export default function ApiManager() {
           })}
         </div>
       </section>
+      <ConfirmDialog
+        open={Boolean(pendingDeleteId)}
+        title="删除 API 配置？"
+        description="删除后该模型将从输入框下方的可选列表中移除，已保存的对话不受影响。"
+        detail={configs.find((c) => c.id === pendingDeleteId)?.name || undefined}
+        confirmLabel="删除配置"
+        tone="danger"
+        onConfirm={confirmRemove}
+        onCancel={() => setPendingDeleteId(null)}
+      />
     </div>
   )
 }

@@ -6,6 +6,7 @@ import {
   updateKnowledgeBase,
   type KnowledgeBaseSummary,
 } from '../api'
+import ConfirmDialog from '../components/ConfirmDialog'
 
 export default function KnowledgeBaseHistory({
   onOpenKnowledgeBase,
@@ -16,6 +17,7 @@ export default function KnowledgeBaseHistory({
   const [loading, setLoading] = useState(true)
   const [busyId, setBusyId] = useState<string | null>(null)
   const [error, setError] = useState('')
+  const [pendingDeleteBase, setPendingDeleteBase] = useState<KnowledgeBaseSummary | null>(null)
 
   const refresh = useCallback(async () => {
     setLoading(true)
@@ -50,11 +52,14 @@ export default function KnowledgeBaseHistory({
     }
   }
 
-  async function removeBase(base: KnowledgeBaseSummary) {
-    const warning = base.document_count > 0
-      ? `“${base.name}”包含 ${base.document_count} 份文件和 ${base.indexed_chunks} 个向量分块。将同时删除磁盘上的原始文件与 Markdown，删除后不可恢复，确定继续吗？`
-      : `确定删除空知识库“${base.name}”吗？`
-    if (!window.confirm(warning)) return
+  function requestRemoveBase(base: KnowledgeBaseSummary) {
+    setPendingDeleteBase(base)
+  }
+
+  async function confirmRemoveBase() {
+    const base = pendingDeleteBase
+    if (!base) return
+    setPendingDeleteBase(null)
     setBusyId(base.id)
     setError('')
     try {
@@ -123,7 +128,7 @@ export default function KnowledgeBaseHistory({
                   <td className="kb-history-open kb-base-actions">
                     <button type="button" className="api-btn" onClick={() => onOpenKnowledgeBase(base.id)}>查看文件</button>
                     <button type="button" className="api-btn" disabled={busyId === base.id} onClick={() => void editBase(base)}>编辑</button>
-                    <button type="button" className="api-btn danger" disabled={busyId === base.id} onClick={() => void removeBase(base)}>删除</button>
+                    <button type="button" className="api-btn danger" disabled={busyId === base.id} onClick={() => requestRemoveBase(base)}>删除</button>
                   </td>
                 </tr>
               ))}
@@ -131,6 +136,19 @@ export default function KnowledgeBaseHistory({
           </table>
         </div>
       </div>
+      <ConfirmDialog
+        open={Boolean(pendingDeleteBase)}
+        title="删除知识库"
+        description={
+          pendingDeleteBase && pendingDeleteBase.document_count > 0
+            ? `「${pendingDeleteBase.name}」包含 ${pendingDeleteBase.document_count} 份文件和 ${pendingDeleteBase.indexed_chunks} 个向量分块，将同时删除磁盘上的原始文件与 Markdown，删除后不可恢复。`
+            : `确定删除空知识库「${pendingDeleteBase?.name ?? ''}」吗？`
+        }
+        confirmLabel="删除知识库"
+        tone="danger"
+        onConfirm={() => void confirmRemoveBase()}
+        onCancel={() => setPendingDeleteBase(null)}
+      />
     </div>
   )
 }

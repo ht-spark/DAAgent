@@ -1455,6 +1455,170 @@
   width: min(420px, 100%);
 }
 
+/* ---------- 通用确认 / 人工批准弹窗（对齐 api-modal 暖黄工作台） ---------- */
+.confirm-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 260;
+  background: rgba(42, 36, 22, 0.36);
+  backdrop-filter: blur(3px);
+  -webkit-backdrop-filter: blur(3px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px 16px;
+  animation: api-modal-fade 0.18s ease;
+}
+
+.confirm-dialog {
+  width: min(460px, 100%);
+  max-height: min(88vh, 640px);
+  display: flex;
+  flex-direction: column;
+  background: #fffcf3;
+  border: 1px solid rgba(92, 72, 28, 0.14);
+  border-radius: 18px;
+  box-shadow: 0 28px 64px rgba(28, 36, 56, 0.22);
+  overflow: hidden;
+  animation: api-modal-rise 0.22s cubic-bezier(0.2, 0, 0, 1);
+}
+
+.confirm-head {
+  padding: 22px 22px 12px;
+  background: linear-gradient(180deg, rgba(255, 248, 230, 0.9), #fffcf3);
+}
+
+.confirm-kicker {
+  margin: 0 0 6px;
+  font-size: calc(12px * var(--app-font-ratio));
+  font-weight: 750;
+  letter-spacing: 0.04em;
+  color: #8a6518;
+}
+
+.confirm-head h2 {
+  margin: 0;
+  font-size: calc(17px * var(--app-font-ratio));
+  font-weight: 750;
+  color: #2a2416;
+  letter-spacing: -0.02em;
+  line-height: 1.35;
+}
+
+.confirm-lead {
+  margin: 8px 0 0;
+  font-size: calc(13px * var(--app-font-ratio));
+  color: #8a7f68;
+  line-height: 1.55;
+}
+
+.confirm-body {
+  flex: 1 1 auto;
+  overflow: auto;
+  padding: 14px 22px 4px;
+}
+
+.confirm-detail {
+  margin: 0 0 14px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  border: 1px solid rgba(92, 72, 28, 0.1);
+  background: #f3ecd8;
+  color: #5c5340;
+  font-size: calc(13px * var(--app-font-ratio));
+  line-height: 1.6;
+}
+
+.confirm-foot {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  flex-shrink: 0;
+  padding: 14px 22px 18px;
+  border-top: 1px solid rgba(92, 72, 28, 0.1);
+  background: linear-gradient(180deg, rgba(250, 246, 232, 0.55), #fffcf3);
+}
+
+.confirm-foot .confirm-ok,
+.confirm-foot .confirm-cancel {
+  min-height: 40px;
+  padding: 10px 18px;
+  border-radius: 10px;
+  font-family: inherit;
+  font-size: calc(13.5px * var(--app-font-ratio));
+  font-weight: 650;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, filter 0.15s ease, transform 0.15s ease;
+}
+
+.confirm-foot .confirm-ok {
+  border: none;
+  background: #b8892d;
+  color: #fffdf6;
+  box-shadow: 0 4px 12px rgba(184, 137, 45, 0.28);
+}
+
+.confirm-foot .confirm-ok:hover {
+  filter: brightness(1.05);
+  transform: translateY(-1px);
+}
+
+.confirm-foot .confirm-ok.is-danger {
+  background: #b13b35;
+  box-shadow: 0 4px 12px rgba(177, 59, 53, 0.24);
+}
+
+.confirm-foot .confirm-ok:focus-visible,
+.confirm-foot .confirm-cancel:focus-visible {
+  outline: 2px solid rgba(184, 137, 45, 0.55);
+  outline-offset: 2px;
+}
+
+.confirm-foot .confirm-cancel {
+  border: 1px solid rgba(92, 72, 28, 0.14);
+  background: transparent;
+  color: #5c5340;
+}
+
+.confirm-foot .confirm-cancel:hover {
+  color: #2a2416;
+  background: rgba(92, 72, 28, 0.08);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .confirm-mask,
+  .confirm-dialog {
+    animation: none;
+  }
+}
+
+@media (max-width: 560px) {
+  .confirm-mask {
+    padding: 0;
+    align-items: stretch;
+  }
+  .confirm-dialog,
+  .confirm-dialog--approval {
+    width: 100%;
+    max-height: 100%;
+    height: 100%;
+    border-radius: 0;
+    border: none;
+  }
+  .approval-meta > div {
+    grid-template-columns: 1fr;
+    gap: 2px;
+  }
+  .confirm-foot {
+    flex-direction: column-reverse;
+  }
+  .confirm-foot .confirm-ok,
+  .confirm-foot .confirm-cancel {
+    width: 100%;
+  }
+}
+
 @keyframes api-modal-fade {
   from { opacity: 0; }
   to { opacity: 1; }
@@ -2334,39 +2498,41 @@
   .step-label { display: none; }
 }
 
-/* ---------- Delete confirm modal ---------- */
+/* ---------- Delete confirm modal（旧类名兼容，视觉对齐 confirm-dialog） ---------- */
 .modal-mask {
   position: fixed;
   inset: 0;
-  background: rgba(15, 23, 42, 0.45);
+  background: rgba(42, 36, 22, 0.36);
   backdrop-filter: blur(3px);
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 200;
+  z-index: 260;
+  padding: 24px 16px;
 }
 .modal {
   width: min(420px, 90vw);
-  background: var(--bg-card-solid);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
+  background: #fffcf3;
+  border: 1px solid rgba(92, 72, 28, 0.14);
+  border-radius: 18px;
   padding: 26px 26px 22px;
-  box-shadow: var(--shadow-md);
+  box-shadow: 0 28px 64px rgba(28, 36, 56, 0.22);
 }
 .modal h3 {
   margin: 0 0 10px;
   font-size: calc(18px * var(--app-font-ratio));
   font-weight: 700;
-  color: var(--text-primary);
+  color: #2a2416;
 }
 .modal .muted {
   font-size: calc(14px * var(--app-font-ratio));
   line-height: 1.6;
   margin: 0 0 20px;
+  color: #5c5340;
 }
 .modal code {
-  background: var(--primary-50);
-  color: var(--primary-800);
+  background: rgba(184, 137, 45, 0.14);
+  color: #8a6518;
   padding: 2px 7px;
   border-radius: 6px;
   font-family: "JetBrains Mono", Consolas, monospace;
@@ -2378,10 +2544,10 @@
 }
 .btn-ghost {
   padding: 9px 18px;
-  border: 1px solid var(--border-strong);
-  background: var(--bg);
-  color: var(--text-secondary);
-  border-radius: var(--radius-md);
+  border: 1px solid rgba(92, 72, 28, 0.14);
+  background: transparent;
+  color: #5c5340;
+  border-radius: 10px;
   font-size: calc(14px * var(--app-font-ratio));
   font-weight: 600;
   cursor: pointer;
@@ -2389,15 +2555,15 @@
   transition: all 0.18s ease;
 }
 .btn-ghost:hover {
-  border-color: var(--primary-300);
-  color: var(--text-primary);
+  color: #2a2416;
+  background: rgba(92, 72, 28, 0.08);
 }
 .btn-danger {
   padding: 9px 18px;
   border: none;
-  background: var(--danger);
-  color: #fff;
-  border-radius: var(--radius-md);
+  background: #b13b35;
+  color: #fffdf6;
+  border-radius: 10px;
   font-size: calc(14px * var(--app-font-ratio));
   font-weight: 700;
   cursor: pointer;
@@ -2406,6 +2572,18 @@
 }
 .btn-danger:hover {
   filter: brightness(0.93);
+}
+
+/* API 编辑弹窗内联校验错误 */
+.api-form-error {
+  margin: 0 0 14px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(177, 59, 53, 0.22);
+  background: rgba(177, 59, 53, 0.08);
+  color: #922f2a;
+  font-size: calc(13px * var(--app-font-ratio));
+  line-height: 1.5;
 }
 .btn-cancel {
   margin: 0 auto;
@@ -3876,70 +4054,131 @@
 .workflow-stage-empty strong { font-size: calc(17px * var(--app-font-ratio)); color: var(--primary-800); font-weight: 800; }
 .workflow-stage-empty p { margin: 10px 0 0; color: var(--text-tertiary); font-size: calc(13px * var(--app-font-ratio)); }
 
+/* 建模预算人工介入：与确认/API 弹窗同一套暖黄工作台语言 */
 .workflow-budget-backdrop {
   position: fixed;
-  z-index: 30;
+  z-index: 260;
   inset: 0;
   display: grid;
   place-items: center;
   padding: 24px;
-  background: rgba(25, 34, 77, 0.34);
+  background: rgba(42, 36, 22, 0.36);
   backdrop-filter: blur(5px);
+  -webkit-backdrop-filter: blur(5px);
+  animation: api-modal-fade 0.18s ease;
 }
 .workflow-budget-dialog {
   width: min(520px, 100%);
   box-sizing: border-box;
-  padding: 30px;
-  border: 1px solid rgba(74, 91, 199, 0.24);
-  border-radius: 14px;
-  background: #fff;
-  box-shadow: 0 28px 70px rgba(25, 34, 77, 0.28);
+  padding: 0;
+  border: 1px solid rgba(92, 72, 28, 0.14);
+  border-radius: 18px;
+  background: #fffcf3;
+  box-shadow: 0 28px 64px rgba(28, 36, 56, 0.22);
+  overflow: hidden;
+  animation: api-modal-rise 0.22s cubic-bezier(0.2, 0, 0, 1);
 }
 .workflow-budget-kicker {
-  margin: 0 0 8px;
-  color: var(--primary-600);
+  margin: 0;
+  padding: 22px 24px 0;
+  color: #8a6518;
   font-size: calc(12px * var(--app-font-ratio));
-  font-weight: 800;
+  font-weight: 750;
+  letter-spacing: 0.04em;
 }
 .workflow-budget-dialog h2 {
   margin: 0;
-  color: var(--primary-800);
-  font-size: calc(20px * var(--app-font-ratio));
+  padding: 6px 24px 0;
+  color: #2a2416;
+  font-size: calc(18px * var(--app-font-ratio));
   line-height: 1.4;
+  letter-spacing: -0.02em;
 }
 .workflow-budget-copy {
-  margin: 12px 0 22px;
-  color: var(--text-tertiary);
+  margin: 10px 0 0;
+  padding: 0 24px;
+  color: #8a7f68;
   font-size: calc(13px * var(--app-font-ratio));
-  line-height: 1.7;
+  line-height: 1.6;
 }
-.workflow-budget-fields { display: grid; gap: 14px; }
-.workflow-budget-fields label { display: grid; gap: 7px; color: var(--text-primary); font-size: calc(13px * var(--app-font-ratio)); font-weight: 700; }
+.workflow-budget-fields {
+  display: grid;
+  gap: 14px;
+  padding: 18px 24px 4px;
+}
+.workflow-budget-fields label {
+  display: grid;
+  gap: 7px;
+  color: #3a3424;
+  font-size: calc(13px * var(--app-font-ratio));
+  font-weight: 650;
+}
 .workflow-budget-fields input {
   width: 100%;
   box-sizing: border-box;
-  padding: 10px 12px;
-  border: 1px solid rgba(74, 91, 199, 0.24);
-  border-radius: 8px;
-  color: var(--text-primary);
+  padding: 11px 13px;
+  border: 1px solid rgba(92, 72, 28, 0.16);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.78);
+  color: #2a2416;
   font: inherit;
+  font-size: calc(14px * var(--app-font-ratio));
 }
-.workflow-budget-fields input:focus { outline: 0; border-color: var(--primary-500); box-shadow: 0 0 0 3px rgba(74, 91, 199, 0.14); }
-.workflow-budget-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 26px; }
+.workflow-budget-fields input:focus {
+  outline: 0;
+  border-color: rgba(184, 137, 45, 0.55);
+  box-shadow: 0 0 0 3px rgba(184, 137, 45, 0.14);
+  background: #fff;
+}
+.workflow-budget-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin: 0;
+  padding: 14px 24px 18px;
+  border-top: 1px solid rgba(92, 72, 28, 0.1);
+  background: linear-gradient(180deg, rgba(250, 246, 232, 0.55), #fffcf3);
+}
 .workflow-budget-actions button {
   min-width: 108px;
-  padding: 10px 15px;
-  border: 1px solid rgba(74, 91, 199, 0.26);
-  border-radius: 8px;
-  background: #fff;
-  color: var(--primary-700);
+  min-height: 40px;
+  padding: 10px 16px;
+  border: 1px solid rgba(92, 72, 28, 0.14);
+  border-radius: 10px;
+  background: transparent;
+  color: #5c5340;
   font: inherit;
-  font-size: calc(13px * var(--app-font-ratio));
-  font-weight: 800;
+  font-family: inherit;
+  font-size: calc(13.5px * var(--app-font-ratio));
+  font-weight: 650;
   cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, filter 0.15s ease;
 }
-.workflow-budget-actions button:last-child { border-color: var(--primary-500); background: var(--primary-500); color: #fff; }
+.workflow-budget-actions button:hover:not(:disabled) {
+  color: #2a2416;
+  background: rgba(92, 72, 28, 0.08);
+}
+.workflow-budget-actions button:last-child {
+  border: none;
+  background: #b8892d;
+  color: #fffdf6;
+  box-shadow: 0 4px 12px rgba(184, 137, 45, 0.28);
+}
+.workflow-budget-actions button:last-child:hover:not(:disabled) {
+  filter: brightness(1.05);
+  background: #b8892d;
+  color: #fffdf6;
+}
+.workflow-budget-actions button:focus-visible {
+  outline: 2px solid rgba(184, 137, 45, 0.55);
+  outline-offset: 2px;
+}
 .workflow-budget-actions button:disabled { cursor: default; opacity: 0.58; }
+
+@media (prefers-reduced-motion: reduce) {
+  .workflow-budget-backdrop,
+  .workflow-budget-dialog { animation: none; }
+}
 
 @media (prefers-reduced-motion: reduce) { .workflow-running::before, .workflow-stage.is-active .workflow-stage-marker span { animation: none; } }
 @media (max-width: 900px) { .task-setup { padding-top: 32px; gap: 20px; }.task-setup-form { max-width: none; }.workflow-grid { grid-template-columns: 1fr; }.workflow-sidebar { grid-template-columns: repeat(2, minmax(0, 1fr)); }.workflow-sidebar .workflow-card:first-child { grid-column: 1 / -1; }.workflow-canvas { min-height: auto; } }
@@ -4327,6 +4566,211 @@
   flex: 0 0 auto;
   padding: 12px 24px 20px;
   background: linear-gradient(180deg, transparent, rgba(250, 246, 232, 0.96) 28%);
+}
+
+/* 人工批准：贴在输入框上方的内联卡片（WorkBuddy 式，无全屏遮罩） */
+.rag-approval-card {
+  max-width: 960px;
+  margin: 0 auto 10px;
+  padding: 14px 16px 12px;
+  border-radius: 14px;
+  border: 1px solid var(--rag-accent-border);
+  border-top: 3px solid var(--rag-accent);
+  background: var(--rag-bg-elevated);
+  box-shadow: 0 10px 28px rgba(92, 72, 28, 0.14);
+  animation: rag-approval-rise 0.22s cubic-bezier(0.2, 0, 0, 1);
+}
+
+.rag-approval-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.rag-approval-head-copy {
+  min-width: 0;
+}
+
+.rag-approval-kicker {
+  margin: 0 0 2px;
+  color: var(--rag-accent);
+  font-size: calc(11.5px * var(--app-font-ratio));
+  font-weight: 750;
+  letter-spacing: 0.04em;
+}
+
+.rag-approval-head h3 {
+  margin: 0;
+  color: var(--rag-text);
+  font-size: calc(14.5px * var(--app-font-ratio));
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  line-height: 1.35;
+}
+
+.rag-approval-lead {
+  margin: 4px 0 0;
+  color: var(--rag-text-muted);
+  font-size: calc(12px * var(--app-font-ratio));
+  line-height: 1.45;
+}
+
+.rag-approval-badge {
+  flex-shrink: 0;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: var(--rag-accent-soft);
+  border: 1px solid var(--rag-accent-border);
+  color: #8a6518;
+  font-size: calc(11px * var(--app-font-ratio));
+  font-weight: 700;
+  line-height: 1.4;
+}
+
+.rag-approval-command {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-bottom: 8px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--rag-border);
+  background: var(--rag-bg-hover);
+}
+
+.rag-approval-prompt {
+  flex-shrink: 0;
+  color: var(--rag-accent);
+  font-family: "JetBrains Mono", Consolas, monospace;
+  font-weight: 700;
+  font-size: calc(12.5px * var(--app-font-ratio));
+  line-height: 1.55;
+}
+
+.rag-approval-command code {
+  min-width: 0;
+  word-break: break-all;
+  color: var(--rag-text);
+  font-family: "JetBrains Mono", Consolas, "Cascadia Code", monospace;
+  font-size: calc(12.5px * var(--app-font-ratio));
+  line-height: 1.55;
+}
+
+.rag-approval-meta {
+  margin: 0 0 8px;
+  display: grid;
+  gap: 4px;
+}
+
+.rag-approval-meta > div {
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr);
+  gap: 8px;
+  align-items: baseline;
+}
+
+.rag-approval-meta dt {
+  color: var(--rag-text-muted);
+  font-size: calc(11.5px * var(--app-font-ratio));
+  font-weight: 650;
+}
+
+.rag-approval-meta dd {
+  margin: 0;
+  color: var(--rag-text-secondary);
+  font-size: calc(12px * var(--app-font-ratio));
+  word-break: break-all;
+  line-height: 1.45;
+}
+
+.rag-approval-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-top: 8px;
+  border-top: 1px solid var(--rag-border);
+}
+
+.rag-approval-warning {
+  margin: 0;
+  min-width: 0;
+  color: var(--rag-text-muted);
+  font-size: calc(11.5px * var(--app-font-ratio));
+  line-height: 1.45;
+}
+
+.rag-approval-actions {
+  flex-shrink: 0;
+  display: flex;
+  gap: 8px;
+}
+
+.rag-approval-actions button {
+  min-height: 34px;
+  padding: 7px 14px;
+  border-radius: 10px;
+  font-family: inherit;
+  font-size: calc(12.5px * var(--app-font-ratio));
+  font-weight: 650;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, filter 0.15s ease, transform 0.15s ease;
+}
+
+.rag-approval-reject {
+  border: 1px solid var(--rag-border);
+  background: transparent;
+  color: var(--rag-text-secondary);
+}
+
+.rag-approval-reject:hover {
+  color: var(--rag-text);
+  background: rgba(92, 72, 28, 0.06);
+}
+
+.rag-approval-approve {
+  border: none;
+  background: var(--rag-accent);
+  color: #fffdf6;
+  box-shadow: 0 3px 10px rgba(184, 137, 45, 0.28);
+}
+
+.rag-approval-approve:hover {
+  filter: brightness(1.05);
+  transform: translateY(-1px);
+}
+
+.rag-approval-actions button:focus-visible {
+  outline: 2px solid rgba(184, 137, 45, 0.55);
+  outline-offset: 2px;
+}
+
+@keyframes rag-approval-rise {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rag-approval-card { animation: none; }
+}
+
+@media (max-width: 640px) {
+  .rag-approval-foot {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .rag-approval-actions {
+    width: 100%;
+  }
+  .rag-approval-actions button {
+    flex: 1 1 0;
+  }
+  .rag-approval-meta > div {
+    grid-template-columns: 1fr;
+    gap: 0;
+  }
 }
 
 .rag-composer {

@@ -12,6 +12,7 @@ import {
   type BrainstormDiscussionSummary,
   type ProjectSummary,
 } from '../api'
+import ConfirmDialog from './ConfirmDialog'
 
 type Props = {
   section: string
@@ -72,6 +73,7 @@ export default function Sidebar({
     top: number
     left: number
   } | null>(null)
+  const [pendingRemoveProject, setPendingRemoveProject] = useState<ProjectSummary | null>(null)
   const [renamingId, setRenamingId] = useState<string | null>(null)
   const [renameDraft, setRenameDraft] = useState('')
   const [pendingDelete, setPendingDelete] = useState<BrainstormDiscussionSummary | null>(null)
@@ -137,7 +139,14 @@ export default function Sidebar({
 
   async function handleRemoveProject() {
     const project = projects.find((item) => item.id === activeProjectId)
-    if (!project || !window.confirm(`移除项目「${project.title}」？真实文件夹和产物不会被删除。`)) return
+    if (!project) return
+    setPendingRemoveProject(project)
+  }
+
+  async function confirmRemoveProject() {
+    const project = pendingRemoveProject
+    if (!project) return
+    setPendingRemoveProject(null)
     setProjectError('')
     try {
       await deleteProject(project.id)
@@ -425,41 +434,31 @@ export default function Sidebar({
         </div>
       </div>
 
-      {pendingDelete &&
-        createPortal(
-          <div className="modal-mask" onClick={() => setPendingDelete(null)} role="presentation">
-            <div
-              className="modal"
-              role="dialog"
-              aria-modal="true"
-              onClick={(e) => e.stopPropagation()}
-            >
-              <h3>删除会话</h3>
-              <p className="muted">
-                确定删除「{pendingDelete.title || '未命名讨论'}」吗？聊天记录将一并移除，不可恢复。
-              </p>
-              <div className="modal-actions">
-                <button
-                  type="button"
-                  className="btn-ghost"
-                  disabled={busy}
-                  onClick={() => setPendingDelete(null)}
-                >
-                  取消
-                </button>
-                <button
-                  type="button"
-                  className="btn-danger"
-                  disabled={busy}
-                  onClick={() => void handleDeleteConfirm()}
-                >
-                  {busy ? '删除中…' : '删除'}
-                </button>
-              </div>
-            </div>
-          </div>,
-          document.body,
-        )}
+      {createPortal(
+        <>
+          <ConfirmDialog
+            open={Boolean(pendingDelete)}
+            title="删除会话"
+            description={`确定删除「${pendingDelete?.title || '未命名讨论'}」吗？聊天记录将一并移除，不可恢复。`}
+            confirmLabel={busy ? '删除中…' : '删除'}
+            tone="danger"
+            onConfirm={() => void handleDeleteConfirm()}
+            onCancel={() => {
+              if (!busy) setPendingDelete(null)
+            }}
+          />
+          <ConfirmDialog
+            open={Boolean(pendingRemoveProject)}
+            title="移除项目"
+            description={`移除项目「${pendingRemoveProject?.title ?? ''}」？真实文件夹和产物不会被删除。`}
+            confirmLabel="移除"
+            tone="danger"
+            onConfirm={() => void confirmRemoveProject()}
+            onCancel={() => setPendingRemoveProject(null)}
+          />
+        </>,
+        document.body,
+      )}
 
       {menuState &&
         createPortal(

@@ -1,11 +1,5 @@
-"""FastAPI 入口。
-
-启动：在项目根目录执行
-    开发模式：uv run python -m server.dev
-    常规模式：uvicorn server.main:app --host 0.0.0.0 --port 8000
-
-开发模式只监控 server/、scr/ 与 data_analysis/。不要直接使用项目根目录下的
-``uvicorn server.main:app --reload``，否则 artifacts/ 中的建模产物会触发重载。
+"""
+FastAPI 入口
 """
 from __future__ import annotations
 
@@ -124,11 +118,11 @@ AGENT_RUN_TIMEOUT_SECONDS = 3 * 60 * 60           # Agent 整轮运行硬超时�
 AGENT_COMMAND_APPROVAL_TIMEOUT_SECONDS = 300      # 单条项目命令等待人工批准的上限
 _pending_agent_commands: dict[str, asyncio.Future[bool]] = {}
 MAX_AGENT_ATTACHMENTS = 10                        # 数据 Agent 单次最多接收的附件数
-MAX_AGENT_ATTACHMENT_BYTES = 100 * 1024 * 1024    # 数据 Agent 单附件大小上限（20MB）
-MAX_AGENT_PREVIEW_TEXT_BYTES = 2 * 1024 * 1024    # 文本预览最多读取 2 MB
-MAX_AGENT_PREVIEW_ROWS = 200                      # 表格预览最多展示 200 行
-MAX_AGENT_PREVIEW_COLUMNS = 40                    # 表格预览最多展示 40 列
-MAX_AGENT_PREVIEW_SHEETS = 8                      # 工作簿预览最多展示 8 个工作表
+MAX_AGENT_ATTACHMENT_BYTES = 100 * 1024 * 1024    # 数据 Agent 单附件大小上限
+MAX_AGENT_PREVIEW_TEXT_BYTES = 20 * 1024 * 1024    #文本预览最多读取20MB
+MAX_AGENT_PREVIEW_ROWS = 200                      # 表格预览最多展示200行
+MAX_AGENT_PREVIEW_COLUMNS = 40                    # 表格预览最多展示40列
+MAX_AGENT_PREVIEW_SHEETS = 8                      # 工作簿预览最多展示8个工作表
 AGENT_ATTACHMENT_SUFFIXES = frozenset(
     {
         ".bmp",

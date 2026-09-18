@@ -6,11 +6,11 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-COMPACTION_TRIGGER_TOKENS = 24_000
-KEEP_RECENT_TOKENS = 8_000
+COMPACTION_TRIGGER_TOKENS = 252000  #活跃上下文估算超过该值才压缩
+KEEP_RECENT_TOKENS =40000            #压缩后保留最近原文的预算
 COMPACTION_KIND = "agent_compaction"
 _SUMMARY_VERSION = 1
-_MAX_COMPACTION_INPUT_CHARS = 120_000
+_MAX_COMPACTION_INPUT_CHARS = 150_000  #触发压缩时，打包进摘要Prompt、送给LLM的「待压缩历史原文」序列化长度，单位是字符（不是 token）
 
 
 @dataclass(frozen=True)
