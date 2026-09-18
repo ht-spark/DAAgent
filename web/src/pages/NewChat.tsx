@@ -749,11 +749,16 @@ export default function NewChat({
       return
     }
     let cancelled = false
-    void Promise.all([
-      fetchBrainstormDiscussion(discussionId),
-      fetchActiveAgentChatRun(discussionId),
-    ]).then(([discussion, activeRun]) => {
+    void fetchActiveAgentChatRun(discussionId)
+      .then(async (activeRun) => ({
+        activeRun,
+        discussion: await fetchBrainstormDiscussion(discussionId),
+      }))
+      .then(({ discussion, activeRun }) => {
         if (cancelled) return
+        if (activeRun && discussion.messages.some((item) => item.metadata?.agent_run_id === activeRun.run_id)) {
+          activeRun = null
+        }
         const savedMetadata = [...discussion.messages]
           .reverse()
           .find((message) => Array.isArray(message.metadata?.knowledge_base_ids) || message.metadata?.knowledge_base_id)

@@ -1537,13 +1537,13 @@ async def agent_profile_stream_endpoint(
         knowledge_sources: list[dict[str, str]] = []
         iterator = iter_graph(state, loop, harness)
 
-        async def save_cancelled_run() -> str:
-            """保存中断结果，使任务切换后仍能在历史对话中看到。"""
+        async def save_stopped_run(content: str) -> str:
+            """保存未完成结果，使任务切换后仍能在历史对话中看到。"""
             return await asyncio.to_thread(
                 save_discussion_message,
                 active_discussion_id,
                 message,
-                "任务已终止。",
+                content,
                 knowledge_sources,
                 title,
                 knowledge_base_ids=selected_base_ids,
@@ -1557,7 +1557,7 @@ async def agent_profile_stream_endpoint(
             async with asyncio.timeout(AGENT_RUN_TIMEOUT_SECONDS):
                 while (event := await asyncio.to_thread(_next_agent_event, iterator)) is not None:
                     if chat_run.cancel_requested:
-                        await save_cancelled_run()
+                        await save_stopped_run("任务已终止。")
                         yield json.dumps({"type": "cancelled", "run_id": run_id}, ensure_ascii=False) + "\n"
                         return
                     if isinstance(event, Finish):
@@ -1595,7 +1595,7 @@ async def agent_profile_stream_endpoint(
                             _pending_agent_commands.pop(approval_id, None)
                             chat_run.approval_id = None
                         if chat_run.cancel_requested:
-                            await save_cancelled_run()
+                            await save_stopped_run("任务已终止。")
                             yield json.dumps({"type": "cancelled", "run_id": run_id}, ensure_ascii=False) + "\n"
                             return
                         if approved:
@@ -1619,6 +1619,7 @@ async def agent_profile_stream_endpoint(
                         and not event.success
                         and event.error == "当前模型不支持识图"
                     ):
+                        await save_stopped_run(event.error)
                         yield json.dumps(
                             {"type": "error", "detail": event.error},
                             ensure_ascii=False,
@@ -1626,15 +1627,17 @@ async def agent_profile_stream_endpoint(
                         return
                     yield json.dumps(payload, ensure_ascii=False) + "\n"
         except TimeoutError:
+            await save_stopped_run("Agent 运行超时，请稍后重试。")
             yield json.dumps({"type": "error", "detail": "Agent 运行超时，请稍后重试。"}, ensure_ascii=False) + "\n"
             return
         except Exception as exc:  # noqa: BLE001
             logger.exception("Data agent run failed")
+            await save_stopped_run(f"Agent 运行失败：{exc}")
             yield json.dumps({"type": "error", "detail": f"Agent 运行失败：{exc}"}, ensure_ascii=False) + "\n"
             return
 
         if chat_run.cancel_requested:
-            await save_cancelled_run()
+            await save_stopped_run("任务已终止。")
             yield json.dumps({"type": "cancelled", "run_id": run_id}, ensure_ascii=False) + "\n"
             return
 
