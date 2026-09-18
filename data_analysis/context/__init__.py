@@ -6,6 +6,7 @@ from .rolling_memory import (
     CompactionRecord,
     RollingContext,
     compile_rolling_context,
+    estimate_context_usage_after_turn,
     estimate_text_tokens,
 )
 
@@ -15,5 +16,6 @@ __all__ = [
     "CompactionRecord",
     "RollingContext",
     "compile_rolling_context",
+    "estimate_context_usage_after_turn",
     "estimate_text_tokens",
 ]

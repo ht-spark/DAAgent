@@ -1,15 +1,20 @@
 import { memo, useEffect, useMemo, useRef, useState, type ClipboardEvent } from 'react'
 
 import {
+  cancelAgentChatRun,
   decideAgentCommand,
+  fetchActiveAgentChatRun,
   fetchBrainstormDiscussion,
   fetchProjectFileTree,
   getKnowledgeBases,
   openProjectFolder,
   renameBrainstormDiscussion,
+  reconnectAgentChatRun,
   streamDataAgentMessage,
   syncApiSettingsCache,
   type AgentTraceEvent,
+  type AgentChatHandlers,
+  type ContextUsage,
   type KnowledgeBaseSummary,
   type KnowledgeSourceCitation,
   type ProjectFileNode,
@@ -35,6 +40,35 @@ type Message = {
   trace?: AgentTraceEvent[]
   /** 本轮检索命中的知识库来源（可收起标注） */
   sources?: KnowledgeSourceCitation[]
+  contextUsage?: ContextUsage
+}
+
+function ContextUsageRing({ usage }: { usage?: ContextUsage }) {
+  const percent = usage && usage.threshold_tokens > 0
+    ? Math.min(100, Math.max(0, usage.estimated_tokens / usage.threshold_tokens * 100))
+    : 0
+  const compactTokens = (tokens: number) => `${(tokens / 1000).toFixed(1)}K`
+  const label = usage
+    ? `上下文历史估算已用 ${percent.toFixed(1)}%，约 ${usage.estimated_tokens.toLocaleString('zh-CN')} / ${usage.threshold_tokens.toLocaleString('zh-CN')} token，剩余约 ${usage.remaining_tokens.toLocaleString('zh-CN')} token。仅按对话历史估算，不含系统提示和工具调用。`
+    : '完成一轮 Agent 对话后显示上下文历史估算用量。'
+
+  return (
+    <span className="rag-context-indicator" tabIndex={0} role="img" aria-label={label}>
+      <span
+        className="rag-context-ring"
+        style={{ background: `conic-gradient(var(--rag-accent) ${percent}%, var(--rag-border-strong) 0)` }}
+        aria-hidden="true"
+      />
+      <span className="rag-context-tooltip" aria-hidden="true">
+        {usage ? (
+          <>
+            <span>{percent.toFixed(1)}% · {compactTokens(usage.estimated_tokens)} / {compactTokens(usage.threshold_tokens)} 上下文已用</span>
+            <small>剩余约 {compactTokens(usage.remaining_tokens)}，仅为对话历史估算</small>
+          </>
+        ) : '完成一轮 Agent 对话后显示上下文用量'}
+      </span>
+    </span>
+  )
 }
 
 /** 从 trace 中汇总本轮知识库检索来源，按文件去重。 */
@@ -70,7 +104,7 @@ function summarizeObservationError(error: string | null | undefined): string {
     .split(/(?:---\s*)?(?:执行|运行)输出(?:\s*---)?\s*[:：]?/i, 1)[0]
     .trim()
   const errorLines = errorSection.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
-  const coreError = (errorLines.length > 1 ? errorLines.at(-1) : errorSection)
+  const coreError = (errorLines.length > 1 ? errorLines[errorLines.length - 1] : errorSection)
     ?.replace(/\s+/g, ' ')
     .trim() || ''
   if (!coreError) return '运行输出过长，已隐藏具体内容'
@@ -565,6 +599,8 @@ export default function NewChat({
   const [draft, setDraft] = useState('')
   const [messages, setMessages] = useState<Message[]>([])
   const [isSubmitting, setIsSubmitting] = useState(false)
+  const [activeRunId, setActiveRunId] = useState<string | null>(null)
+  const [isStopping, setIsStopping] = useState(false)
   const [files, setFiles] = useState<File[]>([])
   const [title, setTitle] = useState('新讨论')
   const [agentTrace, setAgentTrace] = useState<AgentTraceEvent[]>([])
@@ -581,6 +617,77 @@ export default function NewChat({
   // 人工批准弹窗：请求内容 + 结算回调（Promise 流内等待用户点按钮）
   const [approval, setApproval] = useState<ApprovalRequest | null>(null)
   const approvalResolveRef = useRef<((approved: boolean) => void) | null>(null)
+  const streamControllerRef = useRef<AbortController | null>(null)
+  const runningDiscussionRef = useRef<string | null>(null)
+
+  useEffect(() => () => {
+    streamControllerRef.current?.abort()
+    if (approvalResolveRef.current) approvalResolveRef.current(false)
+  }, [])
+
+  function createStreamHandlers(controller: AbortController): AgentChatHandlers {
+    const active = () => !controller.signal.aborted
+    return {
+      onStarted: (runId, _files, savedDiscussionId) => {
+        if (!active()) return
+        setActiveRunId(runId)
+        if (savedDiscussionId) {
+          runningDiscussionRef.current = savedDiscussionId
+          onDiscussionId(savedDiscussionId)
+        }
+      },
+      onTrace: (event) => {
+        if (!active()) return
+        setAgentTrace((current) => [...current, event])
+        setMessages((current) => current.map((item, index) => {
+          if (index !== current.length - 1) return item
+          const nextTrace = [...(item.trace ?? []), event]
+          return { ...item, trace: nextTrace, sources: collectKnowledgeSources(nextTrace) }
+        }))
+      },
+      onApprovalRequired: async (event) => {
+        if (!active()) return
+        const approved = await new Promise<boolean>((resolve) => {
+          approvalResolveRef.current = resolve
+          setApproval({
+            approval_id: event.approval_id,
+            command: event.command,
+            workspace_root: event.workspace_root,
+            python_environment: event.python_environment,
+          })
+        })
+        approvalResolveRef.current = null
+        setApproval(null)
+        if (active()) await decideAgentCommand(event.approval_id, approved)
+      },
+      onToken: (content) => {
+        if (!active()) return
+        setMessages((current) => current.map((item, index) => index === current.length - 1
+          ? { ...item, content: `${item.content}${content}` }
+          : item))
+      },
+      onDone: (_discussionId, _runId, _artifacts, sources, contextUsage) => {
+        if (!active()) return
+        setMessages((current) => current.map((item, index) => index === current.length - 1
+          ? { ...item, sources: sources?.length ? sources : item.sources, contextUsage }
+          : item))
+        setActiveRunId(null)
+        setIsSubmitting(false)
+        setIsStopping(false)
+        runningDiscussionRef.current = null
+      },
+      onCancelled: () => {
+        if (!active()) return
+        setMessages((current) => current.map((item, index) => index === current.length - 1
+          ? { ...item, content: '任务已终止。' }
+          : item))
+        setActiveRunId(null)
+        setIsSubmitting(false)
+        setIsStopping(false)
+        runningDiscussionRef.current = null
+      },
+    }
+  }
 
   // 批准卡片出现在输入框上方时，保证消息区已滚到底、卡片可见
   useEffect(() => {
@@ -625,14 +732,28 @@ export default function NewChat({
   }, [])
 
   useEffect(() => {
+    if (discussionId && runningDiscussionRef.current === discussionId) return
+    streamControllerRef.current?.abort()
+    streamControllerRef.current = null
+    runningDiscussionRef.current = null
+    if (approvalResolveRef.current) approvalResolveRef.current(false)
+    approvalResolveRef.current = null
+    setApproval(null)
+    setActiveRunId(null)
+    setIsSubmitting(false)
+    setIsStopping(false)
     if (!discussionId) {
       setMessages([])
       setTitle('新讨论')
       setAgentTrace([])
       return
     }
-    void fetchBrainstormDiscussion(discussionId)
-      .then((discussion) => {
+    let cancelled = false
+    void Promise.all([
+      fetchBrainstormDiscussion(discussionId),
+      fetchActiveAgentChatRun(discussionId),
+    ]).then(([discussion, activeRun]) => {
+        if (cancelled) return
         const savedMetadata = [...discussion.messages]
           .reverse()
           .find((message) => Array.isArray(message.metadata?.knowledge_base_ids) || message.metadata?.knowledge_base_id)
@@ -648,26 +769,46 @@ export default function NewChat({
           .reverse()
           .find((message) => message.metadata?.mode === 'agent')
         setAgentTrace(latestAgentMessage?.metadata?.agent_trace ?? [])
-        setMessages(
-          discussion.messages.map((m) => ({
+        const savedMessages: Message[] = discussion.messages.map((m) => ({
             role: m.role,
             content: m.content,
             trace: m.metadata?.agent_trace,
+            contextUsage: m.metadata?.context_usage,
             sources: m.sources?.length
               ? m.sources
               : m.metadata?.sources,
-          })),
-        )
+          }))
+        setMessages(activeRun
+          ? [...savedMessages, { role: 'user', content: activeRun.message }, { role: 'assistant', content: '' }]
+          : savedMessages)
         setTitle(discussion.title)
+        if (activeRun) {
+          const controller = new AbortController()
+          streamControllerRef.current = controller
+          runningDiscussionRef.current = discussionId
+          setActiveRunId(activeRun.run_id)
+          setIsSubmitting(true)
+          void reconnectAgentChatRun(activeRun.run_id, createStreamHandlers(controller), controller.signal)
+            .catch((error) => {
+              if (controller.signal.aborted) return
+              setMessages((current) => current.map((item, index) => index === current.length - 1
+                ? { ...item, content: error instanceof Error ? error.message : '任务连接中断。' }
+                : item))
+              setIsSubmitting(false)
+              setActiveRunId(null)
+            })
+        }
       })
-      .catch((error) =>
+      .catch((error) => {
+        if (cancelled) return
         setMessages([
           {
             role: 'assistant',
             content: error instanceof Error ? error.message : '加载讨论记录失败。',
           },
-        ]),
-      )
+        ])
+      })
+    return () => { cancelled = true }
   }, [discussionId])
 
   useEffect(() => {
@@ -700,6 +841,7 @@ export default function NewChat({
     if ((!message && files.length === 0) || isSubmitting) return
     setDraft('')
     setIsSubmitting(true)
+    setIsStopping(false)
     const attachedFiles = files
     setFiles([])
     if (fileInputRef.current) fileInputRef.current.value = ''
@@ -708,6 +850,8 @@ export default function NewChat({
       { role: 'user', content: message },
       { role: 'assistant', content: '' },
     ])
+    const controller = new AbortController()
+    streamControllerRef.current = controller
     try {
       setAgentTrace([])
       await streamDataAgentMessage(
@@ -715,59 +859,14 @@ export default function NewChat({
         discussionId,
         title,
         attachedFiles,
-        {
-          onStarted: () => undefined,
-          onTrace: (event) => {
-            setAgentTrace((current) => [...current, event])
-            setMessages((current) => current.map(
-              (item, index) => {
-                if (index !== current.length - 1) return item
-                const nextTrace = [...(item.trace ?? []), event]
-                return {
-                  ...item,
-                  trace: nextTrace,
-                  sources: collectKnowledgeSources(nextTrace),
-                }
-              },
-            ))
-          },
-          onApprovalRequired: async (event) => {
-            const approved = await new Promise<boolean>((resolve) => {
-              approvalResolveRef.current = resolve
-              setApproval({
-                approval_id: event.approval_id,
-                command: event.command,
-                workspace_root: event.workspace_root,
-                python_environment: event.python_environment,
-              })
-            })
-            approvalResolveRef.current = null
-            setApproval(null)
-            await decideAgentCommand(event.approval_id, approved)
-          },
-          onToken: (content) => {
-            setMessages((current) => current.map(
-              (item, index) => index === current.length - 1
-                ? { ...item, content: `${item.content}${content}` }
-                : item,
-            ))
-          },
-          onDone: (savedDiscussionId, _runId, _artifacts, sources) => {
-            if (sources?.length) {
-              setMessages((current) => current.map(
-                (item, index) => index === current.length - 1
-                  ? { ...item, sources }
-                  : item,
-              ))
-            }
-            onDiscussionId(savedDiscussionId)
-          },
-        },
+        createStreamHandlers(controller),
         selectedConfigId || null,
         knowledgeBaseIds,
         projectId,
+        controller.signal,
       )
     } catch (error) {
+      if (controller.signal.aborted) return
       setMessages((current) => current.map(
         (item, index) => index === current.length - 1
           ? {
@@ -778,7 +877,23 @@ export default function NewChat({
           : item,
       ))
     } finally {
-      setIsSubmitting(false)
+      if (!controller.signal.aborted) {
+        setIsSubmitting(false)
+        setActiveRunId(null)
+      }
+    }
+  }
+
+  async function stopActiveRun() {
+    if (!activeRunId || isStopping) return
+    setIsStopping(true)
+    try {
+      await cancelAgentChatRun(activeRunId)
+    } catch (error) {
+      setIsStopping(false)
+      setMessages((current) => current.map((item, index) => index === current.length - 1
+        ? { ...item, content: `${item.content}\n\n${error instanceof Error ? error.message : '终止任务失败。'}` }
+        : item))
     }
   }
 
@@ -961,6 +1076,7 @@ export default function NewChat({
                   accept=".csv,.xlsx,.xls,.json,.jsonl,.ndjson,.pdf,.docx,.md,.markdown,.py,.png,.jpg,.jpeg,.webp,.gif,.bmp,.tif,.tiff"
                   onChange={(event) => setFiles(Array.from(event.target.files ?? []))}
                 />
+                <ContextUsageRing usage={[...messages].reverse().find((item) => item.contextUsage)?.contextUsage} />
                 {apiConfigs.length > 0 ? (() => {
                   const activeModelConfig = apiConfigs.find((config) => config.id === selectedConfigId)
                     ?? apiConfigs[0]
@@ -1019,14 +1135,17 @@ export default function NewChat({
                 )}
                 <button
                   type="button"
-                  className="rag-send"
-                  onClick={() => void submit()}
-                  disabled={(!draft.trim() && files.length === 0) || isSubmitting}
-                  aria-label="发送"
+                  className={`rag-send${isSubmitting ? ' rag-stop' : ''}`}
+                  onClick={() => isSubmitting ? void stopActiveRun() : void submit()}
+                  disabled={isSubmitting ? !activeRunId || isStopping : (!draft.trim() && files.length === 0)}
+                  aria-label={isSubmitting ? (isStopping ? '正在终止任务' : '终止任务') : '发送'}
+                  title={isSubmitting ? (isStopping ? '正在等待当前工具结束' : '终止当前任务') : '发送'}
                 >
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                    <path d="M5 12h14M13 6l6 6-6 6" strokeLinecap="round" strokeLinejoin="round" />
-                  </svg>
+                  {isSubmitting ? <span className="rag-stop-icon" aria-hidden="true" /> : (
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <path d="M5 12h14M13 6l6 6-6 6" strokeLinecap="round" strokeLinejoin="round" />
+                    </svg>
+                  )}
                 </button>
               </div>
             </div>

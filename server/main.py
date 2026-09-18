@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import uuid
+from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
 from threading import Lock
@@ -27,7 +28,7 @@ from openpyxl.utils.exceptions import InvalidFileException
 from data_analysis.agent.graph import iter_graph
 from data_analysis.agent.loop import Action, AgentLoop, Finish
 from data_analysis.agent.state import AgentMessage, AgentState, Observation
-from data_analysis.context import compile_rolling_context
+from data_analysis.context import compile_rolling_context, estimate_context_usage_after_turn
 from data_analysis.runtime import Harness, SubprocessSandbox, resolve_python_environment
 from data_analysis.tools import create_agent_tool_registry, supports_data_profile
 from server import store
@@ -117,6 +118,61 @@ AGENT_TOOL_TIMEOUT_SECONDS = 2 * 60 * 60          # Agent 单次工具执行超�
 AGENT_RUN_TIMEOUT_SECONDS = 3 * 60 * 60           # Agent 整轮运行硬超时时间（3 小时）
 AGENT_COMMAND_APPROVAL_TIMEOUT_SECONDS = 300      # 单条项目命令等待人工批准的上限
 _pending_agent_commands: dict[str, asyncio.Future[bool]] = {}
+
+
+@dataclass
+class AgentChatRun:
+    """保存可重连的 Agent 流事件和协作式终止状态。"""
+
+    discussion_id: str
+    message: str
+    events: list[str] = field(default_factory=list)
+    condition: asyncio.Condition = field(default_factory=asyncio.Condition)
+    done: bool = False
+    cancel_requested: bool = False
+    approval_id: str | None = None
+
+
+_agent_chat_runs: dict[str, AgentChatRun] = {}
+
+
+async def _replay_agent_chat_run(run: AgentChatRun):
+    """向当前订阅者回放历史事件并继续等待新事件。"""
+    index = 0
+    while True:
+        async with run.condition:
+            await run.condition.wait_for(lambda: index < len(run.events) or run.done)
+            pending = run.events[index:]
+            index = len(run.events)
+            done = run.done
+        for line in pending:
+            payload = json.loads(line)
+            if (
+                payload.get("type") == "agent_command_approval_required"
+                and run.approval_id != payload.get("approval_id")
+            ):
+                continue
+            yield line
+        if done:
+            return
+
+
+async def _publish_agent_chat_run(run: AgentChatRun, stream) -> None:
+    """独立于浏览器连接运行 Agent 并缓存可重放事件。"""
+    try:
+        async for line in stream:
+            async with run.condition:
+                run.events.append(line)
+                run.condition.notify_all()
+    except Exception as exc:
+        logger.exception("Background Agent chat run failed")
+        async with run.condition:
+            run.events.append(json.dumps({"type": "error", "detail": f"Agent 运行失败：{exc}"}, ensure_ascii=False) + "\n")
+            run.condition.notify_all()
+    finally:
+        async with run.condition:
+            run.done = True
+            run.condition.notify_all()
 MAX_AGENT_ATTACHMENTS = 10                        # 数据 Agent 单次最多接收的附件数
 MAX_AGENT_ATTACHMENT_BYTES = 100 * 1024 * 1024    # 数据 Agent 单附件大小上限
 MAX_AGENT_PREVIEW_TEXT_BYTES = 20 * 1024 * 1024    #文本预览最多读取20MB
@@ -1340,6 +1396,12 @@ async def agent_profile_stream_endpoint(
     run_id = uuid.uuid4().hex
     active_discussion_id = discussion_id or uuid.uuid4().hex
 
+    if any(
+        run.discussion_id == active_discussion_id and not run.done
+        for run in _agent_chat_runs.values()
+    ):
+        raise HTTPException(status_code=409, detail="当前对话已有运行中的 Agent 任务")
+
     stored_session = (
         await asyncio.to_thread(store.get_session, active_discussion_id)
         if discussion_id
@@ -1354,6 +1416,14 @@ async def agent_profile_stream_endpoint(
     except ProjectWorkspaceError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     workspace_root = Path(str(project["root_path"])) if project else None
+    if stored_session is None:
+        await asyncio.to_thread(
+            store.create_session,
+            (title or message or "新讨论")[:80],
+            active_discussion_id,
+            project_id=str(project["id"]) if project else None,
+            cwd=str(workspace_root) if workspace_root else None,
+        )
     session_entries = stored_session.get("messages", []) if stored_session else []
     rolling_context = await asyncio.to_thread(
         compile_rolling_context,
@@ -1449,11 +1519,15 @@ async def agent_profile_stream_endpoint(
         ),
         command_approval=consume_command_approval,
     )
+    chat_run = AgentChatRun(active_discussion_id, message)
+    _agent_chat_runs[run_id] = chat_run
 
     async def event_stream():
         started_event: dict[str, object] = {
             "type": "agent_started",
             "run_id": run_id,
+            "discussion_id": active_discussion_id,
+            "message": message,
             "files": [path.name for path in data_paths],
             "knowledge_base_ids": selected_base_ids,
         }
@@ -1462,9 +1536,30 @@ async def agent_profile_stream_endpoint(
         answer = ""
         knowledge_sources: list[dict[str, str]] = []
         iterator = iter_graph(state, loop, harness)
+
+        async def save_cancelled_run() -> str:
+            """保存中断结果，使任务切换后仍能在历史对话中看到。"""
+            return await asyncio.to_thread(
+                save_discussion_message,
+                active_discussion_id,
+                message,
+                "任务已终止。",
+                knowledge_sources,
+                title,
+                knowledge_base_ids=selected_base_ids,
+                mode="agent",
+                assistant_metadata={"agent_run_id": run_id, "agent_trace": trace},
+                project_id=str(project["id"]) if project else None,
+                cwd=str(workspace_root) if workspace_root else None,
+            )
+
         try:
             async with asyncio.timeout(AGENT_RUN_TIMEOUT_SECONDS):
                 while (event := await asyncio.to_thread(_next_agent_event, iterator)) is not None:
+                    if chat_run.cancel_requested:
+                        await save_cancelled_run()
+                        yield json.dumps({"type": "cancelled", "run_id": run_id}, ensure_ascii=False) + "\n"
+                        return
                     if isinstance(event, Finish):
                         if event.thought.strip():
                             payload = _agent_event_payload(event)
@@ -1479,6 +1574,7 @@ async def agent_profile_stream_endpoint(
                         approval_id = uuid.uuid4().hex
                         decision = asyncio.get_running_loop().create_future()
                         _pending_agent_commands[approval_id] = decision
+                        chat_run.approval_id = approval_id
                         request_payload = {
                             "type": "agent_command_approval_required",
                             "approval_id": approval_id,
@@ -1497,6 +1593,11 @@ async def agent_profile_stream_endpoint(
                             approved = False
                         finally:
                             _pending_agent_commands.pop(approval_id, None)
+                            chat_run.approval_id = None
+                        if chat_run.cancel_requested:
+                            await save_cancelled_run()
+                            yield json.dumps({"type": "cancelled", "run_id": run_id}, ensure_ascii=False) + "\n"
+                            return
                         if approved:
                             approved_command_actions.add(id(event))
                         decision_payload = {
@@ -1532,6 +1633,11 @@ async def agent_profile_stream_endpoint(
             yield json.dumps({"type": "error", "detail": f"Agent 运行失败：{exc}"}, ensure_ascii=False) + "\n"
             return
 
+        if chat_run.cancel_requested:
+            await save_cancelled_run()
+            yield json.dumps({"type": "cancelled", "run_id": run_id}, ensure_ascii=False) + "\n"
+            return
+
         try:
             artifacts = _list_agent_artifacts(
                 active_discussion_id,
@@ -1549,6 +1655,12 @@ async def agent_profile_stream_endpoint(
             }
             for path in uploaded_paths
         ]
+        context_usage = estimate_context_usage_after_turn(
+            rolling_context.memory_summary,
+            rolling_context.recent_messages,
+            message,
+            answer,
+        )
         saved_discussion_id = await asyncio.to_thread(
             save_discussion_message,
             active_discussion_id,
@@ -1563,6 +1675,7 @@ async def agent_profile_stream_endpoint(
                 "agent_run_id": run_id,
                 "agent_trace": trace,
                 "agent_artifacts": artifacts,
+                "context_usage": context_usage,
             },
             project_id=str(project["id"]) if project else None,
             cwd=str(workspace_root) if workspace_root else None,
@@ -1574,15 +1687,55 @@ async def agent_profile_stream_endpoint(
                 "run_id": run_id,
                 "artifacts": artifacts,
                 "sources": knowledge_sources,
+                "context_usage": context_usage,
             },
             ensure_ascii=False,
         ) + "\n"
 
+    task = asyncio.create_task(_publish_agent_chat_run(chat_run, event_stream()))
+    _BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_BACKGROUND_TASKS.discard)
     return StreamingResponse(
-        event_stream(),
+        _replay_agent_chat_run(chat_run),
         media_type="application/x-ndjson",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@app.get("/api/agent/discussions/{discussion_id}/active-run")
+async def get_active_agent_chat_run(discussion_id: str) -> dict[str, str] | None:
+    """查询某个对话当前仍在运行的 Agent 任务。"""
+    for run_id, run in reversed(list(_agent_chat_runs.items())):
+        if run.discussion_id == discussion_id and not run.done:
+            return {"run_id": run_id, "message": run.message}
+    return None
+
+
+@app.get("/api/agent/chat/runs/{run_id}/stream")
+async def reconnect_agent_chat_run(run_id: str) -> StreamingResponse:
+    """重连 Agent 运行并回放已产生的事件。"""
+    run = _agent_chat_runs.get(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Agent 任务不存在或服务已重启")
+    return StreamingResponse(
+        _replay_agent_chat_run(run),
+        media_type="application/x-ndjson",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.post("/api/agent/chat/runs/{run_id}/cancel")
+async def cancel_agent_chat_run(run_id: str) -> dict[str, bool]:
+    """请求在当前工具返回后终止 Agent，不再执行下一步。"""
+    run = _agent_chat_runs.get(run_id)
+    if run is None or run.done:
+        raise HTTPException(status_code=404, detail="Agent 任务不在运行中")
+    run.cancel_requested = True
+    if run.approval_id:
+        decision = _pending_agent_commands.get(run.approval_id)
+        if decision is not None and not decision.done():
+            decision.set_result(False)
+    return {"accepted": True}
 
 
 @app.get(

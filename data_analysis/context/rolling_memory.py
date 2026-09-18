@@ -55,6 +55,28 @@ def estimate_text_tokens(text: str) -> int:
     return max(1, (ascii_chars + 3) // 4 + non_ascii_chars)
 
 
+def estimate_context_usage_after_turn(
+    memory_summary: str | None,
+    recent_messages: Sequence[Mapping[str, Any]],
+    user_message: str,
+    assistant_message: str,
+    *,
+    trigger_tokens: int = COMPACTION_TRIGGER_TOKENS,
+) -> dict[str, int]:
+    """按下轮滚动记忆的历史消息口径估算本轮结束后的剩余额度。"""
+    used_tokens = estimate_text_tokens(memory_summary or "") + sum(
+        estimate_text_tokens(str(entry["content"])) + 8
+        for entry in recent_messages
+    )
+    used_tokens += estimate_text_tokens(user_message) + 8
+    used_tokens += estimate_text_tokens(assistant_message) + 8
+    return {
+        "estimated_tokens": used_tokens,
+        "threshold_tokens": trigger_tokens,
+        "remaining_tokens": max(0, trigger_tokens - used_tokens),
+    }
+
+
 def compile_rolling_context(
     entries: Sequence[Mapping[str, Any]],
     llm: Any,

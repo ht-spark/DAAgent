@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from data_analysis.agent import AgentLoop, AgentMessage, AgentState
-from data_analysis.context import compile_rolling_context
+from data_analysis.context import compile_rolling_context, estimate_context_usage_after_turn
 
 NL = chr(10)
 
@@ -34,6 +34,31 @@ def _message(seq: int, role: str, content: str) -> dict:
         "content": content,
         "metadata": {},
     }
+
+
+def test_estimate_context_usage_after_turn_matches_next_history_budget() -> None:
+    """本轮用量应计入摘要、已有消息及本轮用户和助手消息。"""
+    usage = estimate_context_usage_after_turn(
+        "summary",
+        [_message(1, "user", "old")],
+        "new",
+        "answer",
+        trigger_tokens=100,
+    )
+
+    assert usage == {
+        "estimated_tokens": 30,
+        "threshold_tokens": 100,
+        "remaining_tokens": 70,
+    }
+
+
+def test_estimate_context_usage_after_turn_clamps_remaining_to_zero() -> None:
+    """超过压缩阈值时不能显示负的剩余 token。"""
+    usage = estimate_context_usage_after_turn(None, [], "request", "response", trigger_tokens=10)
+
+    assert usage["estimated_tokens"] > 10
+    assert usage["remaining_tokens"] == 0
 
 
 def test_short_session_keeps_all_raw_messages_without_summary_call() -> None:

@@ -120,7 +120,7 @@ class AgentLoop:
         tools: Sequence[ToolSpec],
         system_prompt: str,
         *,
-        max_iterations: int = 30,
+        max_iterations: int = 50,
         decision_retries: int = 5,
     ) -> None:
         """Initialize the decision-only loop.

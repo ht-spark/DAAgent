@@ -1,7 +1,4 @@
 """受控的本地开发服务器启动入口。
-
-仅监听服务端与智能体源码，避免建模任务写入 ``artifacts/`` 时触发
-Uvicorn 自动重载并中断后台任务。
 """
 from __future__ import annotations
 

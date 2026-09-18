@@ -410,6 +410,7 @@ export type BrainstormDiscussion = BrainstormDiscussionSummary & {
       agent_run_id?: string
       agent_trace?: AgentTraceEvent[]
       agent_artifacts?: AgentArtifact[]
+      context_usage?: ContextUsage
       sources?: KnowledgeSourceCitation[]
     }
   }>
@@ -473,6 +474,12 @@ export type AgentTraceEvent = {
   approved: boolean
 }
 
+export type ContextUsage = {
+  estimated_tokens: number
+  threshold_tokens: number
+  remaining_tokens: number
+}
+
 export async function decideAgentCommand(approvalId: string, approved: boolean): Promise<void> {
   const res = await fetch(`/api/agent/commands/${encodeURIComponent(approvalId)}/decision`, {
     method: 'POST',
@@ -484,26 +491,42 @@ export async function decideAgentCommand(approvalId: string, approved: boolean):
 
 const AGENT_REQUEST_TIMEOUT_MS = 3 * 60 * 60 * 1000 + 60 * 1000
 
+export type AgentChatHandlers = {
+  onStarted: (runId: string, files: string[], discussionId?: string, message?: string) => void
+  onTrace: (event: AgentTraceEvent) => void
+  onApprovalRequired: (event: Extract<AgentTraceEvent, { type: 'agent_command_approval_required' }>) => Promise<void>
+  onToken: (content: string) => void
+  onDone: (discussionId: string, runId: string, artifacts: AgentArtifact[], sources?: KnowledgeSourceCitation[], contextUsage?: ContextUsage) => void
+  onCancelled?: () => void
+}
+
+export async function fetchActiveAgentChatRun(discussionId: string): Promise<{ run_id: string; message: string } | null> {
+  const res = await fetch(`/api/agent/discussions/${encodeURIComponent(discussionId)}/active-run`)
+  if (!res.ok) throw new Error(await extractDetail(res, '获取运行任务失败'))
+  return res.json()
+}
+
+export async function cancelAgentChatRun(runId: string): Promise<void> {
+  const res = await fetch(`/api/agent/chat/runs/${encodeURIComponent(runId)}/cancel`, { method: 'POST' })
+  if (!res.ok) throw new Error(await extractDetail(res, '终止任务失败'))
+}
+
+export async function reconnectAgentChatRun(runId: string, handlers: AgentChatHandlers, signal: AbortSignal): Promise<void> {
+  const res = await fetch(`/api/agent/chat/runs/${encodeURIComponent(runId)}/stream`, { signal })
+  if (!res.ok) throw new Error(await extractDetail(res, '重连任务失败'))
+  await consumeAgentChatStream(res, handlers)
+}
+
 export async function streamDataAgentMessage(
   message: string,
   discussionId: string | null,
   title: string,
   files: File[],
-  handlers: {
-    onStarted: (runId: string, files: string[]) => void
-    onTrace: (event: AgentTraceEvent) => void
-    onApprovalRequired: (event: Extract<AgentTraceEvent, { type: 'agent_command_approval_required' }>) => Promise<void>
-    onToken: (content: string) => void
-    onDone: (
-      discussionId: string,
-      runId: string,
-      artifacts: AgentArtifact[],
-      sources?: KnowledgeSourceCitation[],
-    ) => void
-  },
+  handlers: AgentChatHandlers,
   configId?: string | null,
   knowledgeBaseIds?: string[],
   projectId?: string | null,
+  signal?: AbortSignal,
 ): Promise<void> {
   const form = new FormData()
   form.append('message', message)
@@ -519,7 +542,7 @@ export async function streamDataAgentMessage(
     res = await fetch('/api/agent/chat/stream', {
       method: 'POST',
       body: form,
-      signal: AbortSignal.timeout(AGENT_REQUEST_TIMEOUT_MS),
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(AGENT_REQUEST_TIMEOUT_MS)]) : AbortSignal.timeout(AGENT_REQUEST_TIMEOUT_MS),
     })
   } catch (error) {
     if (error instanceof DOMException && error.name === 'TimeoutError') {
@@ -528,6 +551,10 @@ export async function streamDataAgentMessage(
     throw new Error('Agent 无法连接，请确认后端服务正在运行。')
   }
   if (!res.ok) throw new Error(await extractDetail(res, 'Agent 启动失败'))
+  await consumeAgentChatStream(res, handlers)
+}
+
+async function consumeAgentChatStream(res: Response, handlers: AgentChatHandlers): Promise<void> {
   if (!res.body) throw new Error('Agent 未返回流式内容。')
 
   const reader = res.body.getReader()
@@ -546,12 +573,14 @@ export async function streamDataAgentMessage(
         detail?: string
         run_id?: string
         discussion_id?: string
+        message?: string
         files?: string[]
         artifacts?: AgentArtifact[]
         sources?: KnowledgeSourceCitation[]
-      } & Partial<AgentTraceEvent>
+        context_usage?: ContextUsage
+      }
       if (event.type === 'agent_started' && event.run_id) {
-        handlers.onStarted(event.run_id, event.files ?? [])
+        handlers.onStarted(event.run_id, event.files ?? [], event.discussion_id, event.message)
         handlers.onTrace(event as AgentTraceEvent)
       }
       if (event.type === 'agent_action' || event.type === 'agent_reasoning' || event.type === 'agent_observation'
@@ -563,8 +592,9 @@ export async function streamDataAgentMessage(
       }
       if (event.type === 'token' && event.content) handlers.onToken(event.content)
       if (event.type === 'error') throw new Error(event.detail ?? '数据 Agent 运行失败。')
+      if (event.type === 'cancelled') handlers.onCancelled?.()
       if (event.type === 'done' && event.discussion_id && event.run_id) {
-        handlers.onDone(event.discussion_id, event.run_id, event.artifacts ?? [], event.sources)
+        handlers.onDone(event.discussion_id, event.run_id, event.artifacts ?? [], event.sources, event.context_usage)
       }
     }
     if (done) break

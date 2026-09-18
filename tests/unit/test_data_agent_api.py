@@ -28,6 +28,47 @@ def test_agent_timeout_configuration_is_separated():
 
 
 @pytest.mark.asyncio
+async def test_agent_chat_run_replays_events_after_subscriber_disconnect():
+    """客户端不订阅时后台运行仍应结束，重连后可回放完整轨迹。"""
+    run = main.AgentChatRun("discussion-replay", "分析数据")
+    continue_run = asyncio.Event()
+
+    async def events():
+        yield '{"type":"agent_started"}\n'
+        await continue_run.wait()
+        yield '{"type":"done"}\n'
+
+    producer = asyncio.create_task(main._publish_agent_chat_run(run, events()))
+    subscriber = main._replay_agent_chat_run(run)
+    assert await anext(subscriber) == '{"type":"agent_started"}\n'
+    await subscriber.aclose()
+    continue_run.set()
+    await producer
+    replayed = [line async for line in main._replay_agent_chat_run(run)]
+
+    assert replayed == ['{"type":"agent_started"}\n', '{"type":"done"}\n']
+    assert run.done
+
+
+@pytest.mark.asyncio
+async def test_cancel_agent_chat_run_rejects_pending_command_approval():
+    """终止请求应设置标记并立即拒绝当前等待审批的命令。"""
+    run = main.AgentChatRun("discussion-cancel", "运行命令")
+    run.approval_id = "approval-cancel"
+    decision = asyncio.get_running_loop().create_future()
+    main._agent_chat_runs["run-cancel"] = run
+    main._pending_agent_commands["approval-cancel"] = decision
+    try:
+        result = await main.cancel_agent_chat_run("run-cancel")
+        assert result == {"accepted": True}
+        assert run.cancel_requested
+        assert await decision is False
+    finally:
+        main._agent_chat_runs.pop("run-cancel", None)
+        main._pending_agent_commands.pop("approval-cancel", None)
+
+
+@pytest.mark.asyncio
 async def test_agent_command_decision_requires_pending_request():
     with pytest.raises(HTTPException) as exc:
         await main.decide_agent_command_endpoint(
