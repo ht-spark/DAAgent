@@ -756,7 +756,8 @@ export default function NewChat({
       }))
       .then(({ discussion, activeRun }) => {
         if (cancelled) return
-        if (activeRun && discussion.messages.some((item) => item.metadata?.agent_run_id === activeRun.run_id)) {
+        const activeRunId = activeRun?.run_id
+        if (activeRunId && discussion.messages.some((item) => item.metadata?.agent_run_id === activeRunId)) {
           activeRun = null
         }
         const savedMetadata = [...discussion.messages]
