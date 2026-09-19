@@ -1,12 +1,19 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
 from data_analysis.agent.loop import AgentLoop
-from data_analysis.agent.state import AgentMessage, AgentState, Observation
+from data_analysis.agent.state import (
+    AgentMessage,
+    AgentState,
+    ArtifactReference,
+    Observation,
+    discover_artifacts,
+)
 
 
 class FakeLlm:
@@ -29,7 +36,10 @@ def test_state_normalizes_authorized_data_paths() -> None:
         data_paths=[" data.csv ", "data.csv", "other.xlsx"],
     )
 
-    assert state.data_paths == ["data.csv", "other.xlsx"]
+    assert state.data_paths == [
+        str(Path("data.csv").resolve()),
+        str(Path("other.xlsx").resolve()),
+    ]
 
 
 def test_record_observation_advances_iteration() -> None:
@@ -142,3 +152,79 @@ def test_agent_loop_receives_structured_observation() -> None:
     assert '"tool_name": "profile_data"' in messages[-1][1]
     assert '"success": true' in messages[-1][1]
     assert '"rows": 10' in messages[-1][1]
+
+
+def test_discovers_existing_artifacts_and_excludes_runtime_files(tmp_path) -> None:
+    output_dir = tmp_path / "outputs"
+    output_dir.mkdir()
+    report = output_dir / "reports" / "summary.md"
+    report.parent.mkdir()
+    report.write_text("# 已有报告", encoding="utf-8")
+    runtime_file = output_dir / ".runtime" / "cache.json"
+    runtime_file.parent.mkdir()
+    runtime_file.write_text("{}", encoding="utf-8")
+
+    artifacts = discover_artifacts(output_dir)
+
+    assert len(artifacts) == 1
+    assert artifacts[0].relative_path == "reports/summary.md"
+    assert artifacts[0].absolute_path == str(report.resolve())
+    assert artifacts[0].source_tool == "existing_session"
+    assert artifacts[0].reusable is True
+
+
+def test_successful_tool_observation_adds_real_artifact_to_state(tmp_path) -> None:
+    output_dir = tmp_path / "outputs"
+    output_dir.mkdir()
+    report = output_dir / "report.md"
+    report.write_text("真实结果", encoding="utf-8")
+    state = AgentState(user_query="生成报告", output_dir=str(output_dir))
+
+    state.record_observation(Observation(
+        tool_name="execute_python",
+        success=True,
+        result={
+            "changed_artifacts": ["report.md"],
+            "artifact_details": [{
+                "path": "report.md",
+                "media_type": "text/markdown",
+                "size_bytes": report.stat().st_size,
+            }],
+        },
+    ))
+
+    assert len(state.available_artifacts) == 1
+    assert state.available_artifacts[0].relative_path == "report.md"
+    assert state.available_artifacts[0].absolute_path == str(report.resolve())
+    assert state.available_artifacts[0].source_tool == "execute_python"
+
+
+def test_loop_context_contains_absolute_input_path_and_reusable_artifact(
+    tmp_path,
+) -> None:
+    input_file = tmp_path / "input" / "data.csv"
+    input_file.parent.mkdir()
+    input_file.write_text("value\n1\n", encoding="utf-8")
+    artifact_file = tmp_path / "outputs" / "summary.md"
+    artifact_file.parent.mkdir()
+    artifact_file.write_text("完成", encoding="utf-8")
+    state = AgentState(
+        user_query="继续分析",
+        data_paths=[str(input_file)],
+        available_artifacts=[
+            ArtifactReference(
+                relative_path="summary.md",
+                absolute_path=str(artifact_file),
+                name="summary.md",
+                size_bytes=artifact_file.stat().st_size,
+                media_type="text/markdown",
+                source_tool="existing_session",
+            )
+        ],
+    )
+
+    context_text = AgentLoop(FakeLlm(), [], "依据状态回答").build_messages(state)[-1][1]
+
+    assert json.dumps(str(input_file.resolve()), ensure_ascii=False) in context_text
+    assert '"artifact_reuse_status": "已有产物可直接复用"' in context_text
+    assert '"relative_path": "summary.md"' in context_text

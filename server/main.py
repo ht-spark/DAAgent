@@ -34,7 +34,12 @@ from data_analysis.agent.graph import (
 )
 from data_analysis.agent.loop import Action, AgentLoop, Finish
 from data_analysis.agent.planner import Planner
-from data_analysis.agent.state import AgentMessage, AgentState, Observation
+from data_analysis.agent.state import (
+    AgentMessage,
+    AgentState,
+    Observation,
+    discover_artifacts,
+)
 from data_analysis.context import compile_rolling_context, estimate_context_usage_after_turn
 from data_analysis.runtime import (
     ExecutionContext,
@@ -1195,7 +1200,7 @@ def _resolve_agent_artifact(discussion_id: str, file_path: str) -> Path:
         relative_path.is_absolute()
         or ".." in relative_path.parts
         or not relative_path.parts
-        or relative_path.parts[0].casefold() == ".runs"
+        or relative_path.parts[0].casefold() in {".runs", ".runtime"}
     ):
         raise ValueError("Agent 产物路径无效")
     target = (root / relative_path).resolve()
@@ -1235,7 +1240,7 @@ def _list_agent_artifacts(
         if not path.is_file():
             continue
         relative_path = path.relative_to(root)
-        if relative_path.parts[0].casefold() == ".runs":
+        if relative_path.parts[0].casefold() in {".runs", ".runtime"}:
             continue
         artifacts.append(
             {
@@ -1527,9 +1532,10 @@ async def agent_profile_stream_endpoint(
     state = AgentState(
         user_query=message,
         memory_summary=rolling_context.memory_summary,
-        data_paths=[str(path) for path in data_paths],
+        data_paths=[str(path.resolve(strict=True)) for path in data_paths],
         output_dir=str(output_dir),
         workspace_root=str(workspace_root) if workspace_root else None,
+        available_artifacts=discover_artifacts(output_dir),
         project_id=str(project["id"]) if project else None,
         messages=history,
     )

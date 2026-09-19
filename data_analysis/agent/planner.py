@@ -112,6 +112,7 @@ class Planner:
             output_dir=state.output_dir,
             workspace_root=state.workspace_root,
             project_id=state.project_id,
+            available_artifacts=list(state.available_artifacts),
             messages=list(state.messages),
         )
         return self.create_plan(recovery_state)
@@ -128,8 +129,16 @@ class Planner:
                 {
                     "file_name": Path(path).name,
                     "file_path": str(Path(path).expanduser().resolve(strict=False)),
+                    "absolute_path": str(
+                        Path(path).expanduser().resolve(strict=False)
+                    ),
                 }
                 for path in state.data_paths
+            ],
+            "artifact_reuse_status": "已有产物可直接复用",
+            "available_artifacts": [
+                artifact.model_dump(mode="json")
+                for artifact in state.available_artifacts
             ],
             "workspace_enabled": bool(state.workspace_root),
             "available_tools": tools,

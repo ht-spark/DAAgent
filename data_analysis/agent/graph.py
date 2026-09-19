@@ -295,6 +295,7 @@ def _todo_state(state: AgentState, todo: TodoItem) -> AgentState:
         output_dir=state.output_dir,
         workspace_root=state.workspace_root,
         project_id=state.project_id,
+        available_artifacts=list(state.available_artifacts),
         messages=list(state.messages),
         analysis_plan=state.analysis_plan,
         current_todo_id=todo.id,
@@ -324,6 +325,7 @@ def _final_state(state: AgentState, plan: AnalysisPlan) -> AgentState:
         output_dir=state.output_dir,
         workspace_root=state.workspace_root,
         project_id=state.project_id,
+        available_artifacts=list(state.available_artifacts),
         messages=list(state.messages),
         analysis_plan=plan,
     )

@@ -47,6 +47,7 @@ class AgentStateView(Protocol):
     messages: Sequence[Any]
     observations: Sequence[Any]
     data_paths: Sequence[str]
+    available_artifacts: Sequence[Any]
     workspace_root: str | None
     project_id: str | None
     iteration: int
@@ -258,9 +259,20 @@ class AgentLoop:
                 {
                     "file_name": Path(path).name,
                     "file_path": str(Path(path).expanduser().resolve(strict=False)),
+                    "absolute_path": str(
+                        Path(path).expanduser().resolve(strict=False)
+                    ),
                 }
                 for path in state.data_paths
             ],
+            "input_path_policy": (
+                "file_path 和 absolute_path 是 Runtime 授权的同一绝对路径；"
+                "调用附件工具时必须原样传入，不得改成文件名或自行拼接。"
+            ),
+            "artifact_reuse_status": "已有产物可直接复用",
+            "available_artifacts": list(
+                getattr(state, "available_artifacts", ())
+            ),
             "project_id": getattr(state, "project_id", None),
             "workspace_enabled": bool(getattr(state, "workspace_root", None)),
             "observations": list(state.observations),

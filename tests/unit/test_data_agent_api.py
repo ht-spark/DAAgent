@@ -315,7 +315,9 @@ def test_agent_artifacts_only_include_generated_outputs(monkeypatch, tmp_path):
     run_dir = tmp_path / "agent_sessions" / discussion_id
     (run_dir / ".runs" / run_id / "input").mkdir(parents=True)
     (run_dir / "reports").mkdir()
+    (run_dir / ".runtime").mkdir()
     (run_dir / ".runs" / run_id / "input" / "source.csv").write_text("x\n1\n", encoding="utf-8")
+    (run_dir / ".runtime" / "cache.json").write_text("{}", encoding="utf-8")
     (run_dir / "reports" / "summary.md").write_text("# 结果", encoding="utf-8")
 
     artifacts = main._list_agent_artifacts(discussion_id, run_id)
@@ -435,9 +437,14 @@ def test_agent_artifact_resolver_rejects_inputs_and_path_traversal(
     input_dir = tmp_path / "agent_sessions" / discussion_id / ".runs" / run_id / "input"
     input_dir.mkdir(parents=True)
     (input_dir / "source.csv").write_text("x\n1\n", encoding="utf-8")
+    runtime_dir = input_dir.parents[2] / ".runtime"
+    runtime_dir.mkdir()
+    (runtime_dir / "cache.json").write_text("{}", encoding="utf-8")
 
     with pytest.raises(ValueError, match="路径无效"):
         main._resolve_agent_artifact(discussion_id, ".runs/b/input/source.csv")
+    with pytest.raises(ValueError, match="路径无效"):
+        main._resolve_agent_artifact(discussion_id, ".runtime/cache.json")
     with pytest.raises(ValueError, match="路径无效"):
         main._resolve_agent_artifact(discussion_id, "../outside.txt")
 

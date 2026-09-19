@@ -11,7 +11,7 @@ from data_analysis.agent.loop import AgentLoop
 from data_analysis.agent.planner import Planner, PlannerError
 from data_analysis.agent.state import AgentState, AnalysisPlan
 from data_analysis.runtime import Harness
-from data_analysis.tools import ToolRegistry, ToolSpec
+from data_analysis.tools import ToolRegistry, ToolSpec, create_agent_tool_registry
 
 
 class ScriptedLlm:
@@ -175,3 +175,54 @@ def test_plan_graph_replans_after_repeated_identical_failure() -> None:
     assert [todo.status for todo in state.analysis_plan.todos] == ["failed", "completed"]
     assert state.analysis_plan.todos[1].id == "recovery_1_todo_1"
     assert "不得原样重复" in llm.calls[4][1][1]
+
+
+def test_plan_graph_passes_new_artifact_to_later_todo_context(tmp_path) -> None:
+    plan = json.dumps({
+        "objective": "生成并复用报告",
+        "todos": [
+            {"id": "todo_1", "objective": "生成报告"},
+            {
+                "id": "todo_2",
+                "objective": "复用已有报告给出结论",
+                "depends_on": ["todo_1"],
+            },
+        ],
+    }, ensure_ascii=False)
+    write_action = json.dumps({
+        "type": "action",
+        "tool_name": "write_artifact",
+        "arguments": {
+            "relative_path": "report.md",
+            "content": "# 分析结果",
+        },
+    }, ensure_ascii=False)
+    llm = ScriptedLlm([
+        plan,
+        write_action,
+        '{"type":"finish","answer":"报告已生成。"}',
+        '{"type":"finish","answer":"已复用报告。"}',
+        '{"type":"finish","answer":"任务完成。"}',
+    ])
+    output_dir = tmp_path / "outputs"
+    registry = create_agent_tool_registry([], output_dir)
+    state = AgentState(
+        user_query="生成报告并在后续步骤复用",
+        output_dir=str(output_dir),
+    )
+
+    finish = run_plan_graph(
+        state,
+        Planner(llm, registry.specs()),
+        AgentLoop(llm, registry.specs(), "依据当前 Todo 工作"),
+        Harness(registry),
+    )
+
+    assert finish.answer == "任务完成。"
+    assert state.available_artifacts[0].relative_path == "report.md"
+    second_todo_context = llm.calls[3][-1][1]
+    assert '"artifact_reuse_status": "已有产物可直接复用"' in second_todo_context
+    assert '"relative_path": "report.md"' in second_todo_context
+    assert str((output_dir / "report.md").resolve()).replace("\\", "\\\\") in (
+        second_todo_context
+    )

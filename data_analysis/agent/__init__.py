@@ -12,7 +12,13 @@ from .loop import (
     ToolSpec,
     UnknownToolError,
 )
-from .state import AgentMessage, AgentState, Observation
+from .state import (
+    AgentMessage,
+    AgentState,
+    ArtifactReference,
+    Observation,
+    discover_artifacts,
+)
 from .planner import Planner, PlannerError
 from .state import AnalysisPlan, TodoItem
 
@@ -23,6 +29,7 @@ __all__ = [
     "AgentMessage",
     "AgentState",
     "AgentStateView",
+    "ArtifactReference",
     "Decision",
     "DecisionParseError",
     "Finish",
@@ -30,6 +37,7 @@ __all__ = [
     "Observation",
     "AnalysisPlan",
     "TodoItem",
+    "discover_artifacts",
     "Planner",
     "PlannerError",
     "ToolSpec",
