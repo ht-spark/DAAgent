@@ -6,12 +6,12 @@ import json
 
 import pytest
 
-from data_analysis.agent.graph import run_plan_graph
+from data_analysis.agent.graph import TodoFailed, iter_plan_graph, run_plan_graph
 from data_analysis.agent.loop import AgentLoop
 from data_analysis.agent.planner import Planner, PlannerError
 from data_analysis.agent.state import AgentState, AnalysisPlan
 from data_analysis.runtime import Harness
-from data_analysis.tools import ToolRegistry
+from data_analysis.tools import ToolRegistry, ToolSpec
 
 
 class ScriptedLlm:
@@ -127,3 +127,51 @@ def test_plan_graph_runs_todos_with_unchanged_react_then_summarizes() -> None:
         "数据质量满足分析要求。",
     ]
     assert [message.role for message in state.messages] == ["user", "assistant"]
+
+
+def test_plan_graph_replans_after_repeated_identical_failure() -> None:
+    initial_plan = json.dumps({
+        "objective": "完成任务",
+        "todos": [{"id": "todo_1", "objective": "执行原方案"}],
+    }, ensure_ascii=False)
+    recovery_plan = json.dumps({
+        "objective": "恢复任务",
+        "todos": [{"id": "todo_1", "objective": "使用替代方案"}],
+    }, ensure_ascii=False)
+    repeated_action = json.dumps({
+        "type": "action",
+        "tool_name": "always_fail",
+        "arguments": {"value": 1},
+    }, ensure_ascii=False)
+    llm = ScriptedLlm([
+        initial_plan,
+        repeated_action,
+        repeated_action,
+        repeated_action,
+        recovery_plan,
+        '{"type":"finish","answer":"替代方案完成。"}',
+        '{"type":"finish","answer":"任务最终完成。"}',
+    ])
+    registry = ToolRegistry()
+
+    def always_fail(_arguments, _context):
+        raise ValueError("固定失败")
+
+    registry.register_in_process(
+        ToolSpec(name="always_fail", description="始终失败的测试工具"),
+        always_fail,
+    )
+    state = AgentState(user_query="完成任务")
+
+    events = list(iter_plan_graph(
+        state,
+        Planner(llm, registry.specs()),
+        AgentLoop(llm, registry.specs(), "依据当前 Todo 工作"),
+        Harness(registry),
+    ))
+
+    assert any(isinstance(event, TodoFailed) for event in events)
+    assert state.analysis_plan is not None
+    assert [todo.status for todo in state.analysis_plan.todos] == ["failed", "completed"]
+    assert state.analysis_plan.todos[1].id == "recovery_1_todo_1"
+    assert "不得原样重复" in llm.calls[4][1][1]

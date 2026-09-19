@@ -91,12 +91,15 @@ class SubprocessSandbox:
         self,
         tool: RegisteredTool,
         arguments: Mapping[str, JsonValue],
+        *,
+        context_override: Mapping[str, JsonValue] | None = None,
     ) -> JsonValue:
         """在子进程中执行工具并返回 JSON 结果。
 
         Args:
             tool: 已由注册表解析的可信工具。
             arguments: LLM 生成且已经解析为对象的工具参数。
+            context_override: 当前 Run 需要覆盖到工具的最新上下文。
 
         Returns:
             工具返回的 JSON 值。
@@ -113,7 +116,7 @@ class SubprocessSandbox:
                 {
                     "entrypoint": entrypoint,
                     "arguments": dict(arguments),
-                    "context": dict(tool.context),
+                    "context": {**dict(tool.context), **dict(context_override or {})},
                 },
                 ensure_ascii=False,
                 allow_nan=False,

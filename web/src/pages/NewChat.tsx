@@ -449,12 +449,11 @@ const AgentInlineProcess = memo(function AgentInlineProcess({
   trace: AgentTraceEvent[]
   running: boolean
 }) {
-  const plan = trace.find(
-    (event): event is Extract<AgentTraceEvent, { type: 'agent_plan' }> =>
-      event.type === 'agent_plan',
-  )
+  const plan = trace.reduce<
+    Extract<AgentTraceEvent, { type: 'agent_plan' }> | undefined
+  >((latest, event) => event.type === 'agent_plan' ? event : latest, undefined)
   const todoState = new Map<string, {
-    status: 'pending' | 'in_progress' | 'completed'
+    status: 'pending' | 'in_progress' | 'completed' | 'failed'
     result?: string
   }>()
   plan?.todos.forEach((todo) => todoState.set(todo.id, { status: 'pending' }))
@@ -468,6 +467,12 @@ const AgentInlineProcess = memo(function AgentInlineProcess({
         result: event.result_summary,
       })
     }
+    if (event.type === 'agent_todo_failed') {
+      todoState.set(event.todo_id, {
+        status: 'failed',
+        result: event.error,
+      })
+    }
   })
   const completedCount = plan?.todos.filter(
     (todo) => todoState.get(todo.id)?.status === 'completed',
@@ -476,7 +481,7 @@ const AgentInlineProcess = memo(function AgentInlineProcess({
     ? Math.round((completedCount / plan.todos.length) * 100)
     : 0
   const activityTrace = trace.filter(
-    (event) => !['agent_plan', 'agent_todo_started', 'agent_todo_completed'].includes(event.type),
+    (event) => !['agent_plan', 'agent_todo_started', 'agent_todo_completed', 'agent_todo_failed'].includes(event.type),
   )
 
   return (
@@ -509,7 +514,9 @@ const AgentInlineProcess = memo(function AgentInlineProcess({
                 ? '已完成'
                 : state.status === 'in_progress'
                   ? '进行中'
-                  : '等待中'
+                  : state.status === 'failed'
+                    ? '已熔断'
+                    : '等待中'
               return (
                 <li
                   className={`agent-plan-item is-${state.status}`}

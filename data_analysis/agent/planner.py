@@ -70,6 +70,52 @@ class Planner:
                 ])
         raise PlannerError(f"无法生成有效执行计划：{last_error}")
 
+    def create_recovery_plan(
+        self,
+        state: AgentState,
+        plan: AnalysisPlan,
+        *,
+        failed_todo_id: str,
+        failure_summary: str,
+    ) -> AnalysisPlan:
+        """根据已完成结果和真实失败证据重新规划尚未完成的工作。"""
+        completed = [
+            {
+                "id": todo.id,
+                "objective": todo.objective,
+                "result_summary": todo.result_summary,
+            }
+            for todo in plan.todos
+            if todo.status == "completed"
+        ]
+        remaining = [
+            {
+                "objective": todo.objective,
+                "expected_outputs": todo.expected_outputs,
+            }
+            for todo in plan.todos
+            if todo.status == "pending"
+        ]
+        recovery_query = (
+            f"原始目标：{state.user_query}\n\n"
+            f"已完成结果：{json.dumps(completed, ensure_ascii=False)}\n"
+            f"失败 Todo：{failed_todo_id}\n"
+            f"失败证据：{failure_summary}\n"
+            f"原计划剩余工作：{json.dumps(remaining, ensure_ascii=False)}\n\n"
+            "请重新规划完成原始目标所需的剩余工作。不得原样重复已经熔断的调用；"
+            "优先更换工具、参数或执行策略。若某项无法继续，可规划一个明确说明限制的 Todo。"
+        )
+        recovery_state = AgentState(
+            user_query=recovery_query,
+            memory_summary=state.memory_summary,
+            data_paths=list(state.data_paths),
+            output_dir=state.output_dir,
+            workspace_root=state.workspace_root,
+            project_id=state.project_id,
+            messages=list(state.messages),
+        )
+        return self.create_plan(recovery_state)
+
     def build_messages(self, state: AgentState) -> list[tuple[str, str]]:
         """构造只负责规划、不执行工具的 Planner 消息。"""
         tools = [

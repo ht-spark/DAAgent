@@ -1,6 +1,8 @@
 """Agent 工具执行运行时。"""
 
 from .harness import Harness
+from .execution_context import ExecutionContext
+from .failure_tracker import FailureCircuitOpen, FailureTracker, RepeatedToolFailureError
 from ..python_environment import (
     PythonEnvironment,
     PythonEnvironmentError,
@@ -17,8 +19,12 @@ from .sandbox import (
 
 __all__ = [
     "Harness",
+    "ExecutionContext",
+    "FailureCircuitOpen",
+    "FailureTracker",
     "PythonEnvironment",
     "PythonEnvironmentError",
+    "RepeatedToolFailureError",
     "SandboxConfigurationError",
     "SandboxError",
     "SandboxProtocolError",

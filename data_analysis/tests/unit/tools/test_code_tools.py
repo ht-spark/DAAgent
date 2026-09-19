@@ -103,3 +103,42 @@ def test_execute_python_code_exposes_safe_artifact_workspace(tmp_path) -> None:
         1,
         2,
     ]
+
+
+def test_execute_python_code_rejects_write_outside_run_directory(tmp_path) -> None:
+    outside = tmp_path / "outside.txt"
+
+    with pytest.raises(CodeExecutionError, match="禁止写入当前运行目录之外"):
+        execute_python_code(
+            f"from pathlib import Path\nPath({str(outside)!r}).write_text('越界')",
+            data_paths=[],
+            output_dir=tmp_path / "output",
+        )
+
+    assert not outside.exists()
+
+
+def test_execute_python_code_requires_promised_artifact(tmp_path) -> None:
+    with pytest.raises(CodeExecutionError, match="没有在当前运行目录生成承诺产物"):
+        execute_python_code(
+            "result = {'status': 'done'}",
+            data_paths=[],
+            output_dir=tmp_path / "output",
+            expected_artifacts=["report.md"],
+        )
+
+
+def test_execute_python_code_returns_structured_artifact_metadata(tmp_path) -> None:
+    observation = execute_python_code(
+        "from pathlib import Path\nPath(ARTIFACTS.path('report.md')).write_text('# 结果', encoding='utf-8')",
+        data_paths=[],
+        output_dir=tmp_path / "output",
+        expected_artifacts=["report.md"],
+    )
+
+    assert observation["changed_artifacts"] == ["report.md"]
+    assert observation["artifact_details"] == [{
+        "path": "report.md",
+        "media_type": "text/markdown",
+        "size_bytes": len("# 结果".encode("utf-8")),
+    }]

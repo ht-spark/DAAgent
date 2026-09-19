@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from pathlib import Path
 
 import pandas as pd
 import pytest
 
 from data_analysis.agent import Action
 from data_analysis.runtime import (
+    ExecutionContext,
     Harness,
     SandboxProtocolError,
     SandboxTimeoutError,
@@ -15,6 +17,7 @@ from data_analysis.runtime import (
 )
 from data_analysis.tools import (
     ToolRegistry,
+    ToolSpec,
     create_agent_tool_registry,
     create_data_profile_registry,
 )
@@ -192,3 +195,37 @@ def test_harness_rejects_project_command_without_approval(tmp_path) -> None:
     assert observation.success is False
     assert observation.result is None
     assert "未获人工批准" in observation.error
+
+
+def test_harness_inherits_run_python_environment(tmp_path) -> None:
+    captured: dict[str, object] = {}
+
+    def handler(arguments, context):
+        captured["arguments"] = dict(arguments)
+        captured["context"] = dict(context)
+        return {"ok": True}
+
+    registry = ToolRegistry()
+    registry.register_in_process(
+        ToolSpec(name="execute_python", description="测试工具"),
+        handler,
+    )
+    from data_analysis.python_environment import PythonEnvironment
+
+    runtime_context = ExecutionContext(
+        output_dir=tmp_path / "output",
+        workspace_root=tmp_path,
+        python_environment=PythonEnvironment(
+            executable=Path(sys.executable).resolve(),
+            source="project",
+            name=".venv",
+        ),
+    )
+    observation = Harness(
+        registry,
+        execution_context=runtime_context,
+    ).execute(Action(tool_name="execute_python", arguments={"code": "result = 1"}))
+
+    assert observation.success is True
+    assert captured["arguments"]["python_environment"] == str(Path(sys.executable).resolve())
+    assert captured["context"]["output_dir"] == str((tmp_path / "output").resolve())

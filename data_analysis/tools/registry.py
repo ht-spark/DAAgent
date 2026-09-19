@@ -537,7 +537,8 @@ def create_agent_tool_registry(
                 "（授权文件路径列表）、DATA_FILE_MAP（文件名到路径）、OUTPUT_DIR"
                 "（产物目录）、WORKSPACE_DIR（当前项目目录，未绑定时为空）和"
                 " ARTIFACTS（安全产物工作区）；应将关键结论赋给"
-                " JSON 可序列化变量 result。运行环境已由项目配置自动绑定，返回值"
+                " JSON 可序列化变量 result。生成文件时必须填写 expected_artifacts，运行时会验证"
+                "文件确实产生在当前 Run。运行环境已由项目配置自动绑定，返回值"
                 "中的 runtime 会说明实际解释器。仅当用户明确指定了环境路径，或你从"
                 "项目文件中确认了环境目录时，才传 python_environment；不要猜测路径，"
                 "也不要在代码中激活虚拟环境。"
@@ -550,6 +551,12 @@ def create_agent_tool_registry(
                         "minLength": 1,
                         "maxLength": _MAX_CODE_CHARS,
                         "description": "本轮需要执行的完整 Python 源代码",
+                    },
+                    "expected_artifacts": {
+                        "type": "array",
+                        "items": {"type": "string", "minLength": 1},
+                        "maxItems": 100,
+                        "description": "本次代码承诺创建或更新的产物相对路径；不生成文件时省略",
                     },
                     "python_environment": {
                         "type": "string",
@@ -828,8 +835,10 @@ def _run_python_code(
     context: Mapping[str, JsonValue],
 ) -> JsonValue:
     """执行 Agent 动态生成的 Python 代码。"""
-    if not set(arguments) <= {"code", "python_environment"} or "code" not in arguments:
-        raise ToolArgumentsError("execute_python 只接受必填参数 code 和可选参数 python_environment")
+    if not set(arguments) <= {"code", "expected_artifacts", "python_environment"} or "code" not in arguments:
+        raise ToolArgumentsError(
+            "execute_python 只接受 code、expected_artifacts 和 python_environment"
+        )
     code = arguments.get("code")
     if not isinstance(code, str) or not code.strip():
         raise ToolArgumentsError("code 必须是非空字符串")
@@ -864,6 +873,11 @@ def _run_python_code(
         selected_executable = environment.executable
         selected_source = "requested"
         selected_name = environment.name
+    expected_artifacts = arguments.get("expected_artifacts", [])
+    if not isinstance(expected_artifacts, list) or not all(
+        isinstance(item, str) for item in expected_artifacts
+    ):
+        raise ToolArgumentsError("expected_artifacts 必须是字符串数组")
     return execute_python_code(
         code,
         data_paths=raw_paths,
@@ -872,6 +886,7 @@ def _run_python_code(
         python_executable=selected_executable,
         environment_source=selected_source,
         environment_name=selected_name,
+        expected_artifacts=expected_artifacts,
     )
 
 

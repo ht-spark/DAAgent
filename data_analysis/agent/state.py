@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Literal
+import mimetypes
+from collections.abc import Mapping
+from pathlib import Path
+from typing import Any, Literal
 
 from pydantic import (
     BaseModel,
@@ -134,6 +137,84 @@ class Observation(BaseModel):
         return self
 
 
+class ArtifactReference(BaseModel):
+    """可供后续决策检查或复用的真实产物引用。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    relative_path: str
+    absolute_path: str
+    name: str
+    size_bytes: int = Field(ge=0)
+    media_type: str
+    source_tool: str
+    reusable: bool = True
+
+    @field_validator("relative_path")
+    @classmethod
+    def validate_relative_path(cls, value: str) -> str:
+        """规范化并限制产物相对路径。"""
+        candidate = Path(value.strip())
+        if (
+            not value.strip()
+            or candidate.is_absolute()
+            or ".." in candidate.parts
+            or not candidate.parts
+            or candidate.parts[0].casefold() in {".runs", ".runtime"}
+        ):
+            raise ValueError("产物必须是输出目录内的有效相对路径")
+        return candidate.as_posix()
+
+    @field_validator("absolute_path")
+    @classmethod
+    def normalize_absolute_path(cls, value: str) -> str:
+        """把产物物理路径规范化为绝对路径。"""
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("产物绝对路径不能为空")
+        return str(Path(normalized).expanduser().resolve(strict=False))
+
+    @field_validator("name", "media_type", "source_tool")
+    @classmethod
+    def validate_metadata_text(cls, value: str) -> str:
+        """拒绝空白产物元数据。"""
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("产物元数据不能为空")
+        return normalized
+
+
+def discover_artifacts(output_dir: str | Path | None) -> list[ArtifactReference]:
+    """发现会话产物目录中可供当前运行复用的已有文件。
+
+    Args:
+        output_dir: 当前会话授权的产物目录。
+
+    Returns:
+        已验证、排除运行缓存和输入附件后的产物引用。
+    """
+    if output_dir is None:
+        return []
+    root = Path(output_dir).expanduser().resolve(strict=False)
+    if not root.is_dir():
+        return []
+    artifacts: list[ArtifactReference] = []
+    for target in sorted(root.rglob("*")):
+        if not target.is_file():
+            continue
+        relative_path = target.relative_to(root)
+        if relative_path.parts[0].casefold() in {".runs", ".runtime", "input"}:
+            continue
+        artifacts.append(
+            _artifact_reference(
+                root,
+                relative_path.as_posix(),
+                source_tool="existing_session",
+            )
+        )
+    return artifacts
+
+
 class AgentState(BaseModel):
     """一次思考—执行—观察循环的完整可变状态。"""
 
@@ -145,6 +226,7 @@ class AgentState(BaseModel):
     output_dir: str | None = None
     workspace_root: str | None = None
     project_id: str | None = None
+    available_artifacts: list[ArtifactReference] = Field(default_factory=list)
     messages: list[AgentMessage] = Field(default_factory=list)
     observations: list[Observation] = Field(default_factory=list)
     iteration: int = Field(default=0, ge=0)
@@ -173,16 +255,18 @@ class AgentState(BaseModel):
     @field_validator("data_paths")
     @classmethod
     def normalize_data_paths(cls, values: list[str]) -> list[str]:
-        """清理并去重本次运行已授权的数据文件路径。"""
+        """规范化、绝对化并去重本次运行已授权的数据文件路径。"""
         normalized: list[str] = []
         seen: set[str] = set()
         for value in values:
-            path = value.strip()
-            if not path:
+            raw_path = value.strip()
+            if not raw_path:
                 raise ValueError("数据文件路径不能为空")
-            if path not in seen:
+            path = str(Path(raw_path).expanduser().resolve(strict=False))
+            identity = path.casefold()
+            if identity not in seen:
                 normalized.append(path)
-                seen.add(path)
+                seen.add(identity)
         return normalized
 
     @field_validator("output_dir", "workspace_root", "project_id", "current_todo_id")
@@ -203,10 +287,105 @@ class AgentState(BaseModel):
         self.messages.append(AgentMessage(role=role, content=content))
 
     def record_observation(self, observation: Observation) -> None:
-        """记录工具观察结果并推进一次决策轮次。
+        """记录工具观察结果、真实产物并推进一次决策轮次。
 
         Args:
             observation: Harness 返回的标准化工具结果。
         """
         self.observations.append(observation)
         self.iteration += 1
+        if not observation.success or self.output_dir is None:
+            return
+        for artifact in _observation_artifacts(observation, self.output_dir):
+            self._upsert_artifact(artifact)
+
+    def _upsert_artifact(self, artifact: ArtifactReference) -> None:
+        """按相对路径更新产物状态，避免同一文件重复进入上下文。"""
+        identity = artifact.relative_path.casefold()
+        self.available_artifacts = [
+            current
+            for current in self.available_artifacts
+            if current.relative_path.casefold() != identity
+        ]
+        self.available_artifacts.append(artifact)
+
+
+def _observation_artifacts(
+    observation: Observation,
+    output_dir: str | Path,
+) -> list[ArtifactReference]:
+    """从通用工具结果中提取当前输出目录内真实存在的产物。"""
+    result = observation.result
+    if not isinstance(result, Mapping):
+        return []
+    candidates: dict[str, Mapping[str, Any]] = {}
+    details = result.get("artifact_details")
+    if isinstance(details, list):
+        for item in details:
+            if isinstance(item, Mapping) and isinstance(item.get("path"), str):
+                candidates[item["path"]] = item
+
+    for key in ("changed_artifacts", "created_artifacts"):
+        raw_paths = result.get(key)
+        if isinstance(raw_paths, list):
+            for raw_path in raw_paths:
+                if isinstance(raw_path, str):
+                    candidates.setdefault(raw_path, {})
+
+    if observation.tool_name == "write_artifact" and isinstance(result.get("path"), str):
+        candidates.setdefault(result["path"], result)
+
+    root = Path(output_dir).expanduser().resolve(strict=False)
+    artifacts: list[ArtifactReference] = []
+    for relative_path in candidates:
+        try:
+            artifacts.append(
+                _artifact_reference(
+                    root,
+                    relative_path,
+                    source_tool=observation.tool_name,
+                )
+            )
+        except (OSError, ValueError):
+            continue
+    return artifacts
+
+
+def _artifact_reference(
+    root: Path,
+    relative_path: str,
+    *,
+    source_tool: str,
+) -> ArtifactReference:
+    """为输出目录内的现存文件创建规范化产物引用。"""
+    candidate = Path(relative_path.strip())
+    if (
+        not relative_path.strip()
+        or candidate.is_absolute()
+        or ".." in candidate.parts
+        or not candidate.parts
+        or candidate.parts[0].casefold() in {".runs", ".runtime", "input"}
+    ):
+        raise ValueError("产物路径无效")
+    target = (root / candidate).resolve(strict=True)
+    if root not in target.parents or not target.is_file():
+        raise ValueError("产物不在当前输出目录")
+    known_types = {
+        ".csv": "text/csv",
+        ".json": "application/json",
+        ".md": "text/markdown",
+        ".markdown": "text/markdown",
+    }
+    media_type = (
+        known_types.get(target.suffix.casefold())
+        or mimetypes.guess_type(target.name)[0]
+        or "application/octet-stream"
+    )
+    return ArtifactReference(
+        relative_path=target.relative_to(root).as_posix(),
+        absolute_path=str(target),
+        name=target.name,
+        size_bytes=target.stat().st_size,
+        media_type=media_type,
+        source_tool=source_tool,
+    )

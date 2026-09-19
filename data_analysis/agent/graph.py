@@ -9,6 +9,10 @@ from pydantic import BaseModel, ConfigDict
 from .loop import Action, AgentLoop, Finish
 from .planner import Planner
 from .state import AgentState, AnalysisPlan, Observation, TodoItem
+from ..runtime.failure_tracker import (
+    FailureTracker,
+    RepeatedToolFailureError,
+)
 from ..runtime.harness import Harness
 
 __all__ = [
@@ -17,6 +21,7 @@ __all__ = [
     "PlanCreated",
     "TodoStarted",
     "TodoCompleted",
+    "TodoFailed",
     "iter_graph",
     "iter_plan_graph",
     "run_graph",
@@ -49,7 +54,15 @@ class TodoCompleted(BaseModel):
     result_summary: str
 
 
-PlanGraphEvent = GraphEvent | PlanCreated | TodoStarted | TodoCompleted
+class TodoFailed(BaseModel):
+    """一个 Todo 因重复工具失败触发熔断。"""
+
+    model_config = ConfigDict(frozen=True)
+    todo_id: str
+    error: str
+
+
+PlanGraphEvent = GraphEvent | PlanCreated | TodoStarted | TodoCompleted | TodoFailed
 
 
 def iter_graph(
@@ -73,6 +86,7 @@ def iter_graph(
     Raises:
         AgentLoopError: LLM 决策无效或超过最大迭代次数。
     """
+    failures = FailureTracker()
     while True:
         decision = loop.step(state)
         if isinstance(decision, Finish):
@@ -85,6 +99,9 @@ def iter_graph(
         observation = harness.execute(decision)
         state.record_observation(observation)
         yield observation
+        circuit = failures.record(decision, observation)
+        if circuit is not None:
+            raise RepeatedToolFailureError(_failure_summary(circuit))
 
 
 def run_graph(
@@ -119,10 +136,14 @@ def iter_plan_graph(
     planner: Planner,
     loop: AgentLoop,
     harness: Harness,
+    *,
+    failure_threshold: int = 3,
+    max_replans: int = 2,
 ) -> Iterator[PlanGraphEvent]:
     """运行顶层 Plan-and-Execute，并复用原有 ReAct 完成每个 Todo。"""
     plan = planner.create_plan(state)
     state.analysis_plan = plan
+    replan_count = 0
     yield PlanCreated(plan=plan)
 
     while True:
@@ -134,6 +155,7 @@ def iter_plan_graph(
         yield TodoStarted(todo_id=todo.id, objective=todo.objective)
 
         todo_state = _todo_state(state, todo)
+        failures = FailureTracker(threshold=failure_threshold)
         while True:
             decision = loop.step(todo_state)
             if isinstance(decision, Finish):
@@ -150,8 +172,33 @@ def iter_plan_graph(
             todo_state.record_observation(observation)
             state.record_observation(observation)
             yield observation
+            circuit = failures.record(decision, observation)
+            if circuit is None:
+                continue
+            failure_summary = _failure_summary(circuit)
+
+            todo.status = "failed"
+            todo.result_summary = failure_summary
+            state.current_todo_id = None
+            yield TodoFailed(todo_id=todo.id, error=failure_summary)
+            if replan_count >= max_replans:
+                raise RepeatedToolFailureError(
+                    f"恢复规划次数已达上限 {max_replans}；{failure_summary}"
+                )
+            recovery = planner.create_recovery_plan(
+                state,
+                plan,
+                failed_todo_id=todo.id,
+                failure_summary=failure_summary,
+            )
+            replan_count += 1
+            plan = _merge_recovery_plan(plan, recovery, replan_count)
+            state.analysis_plan = plan
+            yield PlanCreated(plan=plan)
+            break
 
     final_state = _final_state(state, plan)
+    final_failures = FailureTracker(threshold=failure_threshold)
     while True:
         decision = loop.step(final_state)
         if isinstance(decision, Finish):
@@ -164,6 +211,9 @@ def iter_plan_graph(
         final_state.record_observation(observation)
         state.record_observation(observation)
         yield observation
+        circuit = final_failures.record(decision, observation)
+        if circuit is not None:
+            raise RepeatedToolFailureError(_failure_summary(circuit))
 
 
 def run_plan_graph(
@@ -177,6 +227,37 @@ def run_plan_graph(
         if isinstance(event, Finish):
             return event
     raise RuntimeError("Plan-and-Execute 图未产生最终回答")
+
+
+def _failure_summary(circuit: FailureCircuitOpen) -> str:
+    """生成可交给 Planner 和用户的稳定熔断摘要。"""
+    return (
+        f"工具 {circuit.tool_name} 以相同参数和错误累计失败 "
+        f"{circuit.count} 次：{circuit.error}"
+    )
+
+
+def _merge_recovery_plan(
+    previous: AnalysisPlan,
+    recovery: AnalysisPlan,
+    revision: int,
+) -> AnalysisPlan:
+    """保留已结束 Todo，并为恢复计划分配不会冲突的新标识。"""
+    preserved = [
+        todo.model_copy(deep=True)
+        for todo in previous.todos
+        if todo.status in {"completed", "failed"}
+    ]
+    prefix = f"recovery_{revision}_"
+    identifier_map = {todo.id: prefix + todo.id for todo in recovery.todos}
+    revised = [
+        todo.model_copy(update={
+            "id": identifier_map[todo.id],
+            "depends_on": [identifier_map[item] for item in todo.depends_on],
+        }, deep=True)
+        for todo in recovery.todos
+    ]
+    return AnalysisPlan(objective=previous.objective, todos=[*preserved, *revised])
 
 
 def _next_todo(plan: AnalysisPlan) -> TodoItem | None:

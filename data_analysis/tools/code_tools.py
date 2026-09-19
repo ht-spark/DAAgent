@@ -32,6 +32,7 @@ def execute_python_code(
     python_executable: str | Path | None = None,
     environment_source: str = "host",
     environment_name: str = "MMAgent",
+    expected_artifacts: Sequence[str] = (),
 ) -> dict[str, JsonValue]:
     """执行模型生成的 Python 代码并收集观察结果。
 
@@ -47,6 +48,7 @@ def execute_python_code(
         python_executable: 执行分析代码的 Python 解释器。
         environment_source: 环境来源，用于向 Agent 报告。
         environment_name: 环境显示名称，用于向 Agent 报告。
+        expected_artifacts: 本次代码承诺创建或更新的相对产物路径。
 
     Returns:
         标准输出、标准错误、结构化结果及当前产物清单。
@@ -83,14 +85,14 @@ def execute_python_code(
     }
     try:
         completed = subprocess.run(
-            [str(executable), "-I", str(_RUNNER_PATH)],
+            [str(executable), "-I", "-B", str(_RUNNER_PATH)],
             input=json.dumps(request, ensure_ascii=True),
             capture_output=True,
             text=True,
             encoding="utf-8",
             errors="replace",
             cwd=target_dir,
-            env=_safe_python_environment(),
+            env=_safe_python_environment(target_dir),
             timeout=_DEFAULT_TIMEOUT_SECONDS,
             shell=False,
             check=False,
@@ -114,6 +116,16 @@ def execute_python_code(
         if isinstance(captured, str) and captured:
             detail += f"\n运行输出:\n{captured}"
         raise CodeExecutionError(detail)
+    changed = response.get("changed_artifacts")
+    if not isinstance(changed, list) or not all(isinstance(item, str) for item in changed):
+        raise CodeExecutionError("目标 Python 返回的产物清单无效")
+    expected = {_normalize_expected_artifact(path) for path in expected_artifacts}
+    missing = sorted(expected - set(changed))
+    if missing:
+        raise CodeExecutionError(
+            "代码执行成功，但没有在当前运行目录生成承诺产物: "
+            + ", ".join(missing)
+        )
     runtime = response.get("runtime") if isinstance(response.get("runtime"), dict) else {}
     runtime.update({"source": environment_source, "name": environment_name})
     response["runtime"] = runtime
@@ -121,10 +133,32 @@ def execute_python_code(
     return response
 
 
-def _safe_python_environment() -> dict[str, str]:
-    """构造目标解释器所需的最小系统环境。"""
-    allowed_names = ("COMSPEC", "PATH", "PATHEXT", "SYSTEMROOT", "TEMP", "TMP", "WINDIR")
+def _normalize_expected_artifact(relative_path: str) -> str:
+    """校验模型声明的产物路径是当前输出目录内的相对路径。"""
+    if not isinstance(relative_path, str) or not relative_path.strip():
+        raise ValueError("expected_artifacts 只能包含非空相对路径")
+    candidate = Path(relative_path.strip())
+    if candidate.is_absolute() or ".." in candidate.parts:
+        raise ValueError("expected_artifacts 只能包含无 '..' 的相对路径")
+    return candidate.as_posix()
+
+
+def _safe_python_environment(output_dir: Path) -> dict[str, str]:
+    """构造目标解释器所需的最小环境，并把运行缓存限制在本 Run。"""
+    runtime_dir = output_dir / ".runtime"
+    temporary_dir = runtime_dir / "tmp"
+    temporary_dir.mkdir(parents=True, exist_ok=True)
+    allowed_names = ("COMSPEC", "PATH", "PATHEXT", "SYSTEMROOT", "WINDIR")
     environment = {name: os.environ[name] for name in allowed_names if name in os.environ}
-    environment["PYTHONIOENCODING"] = "utf-8"
-    environment["PYTHONUTF8"] = "1"
+    environment.update({
+        "PYTHONIOENCODING": "utf-8",
+        "PYTHONUTF8": "1",
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "TEMP": str(temporary_dir),
+        "TMP": str(temporary_dir),
+        "MPLCONFIGDIR": str(runtime_dir / "matplotlib"),
+        "XDG_CACHE_HOME": str(runtime_dir / "cache"),
+        "NUMBA_CACHE_DIR": str(runtime_dir / "numba"),
+        "JOBLIB_TEMP_FOLDER": str(temporary_dir),
+    })
     return environment

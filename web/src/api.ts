@@ -462,6 +462,10 @@ export type AgentTraceEvent = {
   todo_id: string
   result_summary: string
 } | {
+  type: 'agent_todo_failed'
+  todo_id: string
+  error: string
+} | {
   type: 'agent_action'
   thought: string
   tool_name: string
@@ -601,7 +605,7 @@ async function consumeAgentChatStream(res: Response, handlers: AgentChatHandlers
         handlers.onTrace(event as AgentTraceEvent)
       }
       if (event.type === 'agent_plan' || event.type === 'agent_todo_started'
-        || event.type === 'agent_todo_completed' || event.type === 'agent_action'
+        || event.type === 'agent_todo_completed' || event.type === 'agent_todo_failed' || event.type === 'agent_action'
         || event.type === 'agent_reasoning' || event.type === 'agent_observation'
         || event.type === 'agent_command_approval_required' || event.type === 'agent_command_approval_decision') {
         handlers.onTrace(event as AgentTraceEvent)

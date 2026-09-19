@@ -5555,6 +5555,16 @@
   color: var(--rag-text-secondary);
 }
 
+.agent-plan-item.is-failed .agent-plan-index,
+.agent-plan-item.is-failed .agent-plan-status {
+  border-color: var(--danger-200, rgba(239, 68, 68, 0.35));
+  color: var(--danger, #b91c1c);
+}
+
+.agent-plan-item.is-failed .agent-plan-row p {
+  color: var(--rag-text-muted);
+}
+
 .agent-plan-result {
   display: -webkit-box;
   margin-top: 5px;

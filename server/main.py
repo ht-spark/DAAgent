@@ -28,6 +28,7 @@ from openpyxl.utils.exceptions import InvalidFileException
 from data_analysis.agent.graph import (
     PlanCreated,
     TodoCompleted,
+    TodoFailed,
     TodoStarted,
     iter_plan_graph,
 )
@@ -35,7 +36,12 @@ from data_analysis.agent.loop import Action, AgentLoop, Finish
 from data_analysis.agent.planner import Planner
 from data_analysis.agent.state import AgentMessage, AgentState, Observation
 from data_analysis.context import compile_rolling_context, estimate_context_usage_after_turn
-from data_analysis.runtime import Harness, SubprocessSandbox, resolve_python_environment
+from data_analysis.runtime import (
+    ExecutionContext,
+    Harness,
+    SubprocessSandbox,
+    resolve_python_environment,
+)
 from data_analysis.tools import create_agent_tool_registry, supports_data_profile
 from server import store
 from server.files import list_figures, resolve_artifact
@@ -906,7 +912,7 @@ def _next_agent_event(iterator: object) -> object | None:
 
 
 def _agent_event_payload(
-    event: Action | Observation | Finish | PlanCreated | TodoStarted | TodoCompleted,
+    event: Action | Observation | Finish | PlanCreated | TodoStarted | TodoCompleted | TodoFailed,
 ) -> dict[str, object]:
     """把内部 Agent 事件转换为可公开展示的精简载荷。"""
     if isinstance(event, PlanCreated):
@@ -934,6 +940,12 @@ def _agent_event_payload(
             "type": "agent_todo_completed",
             "todo_id": event.todo_id,
             "result_summary": event.result_summary,
+        }
+    if isinstance(event, TodoFailed):
+        return {
+            "type": "agent_todo_failed",
+            "todo_id": event.todo_id,
+            "error": event.error,
         }
     if isinstance(event, Finish):
         return {
@@ -1547,6 +1559,11 @@ async def agent_profile_stream_endpoint(
         approved_command_actions.remove(key)
         return True
 
+    execution_context = ExecutionContext(
+        output_dir=output_dir,
+        workspace_root=workspace_root,
+        python_environment=python_environment,
+    )
     harness = Harness(
         registry,
         sandbox=SubprocessSandbox(
@@ -1554,6 +1571,7 @@ async def agent_profile_stream_endpoint(
             working_directory=workspace_root or PROJECT_ROOT,
         ),
         command_approval=consume_command_approval,
+        execution_context=execution_context,
     )
     chat_run = AgentChatRun(active_discussion_id, message)
     _agent_chat_runs[run_id] = chat_run
