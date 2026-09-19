@@ -4920,7 +4920,7 @@
   flex: 0 0 30px;
   margin-left: auto;
   border-radius: 50%;
-  cursor: help;
+  cursor: default;
 }
 
 .rag-context-indicator:focus-visible {

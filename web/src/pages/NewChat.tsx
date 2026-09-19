@@ -56,7 +56,7 @@ function ContextUsageRing({ usage }: { usage?: ContextUsage }) {
     <span className="rag-context-indicator" tabIndex={0} role="img" aria-label={label}>
       <span
         className="rag-context-ring"
-        style={{ background: `conic-gradient(var(--rag-accent) ${percent}%, var(--rag-border-strong) 0)` }}
+        style={{ background: `conic-gradient(var(--rag-text) 0 ${percent}%, var(--rag-border-strong) ${percent}% 100%)` }}
         aria-hidden="true"
       />
       <span className="rag-context-tooltip" aria-hidden="true">
@@ -619,16 +619,26 @@ export default function NewChat({
   const approvalResolveRef = useRef<((approved: boolean) => void) | null>(null)
   const streamControllerRef = useRef<AbortController | null>(null)
   const runningDiscussionRef = useRef<string | null>(null)
+  const detachedRef = useRef(false)
 
-  useEffect(() => () => {
-    streamControllerRef.current?.abort()
-    if (approvalResolveRef.current) approvalResolveRef.current(false)
+  useEffect(() => {
+    detachedRef.current = false
+    return () => {
+      detachedRef.current = true
+      // 尚未收到任务编号时保持提交请求，待后端启动后再断开订阅。
+      if (runningDiscussionRef.current) streamControllerRef.current?.abort()
+      if (approvalResolveRef.current) approvalResolveRef.current(false)
+    }
   }, [])
 
   function createStreamHandlers(controller: AbortController): AgentChatHandlers {
-    const active = () => !controller.signal.aborted
+    const active = () => !detachedRef.current && !controller.signal.aborted
     return {
       onStarted: (runId, _files, savedDiscussionId) => {
+        if (detachedRef.current) {
+          controller.abort()
+          return
+        }
         if (!active()) return
         setActiveRunId(runId)
         if (savedDiscussionId) {
@@ -872,7 +882,7 @@ export default function NewChat({
         controller.signal,
       )
     } catch (error) {
-      if (controller.signal.aborted) return
+      if (controller.signal.aborted || detachedRef.current) return
       setMessages((current) => current.map(
         (item, index) => index === current.length - 1
           ? {
@@ -883,7 +893,7 @@ export default function NewChat({
           : item,
       ))
     } finally {
-      if (!controller.signal.aborted) {
+      if (!controller.signal.aborted && !detachedRef.current) {
         setIsSubmitting(false)
         setActiveRunId(null)
       }
@@ -1079,7 +1089,7 @@ export default function NewChat({
                   hidden
                   type="file"
                   multiple
-                  accept=".csv,.xlsx,.xls,.json,.jsonl,.ndjson,.pdf,.docx,.md,.markdown,.py,.png,.jpg,.jpeg,.webp,.gif,.bmp,.tif,.tiff"
+                  accept=".csv,.xlsx,.xls,.json,.jsonl,.ndjson,.pdf,.docx,.md,.markdown,.py,.txt,.png,.jpg,.jpeg,.webp,.gif,.bmp,.tif,.tiff"
                   onChange={(event) => setFiles(Array.from(event.target.files ?? []))}
                 />
                 <ContextUsageRing usage={[...messages].reverse().find((item) => item.contextUsage)?.contextUsage} />

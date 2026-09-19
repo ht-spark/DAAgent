@@ -69,6 +69,39 @@ async def test_cancel_agent_chat_run_rejects_pending_command_approval():
 
 
 @pytest.mark.asyncio
+async def test_cancel_one_agent_run_keeps_other_run_active():
+    """终止指定任务不应影响另一个会话的后台运行。"""
+    first = main.AgentChatRun("discussion-first", "任务一")
+    second = main.AgentChatRun("discussion-second", "任务二")
+    main._agent_chat_runs["run-first"] = first
+    main._agent_chat_runs["run-second"] = second
+    try:
+        assert await main.cancel_agent_chat_run("run-first") == {"accepted": True}
+        assert first.cancel_requested
+        assert not second.cancel_requested
+        assert await main.get_active_agent_chat_run("discussion-second") == {
+            "run_id": "run-second",
+            "message": "任务二",
+        }
+    finally:
+        main._agent_chat_runs.pop("run-first", None)
+        main._agent_chat_runs.pop("run-second", None)
+
+
+@pytest.mark.asyncio
+async def test_deleting_running_discussion_is_rejected(monkeypatch, tmp_path):
+    """运行中的会话不能删除，以免后台任务继续写入已删除目录。"""
+    monkeypatch.setattr(main, "ARTIFACTS_ROOT", tmp_path)
+    run = main.AgentChatRun("discussion-running", "分析数据")
+    main._agent_chat_runs["run-running"] = run
+    try:
+        with pytest.raises(HTTPException) as exc:
+            await main.delete_brainstorm_discussion_endpoint("discussion-running")
+        assert exc.value.status_code == 409
+    finally:
+        main._agent_chat_runs.pop("run-running", None)
+
+@pytest.mark.asyncio
 async def test_agent_command_decision_requires_pending_request():
     with pytest.raises(HTTPException) as exc:
         await main.decide_agent_command_endpoint(
@@ -110,7 +143,7 @@ def test_agent_upload_rejects_unsupported_file(monkeypatch, tmp_path):
     monkeypatch.setattr(main, "ARTIFACTS_ROOT", tmp_path)
 
     with pytest.raises(HTTPException, match="不支持") as exc:
-        asyncio.run(main._prepare_agent_data_files([_upload("notes.txt")], "discussion-2", "run-2"))
+        asyncio.run(main._prepare_agent_data_files([_upload("program.exe")], "discussion-2", "run-2"))
 
     assert exc.value.status_code == 400
     assert not (tmp_path / "agent_sessions" / "discussion-2").exists()
@@ -123,6 +156,7 @@ def test_agent_upload_rejects_unsupported_file(monkeypatch, tmp_path):
         "report.docx",
         "notes.md",
         "notes.markdown",
+        "notes.txt",
         "analysis.py",
         "records.json",
         "figure.png",

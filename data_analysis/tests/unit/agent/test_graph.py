@@ -67,6 +67,74 @@ def test_graph_runs_profile_action_then_finishes(tmp_path) -> None:
     assert '"row_count": 3' in llm.calls[1][-1][1]
 
 
+def test_graph_reads_uploaded_file_by_runtime_path_and_observes_result(tmp_path) -> None:
+    """上传文件路径交给模型后，工具读取结果应进入下一轮上下文。"""
+    attachment = tmp_path / "input" / "config.py"
+    attachment.parent.mkdir()
+    attachment.write_text("SETTING = 42\n", encoding="utf-8")
+    runtime_path = str(attachment.resolve())
+    registry = create_agent_tool_registry([attachment], tmp_path / "output")
+    llm = ScriptedLlm([
+        json.dumps({
+            "type": "action",
+            "thought": "读取上传代码",
+            "tool_name": "read_attachment_file",
+            "arguments": {"file_path": runtime_path},
+        }, ensure_ascii=False),
+        '{"type":"finish","thought":"已读取工具结果","answer":"SETTING 为 42。"}',
+    ])
+    state = AgentState(user_query="读取我上传的代码", data_paths=[runtime_path])
+
+    finish = run_graph(
+        state,
+        AgentLoop(llm, registry.specs(), "必须通过工具读取上传文件"),
+        Harness(registry),
+    )
+
+    assert finish.answer == "SETTING 为 42。"
+    assert json.dumps(runtime_path) in llm.calls[0][-1][1]
+    assert "SETTING = 42" in llm.calls[1][-1][1]
+    assert state.observations[0].result["file_path"] == runtime_path
+
+
+def test_graph_can_inspect_project_layout_and_read_code(tmp_path) -> None:
+    """项目理解任务可逐层查看布局，并将真实代码返回给后续决策。"""
+    workspace = tmp_path / "project"
+    source = workspace / "src"
+    source.mkdir(parents=True)
+    (workspace / "README.md").write_text("示例服务", encoding="utf-8")
+    (source / "main.py").write_text("def serve():\n    return 42\n", encoding="utf-8")
+    registry = create_agent_tool_registry(
+        [], workspace / "outputs", workspace_root=workspace,
+    )
+    llm = ScriptedLlm([
+        '{"type":"action","thought":"查看根目录","tool_name":"list_workspace_directory","arguments":{}}',
+        '{"type":"action","thought":"查看源码目录","tool_name":"list_workspace_directory","arguments":{"relative_dir":"src"}}',
+        '{"type":"action","thought":"读取项目说明","tool_name":"read_workspace_file","arguments":{"relative_path":"README.md"}}',
+        '{"type":"action","thought":"读取入口代码","tool_name":"read_workspace_file","arguments":{"relative_path":"src/main.py"}}',
+        '{"type":"finish","thought":"已读取关键文件","answer":"项目含 src/main.py，serve 返回 42。"}',
+    ])
+    state = AgentState(
+        user_query="先理解我的项目架构和具体内容",
+        workspace_root=str(workspace),
+    )
+
+    finish = run_graph(
+        state,
+        AgentLoop(llm, registry.specs(), "先查看项目目录再读取代码"),
+        Harness(registry),
+    )
+
+    assert "serve 返回 42" in finish.answer
+    assert [item.tool_name for item in state.observations] == [
+        "list_workspace_directory",
+        "list_workspace_directory",
+        "read_workspace_file",
+        "read_workspace_file",
+    ]
+    assert all(item.success for item in state.observations)
+    assert "return 42" in llm.calls[-1][-1][1]
+
 def test_graph_returns_immediate_finish_without_tool_call() -> None:
     llm = ScriptedLlm(
         ['{"type":"finish","thought":"无需工具","answer":"线性回归用于拟合线性关系。"}']

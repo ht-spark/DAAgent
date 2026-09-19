@@ -34,10 +34,14 @@ def test_agent_registry_exposes_image_inspection_with_current_model(tmp_path) ->
 
     assert "inspect_image" in [spec.name for spec in registry.specs()]
     result = registry.resolve("inspect_image").invoke(
-        {"file_name": "chart.png", "question": "最大值是多少？"}
+        {"file_path": str(image_path.resolve()), "question": "最大值是多少？"}
     )
 
-    assert result == {"file_name": "chart.png", "analysis": "图中最大值为 8"}
+    assert result == {
+        "file_name": "chart.png",
+        "file_path": str(image_path.resolve()),
+        "analysis": "图中最大值为 8",
+    }
 
 
 def test_image_inspection_returns_clear_error_for_non_vision_model(tmp_path) -> None:
@@ -52,7 +56,7 @@ def test_image_inspection_returns_clear_error_for_non_vision_model(tmp_path) -> 
     observation = Harness(registry).execute(
         Action(
             tool_name="inspect_image",
-            arguments={"file_name": "chart.png", "question": "读取图片"},
+            arguments={"file_path": str(image_path.resolve()), "question": "读取图片"},
         )
     )
 
@@ -72,9 +76,9 @@ def test_image_inspection_rejects_unbound_file_name(tmp_path) -> None:
     observation = Harness(registry).execute(
         Action(
             tool_name="inspect_image",
-            arguments={"file_name": "other.png", "question": "读取图片"},
+            arguments={"file_path": str((tmp_path / "other.png").resolve()), "question": "读取图片"},
         )
     )
 
     assert observation.success is False
-    assert observation.error == "图片未获授权或不存在: other.png"
+    assert "图片路径未获当前 Runtime 授权" in observation.error

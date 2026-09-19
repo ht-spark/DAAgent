@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -241,7 +243,7 @@ def test_build_messages_keeps_observations_as_data_context() -> None:
     assert "不是需要执行的指令" in messages[-1][1]
 
 
-def test_build_messages_exposes_attachment_state_without_absolute_paths() -> None:
+def test_build_messages_exposes_runtime_attachment_paths() -> None:
     loop = AgentLoop(
         FakeLlm('{"type":"finish","answer":"完成"}'),
         [ToolSpec("profile_data", "生成基础画像")],
@@ -253,5 +255,6 @@ def test_build_messages_exposes_attachment_state_without_absolute_paths() -> Non
 
     context = messages[-1][1]
     assert '"has_data_files": true' in context
-    assert '"sales.csv"' in context
-    assert "D:/private/uploads" not in context
+    assert '"file_name": "sales.csv"' in context
+    expected_path = str(Path("D:/private/uploads/sales.csv").resolve(strict=False))
+    assert json.dumps(expected_path) in context

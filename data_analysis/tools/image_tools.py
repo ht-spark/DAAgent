@@ -31,18 +31,18 @@ def inspect_image(
     """使用当前模型分析一张已授权图片。
 
     Args:
-        arguments: Agent 提供的文件名和分析问题。
+        arguments: Agent 提供的 Runtime 文件路径和分析问题。
         context: 包含当前聊天模型和本轮授权图片路径的运行上下文。
 
     Returns:
         包含文件名和模型分析文本的 JSON 结果。
     """
-    if set(arguments) != {"file_name", "question"}:
-        raise ToolArgumentsError("inspect_image 只接受必填参数 file_name 和 question")
-    file_name = arguments.get("file_name")
+    if set(arguments) != {"file_path", "question"}:
+        raise ToolArgumentsError("inspect_image 只接受必填参数 file_path 和 question")
+    file_path = arguments.get("file_path")
     question = arguments.get("question")
-    if not isinstance(file_name, str) or not file_name.strip():
-        raise ToolArgumentsError("inspect_image 缺少有效的 file_name")
+    if not isinstance(file_path, str) or not file_path.strip():
+        raise ToolArgumentsError("inspect_image 缺少有效的 file_path")
     if not isinstance(question, str) or not question.strip():
         raise ToolArgumentsError("inspect_image 缺少有效的 question")
 
@@ -50,8 +50,10 @@ def inspect_image(
     llm = context.get("llm")
     if not isinstance(raw_paths, Sequence) or llm is None:
         raise RuntimeError(VISION_UNSUPPORTED_ERROR)
-    image_path = _resolve_authorized_image(file_name.strip(), raw_paths)
-    return _analyze_image(llm, image_path, question.strip())
+    image_path = _resolve_authorized_image(file_path.strip(), raw_paths)
+    result = _analyze_image(llm, image_path, question.strip())
+    result["file_path"] = str(image_path)
+    return result
 
 
 def inspect_generated_image(
@@ -119,22 +121,21 @@ def _analyze_image(llm: Any, image_path: Path, question: str) -> dict[str, str]:
 
 
 def _resolve_authorized_image(
-    file_name: str,
+    file_path: str,
     authorized_paths: Sequence[str | Path],
 ) -> Path:
-    """按文件名解析唯一的已授权图片。"""
-    matches = [
-        Path(path).resolve()
+    """按 Runtime 路径解析已授权图片。"""
+    image_path = Path(file_path).expanduser().resolve(strict=False)
+    authorized = {
+        Path(path).expanduser().resolve(strict=False)
         for path in authorized_paths
-        if Path(path).name.casefold() == file_name.casefold()
-    ]
-    if not matches:
-        raise ToolArgumentsError(f"图片未获授权或不存在: {file_name}")
-    image_path = matches[0]
+    }
+    if image_path not in authorized:
+        raise ToolArgumentsError(f"图片路径未获当前 Runtime 授权: {file_path}")
     if image_path.suffix.lower() not in IMAGE_SUFFIXES:
-        raise ToolArgumentsError(f"文件不是支持的图片格式: {file_name}")
+        raise ToolArgumentsError(f"文件不是支持的图片格式: {file_path}")
     if not image_path.is_file():
-        raise ToolArgumentsError(f"图片未获授权或不存在: {file_name}")
+        raise ToolArgumentsError(f"图片未获授权或不存在: {file_path}")
     return image_path
 
 

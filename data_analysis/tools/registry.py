@@ -33,6 +33,7 @@ from .errors import DuplicateToolError, ToolArgumentsError, ToolNotFoundError
 from .knowledge_tools import MAX_KNOWLEDGE_QUERY_CHARS, search_knowledge_base
 from .web_search import MAX_WEB_SEARCH_QUERY_CHARS, search_web
 from .workspace_tools import (
+    list_workspace_directory,
     list_workspace_files,
     read_workspace_file,
     search_workspace_text,
@@ -336,18 +337,18 @@ def create_agent_tool_registry(
             ToolSpec(
                 name="read_attachment_file",
                 description=(
-                    "按 available_data_files 中的文件名读取用户上传的文本或代码附件，"
+                    "按 available_data_files 中的 file_path 读取用户上传的文本或代码附件，"
                     "包括 .py；不执行脚本。上传附件不属于项目目录，不要用"
                     " read_workspace_file 读取它。大文件使用 offset 和 limit 分段读取。"
                 ),
                 parameters={
                     "type": "object",
                     "properties": {
-                        "file_name": {"type": "string", "minLength": 1},
+                        "file_path": {"type": "string", "minLength": 1},
                         "offset": {"type": "integer", "minimum": 1, "default": 1},
                         "limit": {"type": "integer", "minimum": 1, "maximum": 500, "default": 300},
                     },
-                    "required": ["file_name"],
+                    "required": ["file_path"],
                     "additionalProperties": False,
                 },
             ),
@@ -416,6 +417,24 @@ def create_agent_tool_registry(
         workspace_context = {"workspace_root": str(workspace_root)}
         registry.register(
             ToolSpec(
+                name="list_workspace_directory",
+                description=(
+                    "列出当前项目目录的直接子目录和文件，用于逐层探索项目布局。"
+                    "默认查看项目根目录；自动跳过依赖、版本库和缓存目录。"
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "relative_dir": {"type": "string", "default": "."},
+                    },
+                    "additionalProperties": False,
+                },
+            ),
+            _run_list_workspace_directory,
+            context=workspace_context,
+        )
+        registry.register(
+            ToolSpec(
                 name="list_workspace_files",
                 description=(
                     "列出当前项目目录中的文件。只读取项目目录，自动跳过 .git、"
@@ -438,7 +457,7 @@ def create_agent_tool_registry(
                 name="read_workspace_file",
                 description=(
                     "读取当前项目目录内一个 UTF-8 文本文件。路径必须来自"
-                    " list_workspace_files，不能使用绝对路径或 '..'。"
+                    " list_workspace_directory 或 list_workspace_files，不能使用绝对路径或 '..'。"
                 ),
                 parameters={
                     "type": "object",
@@ -624,23 +643,23 @@ def create_agent_tool_registry(
                 name="inspect_image",
                 description=(
                     "调用当前视觉模型查看一张已上传图片。适用于读取图片中的文字、"
-                    "表格、公式、图表、几何关系和建模约束。file_name 必须从"
+                    "表格、公式、图表、几何关系和建模约束。file_path 必须从"
                     " available_data_files 中逐字选择，question 应说明需要提取或"
                     "核实的具体内容。"
                 ),
                 parameters={
                     "type": "object",
                     "properties": {
-                        "file_name": {
+                        "file_path": {
                             "type": "string",
-                            "description": "已授权图片的文件名",
+                            "description": "Runtime 授权图片的本地绝对路径",
                         },
                         "question": {
                             "type": "string",
                             "description": "需要模型回答的图片问题",
                         },
                     },
-                    "required": ["file_name", "question"],
+                    "required": ["file_path", "question"],
                     "additionalProperties": False,
                 },
             ),
@@ -687,6 +706,22 @@ def _workspace_root(context: Mapping[str, JsonValue], tool_name: str) -> str:
     if not isinstance(root, str) or not root.strip():
         raise ToolArgumentsError(f"{tool_name} 缺少有效的项目目录上下文")
     return root
+
+
+def _run_list_workspace_directory(
+    arguments: Mapping[str, JsonValue],
+    context: Mapping[str, JsonValue],
+) -> JsonValue:
+    """执行项目浅层目录列表工具。"""
+    if set(arguments) - {"relative_dir"}:
+        raise ToolArgumentsError("list_workspace_directory 收到未声明参数")
+    relative_dir = arguments.get("relative_dir", ".")
+    if not isinstance(relative_dir, str):
+        raise ToolArgumentsError("relative_dir 必须是字符串")
+    return list_workspace_directory(
+        _workspace_root(context, "list_workspace_directory"),
+        relative_dir,
+    )
 
 
 def _run_list_workspace_files(

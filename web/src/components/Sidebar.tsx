@@ -96,6 +96,14 @@ export default function Sidebar({
   }, [section, activeDiscussionId, activeProjectId])
 
   useEffect(() => {
+    if (section !== 'modeling') return
+    const timer = window.setInterval(() => {
+      void fetchBrainstormDiscussions(activeProjectId).then(setDiscussions).catch(() => {})
+    }, 5000)
+    return () => window.clearInterval(timer)
+  }, [section, activeProjectId])
+
+  useEffect(() => {
     if (!menuState) return
     const onDocClick = (e: MouseEvent) => {
       const target = e.target as HTMLElement | null

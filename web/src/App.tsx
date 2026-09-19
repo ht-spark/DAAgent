@@ -124,6 +124,7 @@ export default function App() {
   const [modelingView, setModelingView] = useState<ModelingView>('new')
   const [brainstormView, setBrainstormView] = useState<BrainstormView>('knowledge-hub')
   const [discussionId, setDiscussionId] = useState<string | null>(null)
+  const [taskViewEpoch, setTaskViewEpoch] = useState(0)
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null)
   const [activeKnowledgeBaseId, setActiveKnowledgeBaseId] = useState<string | undefined>()
   // 标记资料统计是从「知识库统计」打开，以便返回正确页面
@@ -149,6 +150,7 @@ export default function App() {
   }, [])
 
   function startNew() {
+    setTaskViewEpoch((value) => value + 1)
     setDiscussionId(null)
     setTask({ step: 'submit', runId: null })
     setSection('modeling')
@@ -156,6 +158,7 @@ export default function App() {
   }
 
   function openFromHistory(runId: string) {
+    setTaskViewEpoch((value) => value + 1)
     // 所有历史任务都先恢复聊天上下文；ChatModeling 会根据任务状态展示进度或结果。
     setTask({ step: 'progress', runId })
     setSection('modeling')
@@ -205,6 +208,7 @@ export default function App() {
           setBrainstormView('knowledge-hub')
         }}
         onOpenDiscussion={(id, projectId) => {
+          setTaskViewEpoch((value) => value + 1)
           setActiveProjectId(projectId)
           setDiscussionId(id)
           setTask({ step: 'submit', runId: null })
@@ -265,6 +269,7 @@ export default function App() {
         </div>
         {section === 'modeling' && modelingView === 'new' && (
           <NewTask
+            key={taskViewEpoch}
             task={task}
             setTask={setTask}
             onHistory={() => setModelingView('history')}

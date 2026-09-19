@@ -13,7 +13,7 @@ from .errors import ToolArgumentsError
 
 __all__ = ["MAX_WEB_SEARCH_QUERY_CHARS", "search_web"]
 
-MAX_WEB_SEARCH_QUERY_CHARS = 1_000
+MAX_WEB_SEARCH_QUERY_CHARS = 5_000
 
 
 def search_web(

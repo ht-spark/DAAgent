@@ -30,6 +30,35 @@ def resolve_workspace_path(
     return target
 
 
+def list_workspace_directory(
+    workspace_root: str | Path,
+    relative_dir: str = ".",
+) -> dict[str, Any]:
+    """只列出项目目录的直接子目录和文件，供逐层了解项目结构。"""
+    root = Path(workspace_root).expanduser().resolve(strict=True)
+    directory = resolve_workspace_path(root, relative_dir)
+    if not directory.is_dir():
+        raise WorkspacePathError("要列出的项目路径不是文件夹")
+    directories: list[str] = []
+    files: list[dict[str, Any]] = []
+    truncated = False
+    for path in sorted(directory.iterdir(), key=lambda item: item.name.casefold()):
+        if path.name.casefold() in SKIPPED_DIRECTORY_NAMES:
+            continue
+        resolved = path.resolve(strict=False)
+        if resolved != root and root not in resolved.parents:
+            continue
+        if len(directories) + len(files) >= MAX_WORKSPACE_LIST_ITEMS:
+            truncated = True
+            break
+        relative = path.relative_to(root).as_posix()
+        if path.is_dir():
+            directories.append(relative)
+        elif path.is_file():
+            files.append({"path": relative, "size_bytes": path.stat().st_size})
+    return {"directories": directories, "files": files, "truncated": truncated}
+
+
 def list_workspace_files(
     workspace_root: str | Path,
     relative_dir: str = ".",

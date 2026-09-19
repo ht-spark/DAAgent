@@ -16,8 +16,9 @@ def test_uploaded_python_file_is_readable_without_project(tmp_path):
 
     assert "read_workspace_file" not in registry
     result = registry.resolve("read_attachment_file").invoke(
-        {"file_name": "data_loader.py"}
+        {"file_path": str(attachment.resolve())}
     )
+    assert result["file_path"] == str(attachment.resolve())
     assert result["content"].startswith("raise RuntimeError")
     assert result["end_line"] == 2
     assert attachment.read_text(encoding="utf-8").endswith("value = 42\n")
@@ -31,13 +32,13 @@ def test_attachment_reader_supports_line_windows_and_rejects_unapproved_paths(tm
         "read_attachment_file"
     )
 
-    result = tool.invoke({"file_name": "data_loader.py", "offset": 2, "limit": 1})
+    result = tool.invoke({"file_path": str(attachment.resolve()), "offset": 2, "limit": 1})
     assert result["content"].splitlines() == ["second"]
     assert result["truncated"] is True
     with pytest.raises(PermissionError):
-        tool.invoke({"file_name": "other.py"})
+        tool.invoke({"file_path": str((tmp_path / "other.py").resolve())})
     with pytest.raises(ValueError):
-        tool.invoke({"file_name": "../data_loader.py"})
+        tool.invoke({"file_path": ""})
 
 
 def test_attachment_reader_not_registered_without_text_upload(tmp_path):
@@ -55,7 +56,7 @@ def test_agent_harness_reads_uploaded_python_without_workspace(tmp_path):
         registry, sandbox=SubprocessSandbox(working_directory=tmp_path)
     ).execute(Action(
         tool_name="read_attachment_file",
-        arguments={"file_name": "data_loader.py"},
+        arguments={"file_path": str(attachment.resolve())},
     ))
 
     assert observation.success is True

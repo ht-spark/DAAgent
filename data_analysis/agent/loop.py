@@ -254,7 +254,13 @@ class AgentLoop:
             "user_query": state.user_query,
             "iteration": state.iteration,
             "has_data_files": bool(state.data_paths),
-            "available_data_files": [Path(path).name for path in state.data_paths],
+            "available_data_files": [
+                {
+                    "file_name": Path(path).name,
+                    "file_path": str(Path(path).expanduser().resolve(strict=False)),
+                }
+                for path in state.data_paths
+            ],
             "project_id": getattr(state, "project_id", None),
             "workspace_enabled": bool(getattr(state, "workspace_root", None)),
             "observations": list(state.observations),

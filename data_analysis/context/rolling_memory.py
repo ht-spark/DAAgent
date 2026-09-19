@@ -1,4 +1,4 @@
-"""按 Pi 思路从完整会话历史编译滚动记忆上下文。"""
+"""从完整会话历史编译滚动记忆上下文。"""
 
 from __future__ import annotations
 
@@ -6,7 +6,9 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-COMPACTION_TRIGGER_TOKENS = 252000  #活跃上下文估算超过该值才压缩
+#活跃上下文估算超过该值才压缩,压缩的内容是：user输入、模型输出，
+COMPACTION_TRIGGER_TOKENS = 252000   
+
 KEEP_RECENT_TOKENS =40000            #压缩后保留最近原文的预算
 COMPACTION_KIND = "agent_compaction"
 _SUMMARY_VERSION = 1

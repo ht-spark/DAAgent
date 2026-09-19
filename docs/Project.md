@@ -488,3 +488,77 @@ Loop 只决定「调什么」；Harness 负责「能不能调、在哪调、失�
 # 5. RAG
 
 # 6.前后端
+
+# 7.超参数管理
+
+### 1）上下文压缩参数
+
+| 参数                            |          当前值 | 含义                                                                   | 设置脚本                                    |
+| ------------------------------- | --------------: | ---------------------------------------------------------------------- | ------------------------------------------- |
+| `COMPACTION_TRIGGER_TOKENS`   |      `252000` | user/assistant 活跃历史与旧摘要的估算 token 数超过该值时触发滚动压缩。 | `data_analysis/context/rolling_memory.py` |
+| `KEEP_RECENT_TOKENS`          |       `40000` | 压缩后保留的最近 user/assistant 原文预算，并按完整对话轮次保留。       | `data_analysis/context/rolling_memory.py` |
+| `_MAX_COMPACTION_INPUT_CHARS` | `150000` 字符 | 单次生成滚动摘要时，允许送入摘要模型的历史原文最大字符数。             | `data_analysis/context/rolling_memory.py` |
+
+### 2）知识库切分参数
+
+| 参数                                     |       当前值 | 含义                                                             | 设置脚本                                        |
+| ---------------------------------------- | -----------: | ---------------------------------------------------------------- | ----------------------------------------------- |
+| `strategy`                             | `semantic` | 前端选择的知识库切分策略；当前仅参与前端状态与数量估算。         | `web/src/App.tsx`                             |
+| `chunkSize`                            | `800` 字符 | 前端设定的目标分块大小；当前仅参与前端分块数量估算。             | `web/src/App.tsx`                             |
+| `overlap`                              | `100` 字符 | 前端设定的相邻分块重叠长度；当前仅参与前端分块数量估算。         | `web/src/App.tsx`                             |
+| `windowSize` / `DEFAULT_WINDOW_SIZE` |     `5` 句 | 实际传给后端的句子窗口大小，控制每个知识节点包含的相邻句子范围。 | `web/src/App.tsx`、`KnowledgeBase/chunk.py` |
+
+### 3）模型/API 参数
+
+| 参数                         | 当前默认值 | 含义                                           | 设置脚本                                                                          |
+| ---------------------------- | ---------: | ---------------------------------------------- | --------------------------------------------------------------------------------- |
+| `temperature`              |    `0.3` | 控制模型输出随机性；数值越低，回答通常越稳定。 | `scr/math_modeling_agent/llm.py`；前端配置位于 `web/src/pages/ApiManager.tsx` |
+| `max_tokens`               |  `20000` | 限制模型单次调用允许生成的最大输出 token 数。  | `scr/math_modeling_agent/llm.py`；前端配置位于 `web/src/pages/ApiManager.tsx` |
+| `LLM_CALL_TIMEOUT_SECONDS` | `180` 秒 | 单次 LLM API 请求的等待超时时间。              | `scr/math_modeling_agent/llm.py`                                                |
+| `reasoning_effort`         | 由用户选择 | 控制支持推理强度设置的模型所使用的推理档位。   | `web/src/pages/ApiManager.tsx`、`scr/math_modeling_agent/llm.py`              |
+
+### 4）Agent 运行时间参数
+
+| 参数                                       |       当前值 | 含义                                   | 设置脚本           |
+| ------------------------------------------ | -----------: | -------------------------------------- | ------------------ |
+| `AGENT_TOOL_TIMEOUT_SECONDS`             |  `7200` 秒 | Agent 单次工具执行允许持续的最长时间。 | `server/main.py` |
+| `AGENT_RUN_TIMEOUT_SECONDS`              | `10800` 秒 | 一整轮 Agent 运行允许持续的最长时间。  | `server/main.py` |
+| `AGENT_COMMAND_APPROVAL_TIMEOUT_SECONDS` |   `300` 秒 | 项目命令等待用户批准的最长时间。       | `server/main.py` |
+
+### 5）知识库检索参数
+
+| 参数                           |                当前值 | 含义                                                   | 设置脚本                       |
+| ------------------------------ | --------------------: | ------------------------------------------------------ | ------------------------------ |
+| `RECALL_LIMIT`               |                `50` | 召回阶段允许保留的候选片段数量。                       | `KnowledgeBase/main.py`      |
+| `FINAL_LIMIT`                |                 `5` | 融合和筛选后最终返回的知识片段数量。                   | `KnowledgeBase/main.py`      |
+| `RRF_K`                      |                `60` | RRF 排名融合的平滑常数，控制不同名次对融合得分的影响。 | `KnowledgeBase/main.py`      |
+| `COMPRESSION_PREVIEW_LENGTH` |         `6000` 字符 | 候选片段交给 LLM 压缩筛选时允许使用的最大文本长度。    | `KnowledgeBase/main.py`      |
+| BM25`k1`                     |               `1.5` | 控制词频增长对 BM25 相关性得分的影响。                 | `KnowledgeBase/main.py`      |
+| BM25`b`                      |              `0.75` | 控制 BM25 对文档长度进行归一化的强度。                 | `KnowledgeBase/main.py`      |
+| `MODEL_PATH`                 | `bge-small-zh-v1.5` | 指定知识库向量化使用的本地 Embedding 模型。            | `KnowledgeBase/embedding.py` |
+
+### 6）项目读取范围参数
+
+| 参数                              |         当前值 | 含义                                            | 设置脚本                         |
+| --------------------------------- | -------------: | ----------------------------------------------- | -------------------------------- |
+| `MAX_PROJECT_CONTEXT_CHARS`     | `60000` 字符 | 注入 Agent 系统上下文的项目说明文本最大总长度。 | `server/project_workspaces.py` |
+| `FILE_TREE_MAX_DEPTH`           |       `5` 层 | 自动扫描项目目录树时允许遍历的最大深度。        | `server/project_workspaces.py` |
+| `FILE_TREE_MAX_ENTRIES_PER_DIR` |        `400` | 单个目录最多收集的文件和子目录数量。            | `server/project_workspaces.py` |
+| `FILE_TREE_MAX_TOTAL_NODES`     |       `3000` | 一次目录树扫描允许收集的最大节点总数。          | `server/project_workspaces.py` |
+
+### 7）安全与体量限制参数
+
+| 参数                             |          当前值 | 含义                                                   | 设置脚本                                      |
+| -------------------------------- | --------------: | ------------------------------------------------------ | --------------------------------------------- |
+| `MAX_AGENT_ATTACHMENTS`        |          `10` | 单条 Agent 请求允许上传的最大附件数量。                | `server/main.py`                            |
+| `MAX_AGENT_ATTACHMENT_BYTES`   |      `100 MB` | 单个 Agent 附件允许的最大文件体积。                    | `server/main.py`                            |
+| `MAX_AGENT_PREVIEW_TEXT_BYTES` |       `20 MB` | 生成文本附件预览时允许读取的最大字节数。               | `server/main.py`                            |
+| `MAX_AGENT_PREVIEW_ROWS`       |      `200` 行 | 表格、文档预览允许读取的最大行数。                     | `server/main.py`                            |
+| `MAX_AGENT_PREVIEW_COLUMNS`    |       `40` 列 | 表格预览允许读取的最大列数。                           | `server/main.py`                            |
+| `MAX_AGENT_PREVIEW_SHEETS`     |        `8` 个 | 工作簿预览允许读取的最大工作表数量。                   | `server/main.py`                            |
+| `MAX_WORKSPACE_FILE_BYTES`     | `500000` 字节 | 工作区文件工具单次允许读取的最大文件体积。             | `data_analysis/tools/workspace_tools.py`    |
+| `MAX_ATTACHMENT_READ_CHARS`    |  `80000` 字符 | 附件内容通过工具注入当前上下文时允许返回的最大字符数。 | `data_analysis/tools/attachment_tools.py`   |
+| `MAX_COMMAND_OUTPUT_CHARS`     |  `20000` 字符 | 项目命令返回给 Agent 的 stdout/stderr 最大字符数。     | `data_analysis/tools/project_edit_tools.py` |
+| `MAX_ARCHIVE_FILES`            |         `500` | 单个压缩包允许解压的最大文件数量。                     | `KnowledgeBase/upload_file.py`              |
+| `MAX_ARCHIVE_BYTES`            |      `500 MB` | 单个压缩包解压后的文件总体积上限。                     | `KnowledgeBase/upload_file.py`              |
+| `MAX_SINGLE_FILE_BYTES`        |      `200 MB` | 压缩包内单个文件允许的最大体积。                       | `KnowledgeBase/upload_file.py`              |

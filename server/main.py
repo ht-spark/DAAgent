@@ -197,6 +197,7 @@ AGENT_ATTACHMENT_SUFFIXES = frozenset(
         ".py",
         ".tif",
         ".tiff",
+        ".txt",
         ".webp",
         ".xls",
         ".xlsx",
@@ -1539,6 +1540,14 @@ async def agent_profile_stream_endpoint(
 
         async def save_stopped_run(content: str) -> str:
             """保存未完成结果，使任务切换后仍能在历史对话中看到。"""
+            attachments = [
+                {
+                    "kind": "data" if supports_data_profile(path) else "file",
+                    "name": path.name,
+                    "content": path.relative_to(PROJECT_ROOT).as_posix(),
+                }
+                for path in uploaded_paths
+            ]
             return await asyncio.to_thread(
                 save_discussion_message,
                 active_discussion_id,
@@ -1546,6 +1555,7 @@ async def agent_profile_stream_endpoint(
                 content,
                 knowledge_sources,
                 title,
+                attachments,
                 knowledge_base_ids=selected_base_ids,
                 mode="agent",
                 assistant_metadata={"agent_run_id": run_id, "agent_trace": trace},
@@ -1787,6 +1797,11 @@ async def get_brainstorm_discussion_endpoint(
 @app.delete("/api/knowledge/discussions/{discussion_id}")
 async def delete_brainstorm_discussion_endpoint(discussion_id: str) -> dict[str, bool]:
     """Permanently delete a saved inspiration discussion."""
+    if any(
+        run.discussion_id == discussion_id and not run.done
+        for run in _agent_chat_runs.values()
+    ):
+        raise HTTPException(status_code=409, detail="该会话仍有运行中的任务，请先终止任务")
     try:
         artifact_dir = _agent_session_root(discussion_id)
     except ValueError as exc:

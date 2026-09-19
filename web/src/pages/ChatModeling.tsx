@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { confirmBudget, createRun, checkBackendOnline, getRun, getRunMonitor, getPaper, getFigures, renameRun, submitClarification, type KnowledgeBaseSummary, type RunMonitor } from '../api'
+import { cancelRun, confirmBudget, createRun, checkBackendOnline, getRun, getRunMonitor, getPaper, getFigures, renameRun, submitClarification, type KnowledgeBaseSummary, type RunMonitor } from '../api'
 import type { ApiConfig } from '../apiConfigs'
 import { NODE_CN, fmtQid, formatCurrentStep, formatProgressLine, nextProgressQuestionId } from '../progressFormat'
 
@@ -541,6 +541,7 @@ export default function ChatModeling({
   const [phase, setPhase] = useState<Phase>(resumeRunId ? 'running' : 'compose')
   const [runId, setRunId] = useState<string | null>(resumeRunId ?? null)
   const [busy, setBusy] = useState(false)
+  const [cancelBusy, setCancelBusy] = useState(false)
   const activeCfg = apiConfig
   const activeName = apiConfig?.name ?? ''
   const [budgetReq, setBudgetReq] = useState<BudgetReq | null>(null)
@@ -1067,6 +1068,17 @@ export default function ChatModeling({
     }
   }
 
+  async function handleStop() {
+    if (!runId || phase !== 'running' || cancelBusy) return
+    setCancelBusy(true)
+    try {
+      await cancelRun(runId)
+      push('assistant', '已请求终止，当前步骤结束后会停止。', 'warn')
+    } catch (error) {
+      push('assistant', error instanceof Error ? error.message : '终止任务失败。', 'error')
+      setCancelBusy(false)
+    }
+  }
   const composing = phase === 'compose'
 
   async function submitBudget(useDefaults: boolean) {
@@ -1478,9 +1490,15 @@ export default function ChatModeling({
             />
           </label>
           <div className="spacer" />
-          <button className="chatapp-send" onClick={handleStart} disabled={busy || !composing}>
-            {busy ? '提交中…' : '开始建模 →'}
-          </button>
+          {phase === 'running' && runId ? (
+            <button className="chatapp-send" onClick={() => void handleStop()} disabled={cancelBusy}>
+              {cancelBusy ? '终止中…' : '终止运行'}
+            </button>
+          ) : (
+            <button className="chatapp-send" onClick={handleStart} disabled={busy || !composing}>
+              {busy ? '提交中…' : '开始建模 →'}
+            </button>
+          )}
         </div>
       </div>
 
