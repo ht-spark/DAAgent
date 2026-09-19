@@ -1,0 +1,161 @@
+"""使用当前 LLM 为顶层 Plan-and-Execute 生成结构化 Todo List。"""
+
+from __future__ import annotations
+
+import json
+import re
+from pathlib import Path
+from typing import Any, Sequence
+
+from pydantic import ValidationError
+
+from ..tools.registry import ToolSpec
+from .loop import LlmClient
+from .state import AgentState, AnalysisPlan
+
+
+class PlannerError(RuntimeError):
+    """Planner 无法生成有效执行计划。"""
+
+
+class Planner:
+    """将当前用户目标编译为带依赖关系的 Todo List。"""
+
+    def __init__(
+        self,
+        llm: LlmClient,
+        tools: Sequence[ToolSpec],
+        *,
+        max_todos: int = 8,
+        retries: int = 2,
+    ) -> None:
+        if max_todos < 1 or max_todos > 12:
+            raise ValueError("max_todos 必须在 1 到 12 之间")
+        if retries < 0:
+            raise ValueError("retries 不能为负数")
+        self._llm = llm
+        self._tools = tuple(tools)
+        self._max_todos = max_todos
+        self._retries = retries
+
+    def create_plan(self, state: AgentState) -> AnalysisPlan:
+        """根据用户目标、附件与工具生成经过校验的执行计划。"""
+        messages = self.build_messages(state)
+        last_error: Exception | None = None
+        for attempt in range(self._retries + 1):
+            response = self._llm.invoke(messages)
+            raw = _response_text(response)
+            try:
+                plan = _parse_plan(raw)
+                if len(plan.todos) > self._max_todos:
+                    raise PlannerError(
+                        f"Todo 数量 {len(plan.todos)} 超过上限 {self._max_todos}"
+                    )
+                if any(
+                    todo.status != "pending" or todo.result_summary is not None
+                    for todo in plan.todos
+                ):
+                    raise PlannerError("Planner 生成的 Todo 必须从 pending 状态开始且不能预填结果")
+                return plan
+            except (PlannerError, ValidationError) as exc:
+                last_error = exc
+                if attempt >= self._retries:
+                    break
+                messages.extend([
+                    ("assistant", raw),
+                    (
+                        "user",
+                        f"上一份计划无效：{exc}。请修正后只输出一个合法 JSON 对象。",
+                    ),
+                ])
+        raise PlannerError(f"无法生成有效执行计划：{last_error}")
+
+    def build_messages(self, state: AgentState) -> list[tuple[str, str]]:
+        """构造只负责规划、不执行工具的 Planner 消息。"""
+        tools = [
+            {"name": tool.name, "description": tool.description}
+            for tool in self._tools
+        ]
+        context = {
+            "user_query": state.user_query,
+            "available_data_files": [
+                {
+                    "file_name": Path(path).name,
+                    "file_path": str(Path(path).expanduser().resolve(strict=False)),
+                }
+                for path in state.data_paths
+            ],
+            "workspace_enabled": bool(state.workspace_root),
+            "available_tools": tools,
+        }
+        prompt = (
+            "根据当前任务生成顶层执行计划。你只负责规划，不执行工具，也不回答任务。"
+            f"最多生成 {self._max_todos} 个必要 Todo；简单任务只生成一个。"
+            "计划必须针对用户目标，不套用固定分析方法。depends_on 只能引用已定义的 id。"
+            "只输出一个 JSON 对象，结构为："
+            '{"objective":"总体目标","todos":['
+            '{"id":"todo_1","objective":"具体可验证目标","status":"pending",'
+            '"depends_on":[],"expected_outputs":["预期结果"],"result_summary":null}]}。'
+            "所有 Todo 初始状态必须为 pending。当前上下文：\n"
+            + json.dumps(context, ensure_ascii=False, indent=2)
+        )
+        return [
+            ("system", "你是执行计划编译器，只生成简洁、可执行、可验证的 Todo List。"),
+            ("user", prompt),
+        ]
+
+
+def _parse_plan(raw: str) -> AnalysisPlan:
+    """从常见文本包装中提取并校验唯一计划对象。"""
+    text = re.sub(
+        r"^\s*<think>.*?</think>\s*",
+        "",
+        raw,
+        count=1,
+        flags=re.DOTALL | re.IGNORECASE,
+    ).strip()
+    if text.startswith("```") and text.endswith("```"):
+        lines = text.splitlines()
+        if len(lines) >= 3 and lines[0].strip().lower() in {"```", "```json"}:
+            text = "\n".join(lines[1:-1]).strip()
+    decoder = json.JSONDecoder(strict=False)
+    try:
+        payload = decoder.decode(text)
+    except json.JSONDecodeError as exc:
+        candidates: list[dict[str, Any]] = []
+        for index, character in enumerate(text):
+            if character != "{":
+                continue
+            try:
+                candidate, _ = decoder.raw_decode(text, index)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(candidate, dict) and "todos" in candidate:
+                candidates.append(candidate)
+        if len(candidates) != 1:
+            raise PlannerError("Planner 响应必须包含唯一计划 JSON 对象") from exc
+        payload = candidates[0]
+    if not isinstance(payload, dict):
+        raise PlannerError("Planner 响应必须是 JSON 对象")
+    try:
+        return AnalysisPlan.model_validate(payload)
+    except ValidationError as exc:
+        raise PlannerError(f"计划字段无效: {exc.errors()}") from exc
+
+
+def _response_text(response: Any) -> str:
+    """提取常见聊天模型响应中的文本。"""
+    if isinstance(response, str):
+        return response
+    content = getattr(response, "content", None)
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = [
+            item.get("text", "")
+            for item in content
+            if isinstance(item, dict) and isinstance(item.get("text"), str)
+        ]
+        if parts:
+            return "".join(parts)
+    raise PlannerError("Planner 响应不包含文本")

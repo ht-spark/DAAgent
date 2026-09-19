@@ -9,7 +9,7 @@ from typing import Any
 TEXT_ATTACHMENT_SUFFIXES = frozenset(
     {".csv", ".json", ".jsonl", ".markdown", ".md", ".ndjson", ".py", ".txt"}
 )
-MAX_ATTACHMENT_READ_CHARS = 80_000
+MAX_ATTACHMENT_READ_CHARS = 200_000
 
 
 def read_attachment_file(

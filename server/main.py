@@ -25,8 +25,14 @@ from fastapi.staticfiles import StaticFiles
 from docx.opc.exceptions import PackageNotFoundError
 from openpyxl.utils.exceptions import InvalidFileException
 
-from data_analysis.agent.graph import iter_graph
+from data_analysis.agent.graph import (
+    PlanCreated,
+    TodoCompleted,
+    TodoStarted,
+    iter_plan_graph,
+)
 from data_analysis.agent.loop import Action, AgentLoop, Finish
+from data_analysis.agent.planner import Planner
 from data_analysis.agent.state import AgentMessage, AgentState, Observation
 from data_analysis.context import compile_rolling_context, estimate_context_usage_after_turn
 from data_analysis.runtime import Harness, SubprocessSandbox, resolve_python_environment
@@ -899,8 +905,36 @@ def _next_agent_event(iterator: object) -> object | None:
         return None
 
 
-def _agent_event_payload(event: Action | Observation | Finish) -> dict[str, object]:
+def _agent_event_payload(
+    event: Action | Observation | Finish | PlanCreated | TodoStarted | TodoCompleted,
+) -> dict[str, object]:
     """把内部 Agent 事件转换为可公开展示的精简载荷。"""
+    if isinstance(event, PlanCreated):
+        return {
+            "type": "agent_plan",
+            "objective": event.plan.objective,
+            "todos": [
+                {
+                    "id": todo.id,
+                    "objective": todo.objective,
+                    "depends_on": todo.depends_on,
+                    "expected_outputs": todo.expected_outputs,
+                }
+                for todo in event.plan.todos
+            ],
+        }
+    if isinstance(event, TodoStarted):
+        return {
+            "type": "agent_todo_started",
+            "todo_id": event.todo_id,
+            "objective": event.objective,
+        }
+    if isinstance(event, TodoCompleted):
+        return {
+            "type": "agent_todo_completed",
+            "todo_id": event.todo_id,
+            "result_summary": event.result_summary,
+        }
     if isinstance(event, Finish):
         return {
             "type": "agent_reasoning",
@@ -1499,9 +1533,10 @@ async def agent_profile_stream_endpoint(
         llm,
         registry.specs(),
         system_prompt,
-        max_iterations=30,
-        decision_retries=5,
+        max_iterations=60,
+        decision_retries=8,
     )
+    planner = Planner(llm, registry.specs())
     approved_command_actions: set[int] = set()
 
     def consume_command_approval(action: Action) -> bool:
@@ -1536,7 +1571,7 @@ async def agent_profile_stream_endpoint(
         yield json.dumps(started_event, ensure_ascii=False) + "\n"
         answer = ""
         knowledge_sources: list[dict[str, str]] = []
-        iterator = iter_graph(state, loop, harness)
+        iterator = iter_plan_graph(state, planner, loop, harness)
 
         async def save_stopped_run(content: str) -> str:
             """保存未完成结果，使任务切换后仍能在历史对话中看到。"""

@@ -449,10 +449,91 @@ const AgentInlineProcess = memo(function AgentInlineProcess({
   trace: AgentTraceEvent[]
   running: boolean
 }) {
+  const plan = trace.find(
+    (event): event is Extract<AgentTraceEvent, { type: 'agent_plan' }> =>
+      event.type === 'agent_plan',
+  )
+  const todoState = new Map<string, {
+    status: 'pending' | 'in_progress' | 'completed'
+    result?: string
+  }>()
+  plan?.todos.forEach((todo) => todoState.set(todo.id, { status: 'pending' }))
+  trace.forEach((event) => {
+    if (event.type === 'agent_todo_started') {
+      todoState.set(event.todo_id, { status: 'in_progress' })
+    }
+    if (event.type === 'agent_todo_completed') {
+      todoState.set(event.todo_id, {
+        status: 'completed',
+        result: event.result_summary,
+      })
+    }
+  })
+  const completedCount = plan?.todos.filter(
+    (todo) => todoState.get(todo.id)?.status === 'completed',
+  ).length ?? 0
+  const progress = plan?.todos.length
+    ? Math.round((completedCount / plan.todos.length) * 100)
+    : 0
+  const activityTrace = trace.filter(
+    (event) => !['agent_plan', 'agent_todo_started', 'agent_todo_completed'].includes(event.type),
+  )
+
   return (
     <div className={`agent-inline-process ${running ? 'is-running' : ''}`}>
+      {plan && (
+        <section className="agent-plan-card" aria-label="任务执行计划">
+          <header className="agent-plan-head">
+            <div>
+              <p className="agent-plan-label">执行计划</p>
+              <h3>{plan.objective}</h3>
+            </div>
+            <p className="agent-plan-count" aria-live="polite">
+              {completedCount}/{plan.todos.length} 已完成
+            </p>
+          </header>
+          <div
+            className="agent-plan-progress"
+            role="progressbar"
+            aria-label="计划完成进度"
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={progress}
+          >
+            <span style={{ width: `${progress}%` }} />
+          </div>
+          <ol className="agent-plan-list">
+            {plan.todos.map((todo, index) => {
+              const state = todoState.get(todo.id) ?? { status: 'pending' as const }
+              const statusLabel = state.status === 'completed'
+                ? '已完成'
+                : state.status === 'in_progress'
+                  ? '进行中'
+                  : '等待中'
+              return (
+                <li
+                  className={`agent-plan-item is-${state.status}`}
+                  key={todo.id}
+                  aria-current={state.status === 'in_progress' ? 'step' : undefined}
+                >
+                  <span className="agent-plan-index" aria-hidden="true">{index + 1}</span>
+                  <div className="agent-plan-copy">
+                    <div className="agent-plan-row">
+                      <p>{todo.objective}</p>
+                      <span className="agent-plan-status">{statusLabel}</span>
+                    </div>
+                    {state.result && (
+                      <p className="agent-plan-result">{state.result}</p>
+                    )}
+                  </div>
+                </li>
+              )
+            })}
+          </ol>
+        </section>
+      )}
       <div className="agent-inline-steps">
-        {trace.map((event, index) => (
+        {activityTrace.map((event, index) => (
           <div
             className={`agent-inline-step ${event.type}`}
             key={`${event.type}-${index}`}

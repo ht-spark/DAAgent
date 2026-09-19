@@ -66,6 +66,27 @@ def test_create_and_edit_accept_absolute_path_inside_project(tmp_path):
     assert target.read_text(encoding="utf-8") == "after\n"
 
 
+def test_edit_falls_back_to_direct_write_when_windows_replace_is_denied(
+    tmp_path, monkeypatch,
+):
+    target = tmp_path / "locked.md"
+    target.write_text("before\n", encoding="utf-8")
+
+    def deny_replace(source, destination):
+        raise PermissionError(5, "拒绝访问", str(destination))
+
+    monkeypatch.setattr(
+        "data_analysis.tools.project_edit_tools.os.replace",
+        deny_replace,
+    )
+
+    result = edit_workspace_file(tmp_path, "locked.md", "before", "after")
+
+    assert "+after" in result["diff"]
+    assert target.read_text(encoding="utf-8") == "after\n"
+    assert not list(tmp_path.glob(".locked.md.*.tmp"))
+
+
 def test_project_file_tools_reject_absolute_path_outside_project(tmp_path):
     outside = tmp_path.parent / "outside.md"
     with pytest.raises(WorkspacePathError, match="超出当前项目目录"):

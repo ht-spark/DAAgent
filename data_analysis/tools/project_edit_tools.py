@@ -77,7 +77,13 @@ def edit_workspace_file(
         with temporary.open("xb") as stream:
             stream.write(encoded)
         shutil.copymode(target, temporary)
-        os.replace(temporary, target)
+        try:
+            os.replace(temporary, target)
+        except PermissionError:
+            # Windows 可能允许写入已打开文件，却拒绝用重命名替换该文件。
+            # 临时文件已完整写入后再回退，避免把项目修改转移到产物目录。
+            with target.open("wb") as stream:
+                stream.write(encoded)
     finally:
         temporary.unlink(missing_ok=True)
     return {"path": relative_path, "diff": diff[:MAX_COMMAND_OUTPUT_CHARS]}
