@@ -37,12 +37,10 @@ function estimate_chars(name: string): number {
 export default function ChunkEmbeddingProgress({
   options,
   onBack,
-  onNext,
   knowledgeBaseId,
 }: {
   options: ChunkEmbeddingOptions
   onBack: () => void
-  onNext: () => void
   knowledgeBaseId?: string
 }) {
   const [documents, setDocuments] = useState<KnowledgeDocument[]>([])
@@ -76,7 +74,6 @@ export default function ChunkEmbeddingProgress({
 
   const totalChunks = documents.reduce((sum, doc) => sum + estimateChunks(doc), 0)
   const doneCount = Object.values(progressMap).filter((progress) => progress.stage === 'done').length
-  const finished = documents.length > 0 && doneCount === documents.length && !running
   const totalPages = Math.max(1, Math.ceil(documents.length / PAGE_SIZE))
   const safePage = Math.min(currentPage, totalPages)
   const paginatedDocuments = documents.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE)
@@ -142,7 +139,6 @@ export default function ChunkEmbeddingProgress({
         <div className="ce-step ce-step-done"><span className="ce-step-dot">✓</span><span>资料统计</span></div>
         <div className="ce-step ce-step-done"><span className="ce-step-dot">✓</span><span>分块与嵌入设置</span></div>
         <div className="ce-step ce-step-current"><span className="ce-step-dot">4</span><span>执行分块与嵌入</span></div>
-        <div className="ce-step"><span className="ce-step-dot">5</span><span>向量检索就绪</span></div>
       </div>
 
       {error && <div className="err-box">{error}</div>}
@@ -190,7 +186,6 @@ export default function ChunkEmbeddingProgress({
           <button className="api-btn primary" disabled={documents.length === 0 || running} onClick={startProcessing}>
             {running ? '处理中…' : '执行分块与嵌入'}
           </button>
-          <button className="api-btn" disabled={!finished || running} onClick={onNext}>下一步</button>
         </div>
       </div>
     </div>

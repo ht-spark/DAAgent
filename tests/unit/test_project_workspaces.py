@@ -6,7 +6,11 @@ import asyncio
 import pytest
 
 from server import main, store
-from server.project_workspaces import create_project, load_project_context
+from server.project_workspaces import (
+    create_project,
+    load_project_context,
+    resolve_project_file,
+)
 from server.schemas import ProjectCreateBody
 
 
@@ -59,6 +63,41 @@ def test_project_context_loads_only_root_instruction_files(tmp_path):
 
     assert "项目规则" in context
     assert "项目背景" in context
+
+
+def test_project_file_resolver_supports_nested_files(tmp_path):
+    nested = tmp_path / "reports" / "summary.md"
+    nested.parent.mkdir()
+    nested.write_text("# 结果", encoding="utf-8")
+    project = create_project(str(tmp_path), "项目")
+
+    target = resolve_project_file(project["id"], "reports/summary.md")
+
+    assert target == nested.resolve()
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    ["../outside.md", ".git/config.py", ".venv/library.py"],
+)
+def test_project_file_resolver_rejects_unsafe_paths(tmp_path, relative_path):
+    project = create_project(str(tmp_path), "项目")
+
+    with pytest.raises(ValueError, match="路径无效"):
+        resolve_project_file(project["id"], relative_path)
+
+
+def test_project_file_preview_endpoint_reads_markdown(tmp_path):
+    target = tmp_path / "README.md"
+    target.write_text("# 项目说明", encoding="utf-8")
+    project = create_project(str(tmp_path), "项目")
+
+    response = asyncio.run(
+        main.preview_project_file_endpoint(project["id"], "README.md")
+    )
+
+    assert response.body.decode("utf-8") == "# 项目说明"
+    assert response.media_type == "text/plain"
 
 
 def test_project_api_registers_existing_folder(tmp_path):

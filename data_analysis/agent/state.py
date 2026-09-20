@@ -12,6 +12,7 @@ from pydantic import (
     ConfigDict,
     Field,
     JsonValue,
+    ValidationInfo,
     field_validator,
     model_validator,
 )
@@ -26,7 +27,7 @@ class TodoItem(BaseModel):
     objective: str
     status: Literal["pending", "in_progress", "completed", "failed"] = "pending"
     depends_on: list[str] = Field(default_factory=list)
-    expected_outputs: list[str] = Field(default_factory=list)
+    expected_outputs: list[str] = Field(min_length=1)
     result_summary: str | None = None
 
     @field_validator("id", "objective")
@@ -38,6 +39,21 @@ class TodoItem(BaseModel):
             raise ValueError("Todo 标识和目标不能为空")
         return normalized
 
+    @field_validator("expected_outputs")
+    @classmethod
+    def validate_expected_outputs(cls, values: list[str]) -> list[str]:
+        """清理验收结果并拒绝空白或重复描述。"""
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            output = value.strip()
+            if not output:
+                raise ValueError("Todo 预期输出不能为空")
+            if output not in seen:
+                normalized.append(output)
+                seen.add(output)
+        return normalized
+
 
 class AnalysisPlan(BaseModel):
     """Planner 生成的顶层 Todo List。"""
@@ -45,14 +61,15 @@ class AnalysisPlan(BaseModel):
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
     objective: str
+    reasoning_summary: str = ""
     todos: list[TodoItem] = Field(min_length=1, max_length=12)
 
-    @field_validator("objective")
+    @field_validator("objective", "reasoning_summary")
     @classmethod
-    def validate_objective(cls, value: str) -> str:
-        """清理计划目标并拒绝空白值。"""
+    def normalize_plan_text(cls, value: str, info: ValidationInfo) -> str:
+        """清理计划文本，并拒绝空白的总体目标。"""
         normalized = value.strip()
-        if not normalized:
+        if getattr(info, "field_name", "") == "objective" and not normalized:
             raise ValueError("计划目标不能为空")
         return normalized
 

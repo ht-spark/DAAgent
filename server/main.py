@@ -56,6 +56,7 @@ from server.project_workspaces import (
     list_project_file_tree,
     load_project_context,
     require_project,
+    resolve_project_file,
     resolve_project_python,
 )
 from server.discussions import delete_discussion, get_discussion, list_discussions, rename_discussion, save_discussion_message
@@ -389,6 +390,20 @@ async def list_project_files_tree_endpoint(project_id: str) -> dict[str, object]
     except ProjectWorkspaceError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return tree
+
+
+@app.get("/api/projects/{project_id}/files/previews/{file_path:path}")
+async def preview_project_file_endpoint(project_id: str, file_path: str) -> Response:
+    """在项目目录边界内返回文件的只读预览。"""
+    try:
+        target = await asyncio.to_thread(resolve_project_file, project_id, file_path)
+    except ProjectWorkspaceError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return await asyncio.to_thread(_agent_artifact_preview, target)
 
 
 @app.post("/api/projects/{project_id}/open-folder")
@@ -924,6 +939,7 @@ def _agent_event_payload(
         return {
             "type": "agent_plan",
             "objective": event.plan.objective,
+            "reasoning_summary": event.plan.reasoning_summary,
             "todos": [
                 {
                     "id": todo.id,

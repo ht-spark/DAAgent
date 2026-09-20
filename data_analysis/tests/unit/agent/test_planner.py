@@ -27,6 +27,7 @@ class ScriptedLlm:
 def _plan_response() -> str:
     return json.dumps({
         "objective": "完成数据分析",
+        "reasoning_summary": "先核对数据质量，再基于可靠数据形成结论。",
         "todos": [
             {
                 "id": "todo_1",
@@ -54,7 +55,15 @@ def test_planner_creates_valid_todo_list() -> None:
 
     assert [todo.id for todo in plan.todos] == ["todo_1", "todo_2"]
     assert plan.todos[1].depends_on == ["todo_1"]
+    assert plan.reasoning_summary == "先核对数据质量，再基于可靠数据形成结论。"
     assert "只生成简洁" in llm.calls[0][0][1]
+    assert "Todo 之间职责不得重叠" in llm.calls[0][1][1]
+    assert "优先检查并复用 `available_artifacts`" in llm.calls[0][1][1]
+    assert "最多生成 8 个必要 Todo" in llm.calls[0][1][1]
+    assert "最短充分证据链" in llm.calls[0][1][1]
+    assert "不得把数据质量问题直接解释为业务变化" in llm.calls[0][1][1]
+    assert "不能直接表述为因果关系" in llm.calls[0][1][1]
+    assert "{{CONTEXT_JSON}}" not in llm.calls[0][1][1]
 
 
 def test_plan_rejects_dependency_cycle() -> None:
@@ -62,8 +71,18 @@ def test_plan_rejects_dependency_cycle() -> None:
         AnalysisPlan.model_validate({
             "objective": "错误计划",
             "todos": [
-                {"id": "a", "objective": "A", "depends_on": ["b"]},
-                {"id": "b", "objective": "B", "depends_on": ["a"]},
+                {
+                    "id": "a",
+                    "objective": "A",
+                    "depends_on": ["b"],
+                    "expected_outputs": ["A 的验证结果"],
+                },
+                {
+                    "id": "b",
+                    "objective": "B",
+                    "depends_on": ["a"],
+                    "expected_outputs": ["B 的验证结果"],
+                },
             ],
         })
 
@@ -72,7 +91,11 @@ def test_planner_rejects_more_than_configured_todos() -> None:
     response = json.dumps({
         "objective": "过长计划",
         "todos": [
-            {"id": f"todo_{index}", "objective": str(index)}
+            {
+                "id": f"todo_{index}",
+                "objective": str(index),
+                "expected_outputs": [f"结果 {index}"],
+            }
             for index in range(3)
         ],
     })
@@ -89,6 +112,7 @@ def test_planner_rejects_precompleted_todo() -> None:
             "id": "todo_1",
             "objective": "跳过执行",
             "status": "completed",
+            "expected_outputs": ["实际执行结果"],
             "result_summary": "伪造结果",
         }],
     }, ensure_ascii=False)
@@ -132,11 +156,19 @@ def test_plan_graph_runs_todos_with_unchanged_react_then_summarizes() -> None:
 def test_plan_graph_replans_after_repeated_identical_failure() -> None:
     initial_plan = json.dumps({
         "objective": "完成任务",
-        "todos": [{"id": "todo_1", "objective": "执行原方案"}],
+        "todos": [{
+            "id": "todo_1",
+            "objective": "执行原方案",
+            "expected_outputs": ["原方案验证结果"],
+        }],
     }, ensure_ascii=False)
     recovery_plan = json.dumps({
         "objective": "恢复任务",
-        "todos": [{"id": "todo_1", "objective": "使用替代方案"}],
+        "todos": [{
+            "id": "todo_1",
+            "objective": "使用替代方案",
+            "expected_outputs": ["替代方案验证结果"],
+        }],
     }, ensure_ascii=False)
     repeated_action = json.dumps({
         "type": "action",
@@ -181,11 +213,16 @@ def test_plan_graph_passes_new_artifact_to_later_todo_context(tmp_path) -> None:
     plan = json.dumps({
         "objective": "生成并复用报告",
         "todos": [
-            {"id": "todo_1", "objective": "生成报告"},
+            {
+                "id": "todo_1",
+                "objective": "生成报告",
+                "expected_outputs": ["report.md 报告文件"],
+            },
             {
                 "id": "todo_2",
                 "objective": "复用已有报告给出结论",
                 "depends_on": ["todo_1"],
+                "expected_outputs": ["经核验的报告结论"],
             },
         ],
     }, ensure_ascii=False)
@@ -226,3 +263,18 @@ def test_plan_graph_passes_new_artifact_to_later_todo_context(tmp_path) -> None:
     assert str((output_dir / "report.md").resolve()).replace("\\", "\\\\") in (
         second_todo_context
     )
+
+
+@pytest.mark.parametrize("expected_outputs", [[], ["   "]])
+def test_todo_rejects_missing_or_blank_expected_outputs(
+    expected_outputs: list[str],
+) -> None:
+    with pytest.raises(ValueError, match="预期输出|at least 1 item"):
+        AnalysisPlan.model_validate({
+            "objective": "无效计划",
+            "todos": [{
+                "id": "todo_1",
+                "objective": "执行任务",
+                "expected_outputs": expected_outputs,
+            }],
+        })

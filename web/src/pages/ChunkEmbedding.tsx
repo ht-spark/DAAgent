@@ -82,10 +82,6 @@ export default function ChunkEmbedding({
           <span className="ce-step-dot">4</span>
           <span>执行分块与嵌入</span>
         </div>
-        <div className="ce-step">
-          <span className="ce-step-dot">5</span>
-          <span>向量检索就绪</span>
-        </div>
       </div>
 
       {error && <div className="err-box">{error}</div>}

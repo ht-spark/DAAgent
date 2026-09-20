@@ -371,10 +371,64 @@ export type ProjectFileTree = {
   nodes: ProjectFileNode[]
 }
 
+export type ProjectTextFilePreview = {
+  kind: 'text'
+  content: string
+  truncated: boolean
+}
+
+export type ProjectDocxFilePreview = {
+  kind: 'docx'
+  paragraphs: string[]
+  tables: string[][][]
+  truncated: boolean
+}
+
+export type ProjectXlsxFilePreview = {
+  kind: 'xlsx'
+  sheets: Array<{ name: string; rows: unknown[][] }>
+  truncated: boolean
+}
+
+export type ProjectFilePreview =
+  | ProjectTextFilePreview
+  | ProjectDocxFilePreview
+  | ProjectXlsxFilePreview
+
 export async function fetchProjectFileTree(projectId: string): Promise<ProjectFileTree> {
   const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/files/tree`)
   if (!res.ok) throw new Error(await extractDetail(res, '获取项目文件树失败'))
   return res.json()
+}
+
+/** 生成项目文件的只读预览地址，并逐段编码以保留子目录结构。 */
+export function projectFilePreviewUrl(projectId: string, filePath: string): string {
+  const encodedPath = filePath
+    .replace(/\\/g, '/')
+    .split('/')
+    .filter(Boolean)
+    .map((part) => encodeURIComponent(part))
+    .join('/')
+  return `/api/projects/${encodeURIComponent(projectId)}/files/previews/${encodedPath}`
+}
+
+/** 获取文本或结构化项目文件预览；图片和 PDF 直接使用预览地址。 */
+export async function fetchProjectFilePreview(
+  projectId: string,
+  filePath: string,
+  signal?: AbortSignal,
+): Promise<ProjectFilePreview> {
+  const res = await fetch(projectFilePreviewUrl(projectId, filePath), { signal })
+  if (!res.ok) throw new Error(await extractDetail(res, '无法预览项目文件'))
+  const contentType = res.headers.get('content-type') ?? ''
+  if (contentType.includes('application/json')) {
+    return res.json()
+  }
+  return {
+    kind: 'text',
+    content: await res.text(),
+    truncated: res.headers.get('X-Preview-Truncated') === 'true',
+  }
 }
 
 export async function openProjectFolder(projectId: string): Promise<void> {
@@ -447,6 +501,7 @@ export type AgentTraceEvent = {
 } | {
   type: 'agent_plan'
   objective: string
+  reasoning_summary?: string
   todos: Array<{
     id: string
     objective: string

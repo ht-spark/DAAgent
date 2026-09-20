@@ -5,9 +5,11 @@ import {
   decideAgentCommand,
   fetchActiveAgentChatRun,
   fetchBrainstormDiscussion,
+  fetchProjectFilePreview,
   fetchProjectFileTree,
   getKnowledgeBases,
   openProjectFolder,
+  projectFilePreviewUrl,
   renameBrainstormDiscussion,
   reconnectAgentChatRun,
   streamDataAgentMessage,
@@ -17,6 +19,7 @@ import {
   type ContextUsage,
   type KnowledgeBaseSummary,
   type KnowledgeSourceCitation,
+  type ProjectFilePreview,
   type ProjectFileNode,
 } from '../api'
 import { loadConfigs, type ApiConfig } from '../apiConfigs'
@@ -25,6 +28,36 @@ import MarkdownContent from '../components/MarkdownContent'
 import ChatModeling from './ChatModeling'
 
 type Mode = 'agent' | 'modeling'
+
+const PROJECT_SIDEBAR_DEFAULT_WIDTH = 320
+const PROJECT_SIDEBAR_MIN_WIDTH = 280
+const PROJECT_SIDEBAR_MAX_WIDTH = 720
+const PROJECT_SIDEBAR_MIN_CHAT_WIDTH = 480
+const PROJECT_SIDEBAR_WIDTH_STORAGE_KEY = 'daagent-project-sidebar-width'
+
+function clampProjectSidebarWidth(width: number, containerWidth?: number): number {
+  const availableWidth = containerWidth ?? (
+    typeof window === 'undefined' ? PROJECT_SIDEBAR_DEFAULT_WIDTH : window.innerWidth
+  )
+  const responsiveMax = Math.max(
+    PROJECT_SIDEBAR_MIN_WIDTH,
+    Math.min(PROJECT_SIDEBAR_MAX_WIDTH, availableWidth - PROJECT_SIDEBAR_MIN_CHAT_WIDTH),
+  )
+  return Math.round(Math.min(responsiveMax, Math.max(PROJECT_SIDEBAR_MIN_WIDTH, width)))
+}
+
+function loadProjectSidebarWidth(): number {
+  if (typeof window === 'undefined') return PROJECT_SIDEBAR_DEFAULT_WIDTH
+  try {
+    const savedWidth = Number(window.localStorage.getItem(PROJECT_SIDEBAR_WIDTH_STORAGE_KEY))
+    if (Number.isFinite(savedWidth) && savedWidth > 0) {
+      return clampProjectSidebarWidth(savedWidth)
+    }
+  } catch {
+    // 浏览器禁用本地存储时使用默认宽度。
+  }
+  return PROJECT_SIDEBAR_DEFAULT_WIDTH
+}
 
 /** 待人工批准的项目命令请求（对话流内弹窗，不再使用浏览器 confirm）。 */
 type ApprovalRequest = {
@@ -157,20 +190,256 @@ function filterFileTree(nodes: ProjectFileNode[], keyword: string): ProjectFileN
   return walk(nodes)
 }
 
+type ProjectPreviewKind = 'image' | 'markdown' | 'python' | 'pdf' | 'docx' | 'xlsx' | 'unsupported'
+
+const PROJECT_IMAGE_SUFFIXES = new Set([
+  '.bmp', '.gif', '.jpeg', '.jpg', '.png', '.svg', '.tif', '.tiff', '.webp',
+])
+
+function projectPreviewKind(fileName: string): ProjectPreviewKind {
+  const dotIndex = fileName.lastIndexOf('.')
+  const suffix = dotIndex >= 0 ? fileName.slice(dotIndex).toLowerCase() : ''
+  if (PROJECT_IMAGE_SUFFIXES.has(suffix)) return 'image'
+  if (suffix === '.md' || suffix === '.markdown') return 'markdown'
+  if (suffix === '.py') return 'python'
+  if (suffix === '.pdf') return 'pdf'
+  if (suffix === '.docx') return 'docx'
+  if (suffix === '.xlsx') return 'xlsx'
+  return 'unsupported'
+}
+
+function formatProjectFileSize(sizeBytes?: number): string {
+  if (typeof sizeBytes !== 'number') return ''
+  if (sizeBytes < 1024) return `${sizeBytes} B`
+  if (sizeBytes < 1024 * 1024) return `${(sizeBytes / 1024).toFixed(1)} KB`
+  return `${(sizeBytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
+function projectPreviewLabel(kind: ProjectPreviewKind): string {
+  if (kind === 'image') return '图片'
+  if (kind === 'markdown') return 'Markdown'
+  if (kind === 'python') return 'Python'
+  if (kind === 'pdf') return 'PDF'
+  if (kind === 'docx') return 'Word'
+  if (kind === 'xlsx') return 'Excel'
+  return '文件'
+}
+
+/** 将 Markdown 中的相对资源路径限制在当前项目预览入口内。 */
+function resolveProjectMarkdownUrl(projectId: string, filePath: string, url: string): string {
+  if (/^(?:[a-z][a-z0-9+.-]*:|#|\/\/)/i.test(url)) return url
+  const resourcePath = url.split(/[?#]/, 1)[0]
+  const parts = resourcePath.startsWith('/')
+    ? []
+    : filePath.replace(/\\/g, '/').split('/').slice(0, -1)
+  for (const rawPart of resourcePath.replace(/^\/+/, '').split('/')) {
+    let part = rawPart
+    try {
+      part = decodeURIComponent(rawPart)
+    } catch {
+      // 非法转义保持原值，由后端统一判定路径是否合法。
+    }
+    if (!part || part === '.') continue
+    if (part === '..') {
+      if (!parts.length) return '#'
+      parts.pop()
+      continue
+    }
+    parts.push(part)
+  }
+  return parts.length ? projectFilePreviewUrl(projectId, parts.join('/')) : '#'
+}
+
+function ProjectPreviewSkeleton() {
+  return (
+    <div className="proj-preview-skeleton" aria-label="正在加载文件预览">
+      <span />
+      <span />
+      <span />
+      <span />
+    </div>
+  )
+}
+
+function ProjectFilePreviewPane({
+  projectId,
+  file,
+}: {
+  projectId: string
+  file: ProjectFileNode
+}) {
+  const kind = projectPreviewKind(file.name)
+  const previewUrl = projectFilePreviewUrl(projectId, file.path)
+  const [preview, setPreview] = useState<ProjectFilePreview | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+  const [activeSheet, setActiveSheet] = useState(0)
+
+  useEffect(() => {
+    setPreview(null)
+    setError('')
+    setActiveSheet(0)
+    if (kind === 'image' || kind === 'pdf' || kind === 'unsupported') {
+      setLoading(false)
+      return
+    }
+    const controller = new AbortController()
+    setLoading(true)
+    void fetchProjectFilePreview(projectId, file.path, controller.signal)
+      .then((data) => setPreview(data))
+      .catch((reason: unknown) => {
+        if (controller.signal.aborted) return
+        setError(reason instanceof Error ? reason.message : '无法读取文件预览')
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoading(false)
+      })
+    return () => controller.abort()
+  }, [file.path, kind, projectId])
+
+  if (kind === 'unsupported') {
+    return (
+      <div className="proj-preview-state">
+        <strong>此格式暂不支持侧栏预览</strong>
+        <p>当前支持图片、Markdown、Excel（.xlsx）、PDF、Word（.docx）和 Python 文件。</p>
+      </div>
+    )
+  }
+  if (loading) return <ProjectPreviewSkeleton />
+  if (error) {
+    return (
+      <div className="proj-preview-state error" role="alert">
+        <strong>文件预览失败</strong>
+        <p>{error}</p>
+      </div>
+    )
+  }
+  if (kind === 'image') {
+    return (
+      <div className="proj-preview-media is-image">
+        <img
+          src={previewUrl}
+          alt={file.name}
+          onError={() => setError('图片格式不受浏览器支持，或文件内容已经损坏')}
+        />
+      </div>
+    )
+  }
+  if (kind === 'pdf') {
+    return (
+      <div className="proj-preview-media is-pdf">
+        <iframe src={previewUrl} title={`${file.name} PDF 预览`} />
+      </div>
+    )
+  }
+  if (!preview) return null
+
+  if (kind === 'markdown' && preview.kind === 'text') {
+    return (
+      <div className="proj-preview-markdown">
+        <MarkdownContent
+          content={preview.content}
+          transformUrl={(url) => resolveProjectMarkdownUrl(projectId, file.path, url)}
+        />
+        {preview.truncated && <p className="proj-preview-note">文件较大，仅显示前部内容</p>}
+      </div>
+    )
+  }
+  if (kind === 'python' && preview.kind === 'text') {
+    return (
+      <div className="proj-preview-code">
+        <pre><code>{preview.content}</code></pre>
+        {preview.truncated && <p className="proj-preview-note">文件较大，仅显示前部内容</p>}
+      </div>
+    )
+  }
+  if (kind === 'docx' && preview.kind === 'docx') {
+    const empty = !preview.paragraphs.length && !preview.tables.length
+    return (
+      <div className="proj-preview-document">
+        {empty && <p className="proj-preview-empty">文档中没有可提取的文字或表格。</p>}
+        {preview.paragraphs.map((paragraph, index) => (
+          <p key={`paragraph-${index}`}>{paragraph}</p>
+        ))}
+        {preview.tables.map((rows, tableIndex) => (
+          <div className="proj-preview-table-wrap" key={`table-${tableIndex}`}>
+            <table>
+              <tbody>
+                {rows.map((row, rowIndex) => (
+                  <tr key={`row-${rowIndex}`}>
+                    {row.map((cell, cellIndex) => (
+                      <td key={`cell-${cellIndex}`}>{cell}</td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ))}
+        {preview.truncated && <p className="proj-preview-note">文档较大，仅显示部分内容</p>}
+      </div>
+    )
+  }
+  if (kind === 'xlsx' && preview.kind === 'xlsx') {
+    const sheet = preview.sheets[activeSheet]
+    return (
+      <div className="proj-preview-workbook">
+        {preview.sheets.length > 1 && (
+          <div className="proj-preview-tabs" role="tablist" aria-label="工作表">
+            {preview.sheets.map((item, index) => (
+              <button
+                type="button"
+                role="tab"
+                aria-selected={activeSheet === index}
+                className={activeSheet === index ? 'active' : ''}
+                onClick={() => setActiveSheet(index)}
+                key={item.name}
+              >
+                {item.name}
+              </button>
+            ))}
+          </div>
+        )}
+        {sheet?.rows.length ? (
+          <div className="proj-preview-table-wrap">
+            <table>
+              <tbody>
+                {sheet.rows.map((row, rowIndex) => (
+                  <tr key={`row-${rowIndex}`}>
+                    {row.map((cell, cellIndex) => (
+                      <td key={`cell-${cellIndex}`}>{cell == null ? '' : String(cell)}</td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : <p className="proj-preview-empty">当前工作表为空。</p>}
+        {preview.truncated && <p className="proj-preview-note">工作簿较大，仅显示部分内容</p>}
+      </div>
+    )
+  }
+
+  return (
+    <div className="proj-preview-state error" role="alert">
+      <strong>预览响应与文件类型不匹配</strong>
+      <p>请刷新文件列表后重试。</p>
+    </div>
+  )
+}
+
 const ProjectFileTree = memo(function ProjectFileTree({
   nodes,
   depth = 0,
   expanded,
   onToggle,
-  selectedPath,
   onSelect,
 }: {
   nodes: ProjectFileNode[]
   depth?: number
   expanded: Set<string>
   onToggle: (path: string) => void
-  selectedPath: string | null
-  onSelect: (path: string) => void
+  onSelect: (file: ProjectFileNode) => void
 }) {
   if (!nodes.length) return null
   return (
@@ -208,20 +477,18 @@ const ProjectFileTree = memo(function ProjectFileTree({
                   depth={depth + 1}
                   expanded={expanded}
                   onToggle={onToggle}
-                  selectedPath={selectedPath}
                   onSelect={onSelect}
                 />
               ) : null}
             </li>
           )
         }
-        const isSelected = selectedPath === node.path
         return (
           <li key={`file-${node.path}`}>
             <button
               type="button"
-              className={`proj-file-row file${isSelected ? ' is-selected' : ''}`}
-              onClick={() => onSelect(node.path)}
+              className="proj-file-row file"
+              onClick={() => onSelect(node)}
               title={node.path}
             >
               <span className="proj-file-chevron-spacer" aria-hidden="true" />
@@ -253,7 +520,7 @@ function ProjectFileExplorer({
   const [error, setError] = useState('')
   const [keyword, setKeyword] = useState('')
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
-  const [selectedPath, setSelectedPath] = useState<string | null>(null)
+  const [selectedFile, setSelectedFile] = useState<ProjectFileNode | null>(null)
   const [openingFolder, setOpeningFolder] = useState(false)
   const [reloadKey, setReloadKey] = useState(0)
 
@@ -275,7 +542,7 @@ function ProjectFileExplorer({
           .filter((node) => node.type === 'dir')
           .map((node) => node.path)
         setExpanded(new Set(firstLevel))
-        setSelectedPath(null)
+        setSelectedFile(null)
       })
       .catch((reason: unknown) => {
         if (cancelled) return
@@ -324,6 +591,57 @@ function ProjectFileExplorer({
     } finally {
       setOpeningFolder(false)
     }
+  }
+
+  useEffect(() => {
+    if (!selectedFile) return
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === 'Escape') setSelectedFile(null)
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [selectedFile])
+
+  if (selectedFile && projectId) {
+    const kind = projectPreviewKind(selectedFile.name)
+    const size = formatProjectFileSize(selectedFile.size_bytes)
+    return (
+      <>
+        <div className="rag-sources-head proj-preview-head">
+          <button
+            type="button"
+            className="proj-preview-back"
+            onClick={() => setSelectedFile(null)}
+            title="返回项目文件"
+            aria-label="返回项目文件"
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+              <path d="M15 18l-6-6 6-6" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </button>
+          <div className="proj-preview-title">
+            <h2 title={selectedFile.name}>{selectedFile.name}</h2>
+            <p title={selectedFile.path}>
+              {projectPreviewLabel(kind)}{size ? ` · ${size}` : ''}
+            </p>
+          </div>
+          <button
+            type="button"
+            className="rag-sources-collapse"
+            onClick={onCollapse}
+            title="收起项目文件"
+            aria-label="收起项目文件"
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+              <path d="M9 18l6-6-6-6" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </button>
+        </div>
+        <div className={`proj-preview-body kind-${kind}`}>
+          <ProjectFilePreviewPane projectId={projectId} file={selectedFile} />
+        </div>
+      </>
+    )
   }
 
   return (
@@ -433,8 +751,7 @@ function ProjectFileExplorer({
             nodes={visibleNodes}
             expanded={expanded}
             onToggle={toggleDir}
-            selectedPath={selectedPath}
-            onSelect={setSelectedPath}
+            onSelect={setSelectedFile}
           />
         )}
       </div>
@@ -454,7 +771,6 @@ const AgentInlineProcess = memo(function AgentInlineProcess({
   >((latest, event) => event.type === 'agent_plan' ? event : latest, undefined)
   const todoState = new Map<string, {
     status: 'pending' | 'in_progress' | 'completed' | 'failed'
-    result?: string
   }>()
   plan?.todos.forEach((todo) => todoState.set(todo.id, { status: 'pending' }))
   trace.forEach((event) => {
@@ -462,16 +778,10 @@ const AgentInlineProcess = memo(function AgentInlineProcess({
       todoState.set(event.todo_id, { status: 'in_progress' })
     }
     if (event.type === 'agent_todo_completed') {
-      todoState.set(event.todo_id, {
-        status: 'completed',
-        result: event.result_summary,
-      })
+      todoState.set(event.todo_id, { status: 'completed' })
     }
     if (event.type === 'agent_todo_failed') {
-      todoState.set(event.todo_id, {
-        status: 'failed',
-        result: event.error,
-      })
+      todoState.set(event.todo_id, { status: 'failed' })
     }
   })
   const completedCount = plan?.todos.filter(
@@ -486,6 +796,71 @@ const AgentInlineProcess = memo(function AgentInlineProcess({
 
   return (
     <div className={`agent-inline-process ${running ? 'is-running' : ''}`}>
+      <div className="agent-inline-steps">
+        {plan && (
+          <details className="agent-thought-details">
+            <summary>
+              <span>规划思考</span>
+              <small>{plan.todos.length} 个任务</small>
+            </summary>
+            <p>
+              {plan.reasoning_summary?.trim()
+                || `已根据目标拆分为 ${plan.todos.length} 个可执行任务，并按依赖关系安排执行顺序。`}
+            </p>
+          </details>
+        )}
+        {activityTrace.map((event, index) => (
+          <div
+            className={`agent-inline-step ${event.type}`}
+            key={`${event.type}-${index}`}
+          >
+            {event.type === 'agent_started' ? (
+              <p className="agent-inline-activity">
+                {event.files.length ? `已查看 ${event.files.length} 个附件` : '已开始处理任务'}
+              </p>
+            ) : event.type === 'agent_action' ? (
+              <>
+                <details className="agent-thought-details">
+                  <summary>
+                    <span>行动思考</span>
+                    <small>{event.tool_name}</small>
+                  </summary>
+                  <p>{event.thought || '正在判断下一步操作。'}</p>
+                </details>
+                <p className="agent-inline-activity">调用了工具 · {event.tool_name}</p>
+                {event.code && (
+                  <details className="agent-inline-code">
+                    <summary>查看本轮 Python 代码</summary>
+                    <pre><code>{event.code}</code></pre>
+                  </details>
+                )}
+              </>
+            ) : event.type === 'agent_command_approval_required' ? (
+              <p className="agent-inline-activity">等待人工批准 · {event.command}</p>
+            ) : event.type === 'agent_command_approval_decision' ? (
+              <p className="agent-inline-activity">{event.approved ? '已批准命令' : '已拒绝命令'}</p>
+            ) : event.type === 'agent_reasoning' ? (
+              <details className="agent-thought-details">
+                <summary><span>阶段思考</span></summary>
+                <p>{event.summary}</p>
+              </details>
+            ) : (
+              <>
+                <p className={`agent-inline-activity ${event.success ? '' : 'failed'}`}>
+                  {event.success ? '完成了工具' : '工具执行失败'} · {event.tool_name} · {describeObservation(event)}
+                </p>
+                {event.details && (
+                  <details className="agent-inline-code">
+                    <summary>查看命令输出或文件差异</summary>
+                    <pre><code>{event.details}</code></pre>
+                  </details>
+                )}
+              </>
+            )}
+          </div>
+        ))}
+        {running && <p className="agent-inline-activity is-running">正在继续分析…</p>}
+      </div>
       {plan && (
         <section className="agent-plan-card" aria-label="任务执行计划">
           <header className="agent-plan-head">
@@ -494,7 +869,7 @@ const AgentInlineProcess = memo(function AgentInlineProcess({
               <h3>{plan.objective}</h3>
             </div>
             <p className="agent-plan-count" aria-live="polite">
-              {completedCount}/{plan.todos.length} 已完成
+              {completedCount}/{plan.todos.length}
             </p>
           </header>
           <div
@@ -515,7 +890,7 @@ const AgentInlineProcess = memo(function AgentInlineProcess({
                 : state.status === 'in_progress'
                   ? '进行中'
                   : state.status === 'failed'
-                    ? '已熔断'
+                    ? '失败'
                     : '等待中'
               return (
                 <li
@@ -524,14 +899,9 @@ const AgentInlineProcess = memo(function AgentInlineProcess({
                   aria-current={state.status === 'in_progress' ? 'step' : undefined}
                 >
                   <span className="agent-plan-index" aria-hidden="true">{index + 1}</span>
-                  <div className="agent-plan-copy">
-                    <div className="agent-plan-row">
-                      <p>{todo.objective}</p>
-                      <span className="agent-plan-status">{statusLabel}</span>
-                    </div>
-                    {state.result && (
-                      <p className="agent-plan-result">{state.result}</p>
-                    )}
+                  <div className="agent-plan-row">
+                    <p>{todo.objective}</p>
+                    <span className="agent-plan-status">{statusLabel}</span>
                   </div>
                 </li>
               )
@@ -539,50 +909,6 @@ const AgentInlineProcess = memo(function AgentInlineProcess({
           </ol>
         </section>
       )}
-      <div className="agent-inline-steps">
-        {activityTrace.map((event, index) => (
-          <div
-            className={`agent-inline-step ${event.type}`}
-            key={`${event.type}-${index}`}
-          >
-            {event.type === 'agent_started' ? (
-              <p className="agent-inline-activity">
-                {event.files.length ? `已查看 ${event.files.length} 个附件` : '已开始处理任务'}
-              </p>
-            ) : event.type === 'agent_action' ? (
-              <>
-                <p className="agent-inline-reasoning">{event.thought || '正在判断下一步操作。'}</p>
-                <p className="agent-inline-activity">调用了工具 · {event.tool_name}</p>
-                {event.code && (
-                  <details className="agent-inline-code">
-                    <summary>查看本轮 Python 代码</summary>
-                    <pre><code>{event.code}</code></pre>
-                  </details>
-                )}
-              </>
-            ) : event.type === 'agent_command_approval_required' ? (
-              <p className="agent-inline-activity">等待人工批准 · {event.command}</p>
-            ) : event.type === 'agent_command_approval_decision' ? (
-              <p className="agent-inline-activity">{event.approved ? '已批准命令' : '已拒绝命令'}</p>
-            ) : event.type === 'agent_reasoning' ? (
-              <p className="agent-inline-reasoning">{event.summary}</p>
-            ) : (
-              <>
-                <p className={`agent-inline-activity ${event.success ? '' : 'failed'}`}>
-                  {event.success ? '完成了工具' : '工具执行失败'} · {event.tool_name} · {describeObservation(event)}
-                </p>
-                {event.details && (
-                  <details className="agent-inline-code">
-                    <summary>查看命令输出或文件差异</summary>
-                    <pre><code>{event.details}</code></pre>
-                  </details>
-                )}
-              </>
-            )}
-          </div>
-        ))}
-        {running && <p className="agent-inline-activity is-running">正在继续分析…</p>}
-      </div>
     </div>
   )
 })
@@ -694,14 +1020,23 @@ export default function NewChat({
   const [agentTrace, setAgentTrace] = useState<AgentTraceEvent[]>([])
   // 右侧项目文件面板默认收起，由顶部按钮开关
   const [sourcesCollapsed, setSourcesCollapsed] = useState(true)
+  const [projectSidebarWidth, setProjectSidebarWidth] = useState(loadProjectSidebarWidth)
   const [apiConfigs, setApiConfigs] = useState<ApiConfig[]>([])
   const [selectedConfigId, setSelectedConfigId] = useState<string>('')
   const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBaseSummary[]>([])
   // 不预选知识库，用户可以选择零个或多个
   const [knowledgeBaseIds, setKnowledgeBaseIds] = useState<string[]>([])
+  const [expandedKnowledgeBaseId, setExpandedKnowledgeBaseId] = useState<string | null>(null)
   const knowledgeBasesRef = useRef<KnowledgeBaseSummary[]>([])
   const fileInputRef = useRef<HTMLInputElement>(null)
   const listRef = useRef<HTMLDivElement>(null)
+  const chatBodyRef = useRef<HTMLDivElement>(null)
+  const projectSidebarWidthRef = useRef(projectSidebarWidth)
+  const projectSidebarResizeRef = useRef<{
+    pointerId: number
+    startX: number
+    startWidth: number
+  } | null>(null)
   // 人工批准弹窗：请求内容 + 结算回调（Promise 流内等待用户点按钮）
   const [approval, setApproval] = useState<ApprovalRequest | null>(null)
   const approvalResolveRef = useRef<((approved: boolean) => void) | null>(null)
@@ -716,6 +1051,83 @@ export default function NewChat({
       // 尚未收到任务编号时保持提交请求，待后端启动后再断开订阅。
       if (runningDiscussionRef.current) streamControllerRef.current?.abort()
       if (approvalResolveRef.current) approvalResolveRef.current(false)
+    }
+  }, [])
+
+  function setProjectSidebarCssWidth(width: number): number {
+    const containerWidth = chatBodyRef.current?.getBoundingClientRect().width
+    const nextWidth = clampProjectSidebarWidth(width, containerWidth)
+    projectSidebarWidthRef.current = nextWidth
+    chatBodyRef.current?.style.setProperty('--project-sidebar-width', `${nextWidth}px`)
+    return nextWidth
+  }
+
+  function saveProjectSidebarWidth(width: number) {
+    const nextWidth = setProjectSidebarCssWidth(width)
+    setProjectSidebarWidth(nextWidth)
+    try {
+      window.localStorage.setItem(PROJECT_SIDEBAR_WIDTH_STORAGE_KEY, String(nextWidth))
+    } catch {
+      // 浏览器禁用本地存储时仅保留当前页面宽度。
+    }
+  }
+
+  function handleProjectSidebarResizeStart(event: React.PointerEvent<HTMLDivElement>) {
+    if (event.button !== 0) return
+    event.preventDefault()
+    projectSidebarResizeRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startWidth: projectSidebarWidthRef.current,
+    }
+    event.currentTarget.setPointerCapture(event.pointerId)
+    document.body.classList.add('is-resizing-project-sidebar')
+  }
+
+  function handleProjectSidebarResizeMove(event: React.PointerEvent<HTMLDivElement>) {
+    const resize = projectSidebarResizeRef.current
+    if (!resize || resize.pointerId !== event.pointerId) return
+    setProjectSidebarCssWidth(resize.startWidth + resize.startX - event.clientX)
+  }
+
+  function finishProjectSidebarResize(
+    event: React.PointerEvent<HTMLDivElement>,
+  ) {
+    const resize = projectSidebarResizeRef.current
+    if (!resize || resize.pointerId !== event.pointerId) return
+    projectSidebarResizeRef.current = null
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId)
+    }
+    document.body.classList.remove('is-resizing-project-sidebar')
+    saveProjectSidebarWidth(projectSidebarWidthRef.current)
+  }
+
+  function handleProjectSidebarResizeKeyDown(event: React.KeyboardEvent<HTMLDivElement>) {
+    const step = event.shiftKey ? 48 : 16
+    let nextWidth: number | null = null
+    if (event.key === 'ArrowLeft') nextWidth = projectSidebarWidthRef.current + step
+    if (event.key === 'ArrowRight') nextWidth = projectSidebarWidthRef.current - step
+    if (event.key === 'Home') nextWidth = PROJECT_SIDEBAR_MIN_WIDTH
+    if (event.key === 'End') nextWidth = PROJECT_SIDEBAR_MAX_WIDTH
+    if (nextWidth === null) return
+    event.preventDefault()
+    saveProjectSidebarWidth(nextWidth)
+  }
+
+  useEffect(() => {
+    function handleWindowResize() {
+      const currentWidth = projectSidebarWidthRef.current
+      const nextWidth = setProjectSidebarCssWidth(projectSidebarWidthRef.current)
+      if (nextWidth !== currentWidth) {
+        setProjectSidebarWidth(nextWidth)
+      }
+    }
+    handleWindowResize()
+    window.addEventListener('resize', handleWindowResize)
+    return () => {
+      window.removeEventListener('resize', handleWindowResize)
+      document.body.classList.remove('is-resizing-project-sidebar')
     }
   }, [])
 
@@ -1059,7 +1471,11 @@ export default function NewChat({
         </div>
       </header>
 
-      <div className={`rag-chat-body ${sourcesCollapsed ? 'sources-collapsed' : ''}`}>
+      <div
+        className={`rag-chat-body ${sourcesCollapsed ? 'sources-collapsed' : ''}`}
+        ref={chatBodyRef}
+        style={{ '--project-sidebar-width': `${projectSidebarWidth}px` } as React.CSSProperties}
+      >
         <section className="rag-chat-col" aria-label="聊天消息">
           <div className="rag-messages" ref={listRef}>
             <div className="rag-messages-inner">
@@ -1145,23 +1561,46 @@ export default function NewChat({
                     <span className="rag-kb-chevron" aria-hidden="true" />
                   </summary>
                   <div className="rag-kb-menu">
-                    {knowledgeBases.map((base) => (
-                      <label key={base.id}>
-                        <input
-                          type="checkbox"
-                          checked={knowledgeBaseIds.includes(base.id)}
-                          disabled={isSubmitting}
-                          onChange={() => setKnowledgeBaseIds((current) => {
-                            if (current.includes(base.id)) {
-                              return current.filter((id) => id !== base.id)
-                            }
-                            return [...current, base.id]
-                          })}
-                        />
-                        <span>{base.name}</span>
-                        <small>{base.document_count}</small>
-                      </label>
-                    ))}
+                    {knowledgeBases.map((base) => {
+                      const descriptionId = `rag-kb-description-${base.id}`
+                      const descriptionExpanded = expandedKnowledgeBaseId === base.id
+                      return (
+                        <div className="rag-kb-option" key={base.id}>
+                          <label>
+                            <input
+                              type="checkbox"
+                              checked={knowledgeBaseIds.includes(base.id)}
+                              disabled={isSubmitting}
+                              onChange={() => setKnowledgeBaseIds((current) => {
+                                if (current.includes(base.id)) {
+                                  return current.filter((id) => id !== base.id)
+                                }
+                                return [...current, base.id]
+                              })}
+                            />
+                            <span>{base.name}</span>
+                            <small>{base.document_count}</small>
+                          </label>
+                          <button
+                            type="button"
+                            className="rag-kb-description-toggle"
+                            aria-label={`查看${base.name}的知识库描述`}
+                            aria-expanded={descriptionExpanded}
+                            aria-controls={descriptionId}
+                            onClick={() => setExpandedKnowledgeBaseId((current) => (
+                              current === base.id ? null : base.id
+                            ))}
+                          >
+                            ···
+                          </button>
+                          {descriptionExpanded && (
+                            <p id={descriptionId} className="rag-kb-description">
+                              {base.description.trim() || '暂无描述'}
+                            </p>
+                          )}
+                        </div>
+                      )
+                    })}
                   </div>
                 </details>
                 <button
@@ -1261,6 +1700,24 @@ export default function NewChat({
           aria-label="项目文件"
           aria-hidden={sourcesCollapsed}
         >
+          <div
+            className="rag-sources-resizer"
+            role="separator"
+            aria-label="调整项目文件侧栏宽度"
+            aria-orientation="vertical"
+            aria-valuemin={PROJECT_SIDEBAR_MIN_WIDTH}
+            aria-valuemax={PROJECT_SIDEBAR_MAX_WIDTH}
+            aria-valuenow={projectSidebarWidth}
+            aria-valuetext={`${projectSidebarWidth} 像素`}
+            tabIndex={0}
+            onPointerDown={handleProjectSidebarResizeStart}
+            onPointerMove={handleProjectSidebarResizeMove}
+            onPointerUp={finishProjectSidebarResize}
+            onPointerCancel={finishProjectSidebarResize}
+            onLostPointerCapture={finishProjectSidebarResize}
+            onKeyDown={handleProjectSidebarResizeKeyDown}
+            title="左右拖动调整宽度"
+          />
           <ProjectFileExplorer
             projectId={projectId}
             collapsed={sourcesCollapsed}

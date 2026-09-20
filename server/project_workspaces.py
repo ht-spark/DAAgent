@@ -182,3 +182,46 @@ def list_project_file_tree(project_id: str) -> dict[str, Any]:
         "root_path": str(root),
         "nodes": walk(root, "", 1),
     }
+
+
+def resolve_project_file(project_id: str, relative_path: str) -> Path:
+    """解析项目内的单个文件，并阻止越界或隐藏目录访问。
+
+    Args:
+        project_id: 已注册项目的标识。
+        relative_path: 相对项目根目录的文件路径。
+
+    Returns:
+        已验证且真实存在的文件绝对路径。
+
+    Raises:
+        ProjectWorkspaceError: 项目不存在或项目根目录失效。
+        ValueError: 文件路径越界、指向隐藏目录或无法访问。
+        FileNotFoundError: 文件不存在。
+    """
+    project = require_project(project_id)
+    root = Path(project["root_path"]).resolve(strict=True)
+    if not isinstance(relative_path, str) or not relative_path.strip():
+        raise ValueError("项目文件路径不能为空")
+
+    candidate = Path(relative_path.strip())
+    parts = tuple(part for part in candidate.parts if part not in {"", "."})
+    skipped_names = {name.casefold() for name in FILE_TREE_SKIP_NAMES}
+    if (
+        candidate.is_absolute()
+        or candidate.drive
+        or not parts
+        or any(part == ".." for part in parts)
+        or any(part.casefold() in skipped_names for part in parts)
+    ):
+        raise ValueError("项目文件路径无效")
+
+    try:
+        target = root.joinpath(*parts).resolve(strict=True)
+    except FileNotFoundError as exc:
+        raise FileNotFoundError(f"项目文件不存在: {relative_path}") from exc
+    except OSError as exc:
+        raise ValueError("项目文件无法访问") from exc
+    if root not in target.parents or not target.is_file():
+        raise ValueError("项目文件路径无效")
+    return target

@@ -257,7 +257,11 @@ def _merge_recovery_plan(
         }, deep=True)
         for todo in recovery.todos
     ]
-    return AnalysisPlan(objective=previous.objective, todos=[*preserved, *revised])
+    return AnalysisPlan(
+        objective=previous.objective,
+        reasoning_summary=recovery.reasoning_summary,
+        todos=[*preserved, *revised],
+    )
 
 
 def _next_todo(plan: AnalysisPlan) -> TodoItem | None:

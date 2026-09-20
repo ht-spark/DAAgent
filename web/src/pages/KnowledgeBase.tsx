@@ -39,6 +39,7 @@ export default function KnowledgeBase({
   // 新建知识库：用主题弹窗代替原生 prompt
   const [createOpen, setCreateOpen] = useState(false)
   const [createName, setCreateName] = useState('')
+  const [createDescription, setCreateDescription] = useState('')
   const [creating, setCreating] = useState(false)
   const fileInput = useRef<HTMLInputElement>(null)
   const createInputRef = useRef<HTMLInputElement>(null)
@@ -106,6 +107,7 @@ export default function KnowledgeBase({
 
   function openCreateDialog() {
     setCreateName('')
+    setCreateDescription('')
     setCreateOpen(true)
   }
 
@@ -113,6 +115,7 @@ export default function KnowledgeBase({
     if (creating) return
     setCreateOpen(false)
     setCreateName('')
+    setCreateDescription('')
   }
 
   async function submitCreateKnowledgeBase() {
@@ -121,13 +124,14 @@ export default function KnowledgeBase({
     setCreating(true)
     setError('')
     try {
-      const created = await createKnowledgeBase(name)
+      const created = await createKnowledgeBase(name, createDescription.trim())
       setKnowledgeBases((current) => [...current, created])
       setKnowledgeBaseId(created.id)
       onKnowledgeBaseIdChange?.(created.id)
       setDocuments([])
       setCreateOpen(false)
       setCreateName('')
+      setCreateDescription('')
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : '创建知识库失败。')
     } finally {
@@ -354,14 +358,13 @@ export default function KnowledgeBase({
                   <th className="kb-col-time">上传时间</th>
                   <th className="kb-col-status">上传状态</th>
                   <th className="kb-col-unknown">is_markdown</th>
-                  <th className="kb-col-unknown">is_conversion</th>
-                  <th className="kb-col-status">向量状态</th>
+                  <th className="kb-col-status">是否转换成功</th>
                 </tr>
               </thead>
               <tbody>
                 {!loading && documents.length === 0 && (
                   <tr>
-                    <td colSpan={8} className="kb-empty-row">本次任务尚未上传文件</td>
+                    <td colSpan={7} className="kb-empty-row">本次任务尚未上传文件</td>
                   </tr>
                 )}
                 {paginatedDocuments.map((doc) => (
@@ -406,19 +409,12 @@ export default function KnowledgeBase({
                       )}
                     </td>
                     <td className="kb-col-status">
-                      {doc.embedding_status === 'embedded' ? (
-                        <span className="kb-tag kb-tag-success">已入库 {doc.indexed_chunks} 块</span>
-                      ) : (
-                        <span className="kb-tag kb-tag-normal">待入库</span>
-                      )}
-                    </td>
-                    <td className="kb-col-unknown">
                       {doc.is_markdown ? (
                         <span className="kb-tag kb-tag-normal">—</span>
                       ) : doc.is_conversion ? (
-                        <span className="kb-tag kb-tag-success">是</span>
+                        <span className="kb-tag kb-tag-success">成功</span>
                       ) : (
-                        <span className="kb-tag kb-tag-normal">否</span>
+                        <span className="kb-tag kb-tag-normal">—</span>
                       )}
                     </td>
                   </tr>
@@ -485,7 +481,7 @@ export default function KnowledgeBase({
             <header className="api-modal-head">
               <div>
                 <h2 id="kb-create-title">新建知识库</h2>
-                <p className="api-modal-lead">输入一个便于识别的名称，创建后可直接上传文档。</p>
+                <p className="api-modal-lead">填写名称和内容描述，创建后可直接上传文档。</p>
               </div>
               <button
                 type="button"
@@ -520,7 +516,20 @@ export default function KnowledgeBase({
                   disabled={creating}
                   autoComplete="off"
                 />
-                <p className="api-field-hint">名称仅用于本地识别，不影响检索效果。</p>
+                <p className="api-field-hint">名称用于识别和选择知识库。</p>
+              </div>
+              <div className="field">
+                <label htmlFor="kb-create-description">知识库描述（选填）</label>
+                <textarea
+                  id="kb-create-description"
+                  value={createDescription}
+                  onChange={(event) => setCreateDescription(event.target.value)}
+                  placeholder="例如：包含产品功能、使用说明和常见问题，适用于产品咨询与售后答疑。"
+                  maxLength={300}
+                  rows={4}
+                  disabled={creating}
+                />
+                <p className="api-field-hint">简要说明资料范围和适用场景，便于后续选择合适的知识库。</p>
               </div>
             </form>
 

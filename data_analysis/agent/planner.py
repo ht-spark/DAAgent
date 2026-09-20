@@ -13,6 +13,8 @@ from ..tools.registry import ToolSpec
 from .loop import LlmClient
 from .state import AgentState, AnalysisPlan
 
+_PLANNER_PROMPT_PATH = Path(__file__).resolve().parents[1] / "prompts" / "planner.md"
+
 
 class PlannerError(RuntimeError):
     """Planner 无法生成有效执行计划。"""
@@ -143,21 +145,27 @@ class Planner:
             "workspace_enabled": bool(state.workspace_root),
             "available_tools": tools,
         }
-        prompt = (
-            "根据当前任务生成顶层执行计划。你只负责规划，不执行工具，也不回答任务。"
-            f"最多生成 {self._max_todos} 个必要 Todo；简单任务只生成一个。"
-            "计划必须针对用户目标，不套用固定分析方法。depends_on 只能引用已定义的 id。"
-            "只输出一个 JSON 对象，结构为："
-            '{"objective":"总体目标","todos":['
-            '{"id":"todo_1","objective":"具体可验证目标","status":"pending",'
-            '"depends_on":[],"expected_outputs":["预期结果"],"result_summary":null}]}。'
-            "所有 Todo 初始状态必须为 pending。当前上下文：\n"
-            + json.dumps(context, ensure_ascii=False, indent=2)
-        )
+        prompt = _render_planner_prompt(context, self._max_todos)
         return [
             ("system", "你是执行计划编译器，只生成简洁、可执行、可验证的 Todo List。"),
             ("user", prompt),
         ]
+
+
+def _render_planner_prompt(context: dict[str, Any], max_todos: int) -> str:
+    """加载 Planner 模板并注入本轮结构化上下文。"""
+    try:
+        template = _PLANNER_PROMPT_PATH.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise PlannerError(f"无法读取 Planner 提示词: {exc}") from exc
+    return (
+        template.replace("{{MAX_TODOS}}", str(max_todos))
+        .replace(
+            "{{CONTEXT_JSON}}",
+            json.dumps(context, ensure_ascii=False, indent=2),
+        )
+        .strip()
+    )
 
 
 def _parse_plan(raw: str) -> AnalysisPlan:

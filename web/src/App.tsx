@@ -12,13 +12,12 @@ import KnowledgeBase from './pages/KnowledgeBase'
 import KnowledgeBaseStats from './pages/KnowledgeBaseStats'
 import ChunkEmbedding, { type ChunkEmbeddingOptions } from './pages/ChunkEmbedding'
 import ChunkEmbeddingProgress from './pages/ChunkEmbeddingProgress'
-import VectorRetrievalReady from './pages/VectorRetrievalReady'
 import KnowledgeBaseHistory from './pages/KnowledgeBaseHistory'
 
 type Section = 'modeling' | 'brainstorm' | 'api' | 'docs'
 type TaskStep = 'submit' | 'progress' | 'result'
 type ModelingView = 'new' | 'history'
-type BrainstormView = 'knowledge-hub' | 'knowledge' | 'knowledge-history' | 'stats' | 'chunking' | 'chunking-progress' | 'retrieval-ready'
+type BrainstormView = 'knowledge-hub' | 'knowledge' | 'knowledge-history' | 'stats' | 'chunking' | 'chunking-progress'
 
 /** 顶栏「上一级 / 下一级」导航目标 */
 type NavTarget = {
@@ -88,11 +87,6 @@ function resolveLevelNav(options: {
     case 'chunking-progress':
       return {
         parent: { section: 'brainstorm', brainstormView: 'chunking' },
-        next: { section: 'brainstorm', brainstormView: 'retrieval-ready' },
-      }
-    case 'retrieval-ready':
-      return {
-        parent: { section: 'brainstorm', brainstormView: 'chunking-progress' },
         next: null,
       }
     default:
@@ -109,7 +103,6 @@ const NAV_PARENT_TITLE: Record<string, string> = {
   stats: '资料统计',
   chunking: '分块与嵌入设置',
   'chunking-progress': '执行分块与嵌入',
-  'retrieval-ready': '向量检索就绪',
 }
 
 function navTargetKey(target: NavTarget): string {
@@ -329,11 +322,7 @@ export default function App() {
             options={chunkEmbeddingOptions}
             knowledgeBaseId={activeKnowledgeBaseId}
             onBack={() => setBrainstormView('chunking')}
-            onNext={() => setBrainstormView('retrieval-ready')}
           />
-        )}
-        {section === 'brainstorm' && brainstormView === 'retrieval-ready' && (
-          <VectorRetrievalReady onBack={() => setBrainstormView('chunking-progress')} />
         )}
         {section === 'modeling' && modelingView === 'history' && <History onOpen={openFromHistory} />}
         {section === 'api' && <ApiManager />}
