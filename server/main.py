@@ -11,6 +11,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
@@ -49,6 +50,7 @@ from data_analysis.runtime import (
 )
 from data_analysis.tools import create_agent_tool_registry, supports_data_profile
 from server import store
+from server import converter_store
 from server.files import list_figures, resolve_artifact
 from server.project_workspaces import (
     ProjectWorkspaceError,
@@ -103,6 +105,12 @@ from scr.math_modeling_agent.llm import (
     LLM_CALL_TIMEOUT_SECONDS as AGENT_LLM_TIMEOUT_SECONDS,
     create_llm,
 )
+from scr.tools.document_tools import (
+    MAX_DOCUMENT_BYTES,
+    DocumentConversionError,
+    supported_extensions,
+    to_markdown_from_bytes,
+)
 from server.schemas import (
     AgentCommandDecisionBody,
     BudgetConfirmBody,
@@ -110,6 +118,7 @@ from server.schemas import (
     BrainstormDiscussionSummary,
     BrainstormDiscussionMessage,
     CreateRunResponse,
+    DocumentSaveBody,
     KnowledgeDocument,
     KnowledgeBaseCreateBody,
     KnowledgeBaseSummary,
@@ -255,6 +264,37 @@ async def _no_cache_html(request: Request, call_next):
     if request.url.path in {"", "/", "/index.html"}:
         response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
     return response
+
+
+@app.middleware("http")
+async def _guard_process_level_exceptions(request: Request, call_next):
+    """兜住请求处理中冒出的进程级异常，避免单个请求带走整个后端。
+
+    少数第三方库在清理索引 / 临时文件时会抛出 ``SystemExit``（例如删除动作被
+    外部安全守卫中止）。它属于 ``BaseException``：既不会被业务代码的
+    ``except Exception`` 捕获，Starlette 的错误中间件也不处理，于是会一路冒到
+    事件循环所在的主线程，直接把 uvicorn 进程结束掉——表现为「点一下按钮后端就没了」。
+
+    这里统一转成 500 响应并记录日志，服务本身继续存活。``asyncio.CancelledError``
+    不在拦截范围内，任务取消语义保持不变。
+    """
+    try:
+        return await call_next(request)
+    except (SystemExit, KeyboardInterrupt):
+        logging.getLogger(__name__).exception(
+            "请求处理中捕获进程级异常，已拦截以免服务退出：%s %s",
+            request.method,
+            request.url.path,
+        )
+        return JSONResponse(
+            status_code=500,
+            content={
+                "detail": (
+                    "服务内部异常（第三方库主动中止进程）已被拦截，"
+                    "本次操作未完成且未生效，请查看后端日志后重试"
+                )
+            },
+        )
 
 # 保留后台任务引用，避免被 GC
 _BACKGROUND_TASKS: set[asyncio.Task] = set()
@@ -2247,6 +2287,183 @@ async def download_file_endpoint(run_id: str, file_path: str):
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return FileResponse(target)
+
+
+# ---------------------------------------------------------------------------
+# 文档转换（MarkItDown）
+# ---------------------------------------------------------------------------
+# 单次请求最多转换的文件数，避免一次上传过多文件长时间占用工作线程
+MAX_CONVERT_FILES_PER_REQUEST = 20
+# 单次另存 Markdown 的字符上限，防止异常大的请求体
+MAX_SAVE_MARKDOWN_CHARS = 50_000_000
+
+
+def _safe_markdown_filename(filename: str) -> str:
+    """把用户输入的保存文件名规范化。
+
+    只保留文件名本身（去掉任何路径成分），替换 Windows 非法字符，并强制 .md 后缀，
+    避免通过文件名做目录穿越。
+
+    Args:
+        filename: 用户输入的文件名，可含或不含 .md 后缀。
+
+    Returns:
+        形如 ``报告.md`` 的安全文件名。
+
+    Raises:
+        HTTPException: 文件名为空或清洗后为空。
+    """
+    stem = Path(filename).name.strip()
+    stem = re.sub(r'[<>:"|?*\x00-\x1f]', "_", stem)
+    if stem.lower().endswith(".md"):
+        stem = stem[:-3]
+    stem = stem.strip(" .")
+    if not stem:
+        raise HTTPException(status_code=400, detail="文件名不能为空")
+    return f"{stem}.md"
+
+
+def _default_save_directory() -> str:
+    """建议的默认保存目录：优先用户「下载」目录，不存在时回退用户主目录。"""
+    downloads = Path.home() / "Downloads"
+    return str(downloads if downloads.is_dir() else Path.home())
+
+
+@app.get("/api/documents/formats")
+async def list_convertible_formats_endpoint() -> dict[str, object]:
+    """返回文档转换支持的格式、体积上限与默认保存目录，供界面提示与校验。"""
+    return {
+        "extensions": list(supported_extensions()),
+        "max_bytes": MAX_DOCUMENT_BYTES,
+        "default_save_dir": _default_save_directory(),
+    }
+
+
+@app.post("/api/documents/save")
+async def save_converted_markdown_endpoint(body: DocumentSaveBody) -> dict[str, object]:
+    """把某条转换记录另存到用户指定的本机目录。
+
+    浏览器无法指定下载路径，因此由本地后端完成落盘：目录既可手输，
+    也可先调 /api/system/select-folder 用系统原生文件夹选择框取得。
+    """
+    markdown = await asyncio.to_thread(converter_store.read_markdown, body.record_id)
+    if markdown is None:
+        raise HTTPException(status_code=404, detail="转换记录不存在，无法保存")
+    if not markdown.strip():
+        raise HTTPException(status_code=400, detail="该记录没有可保存的内容")
+
+    filename = _safe_markdown_filename(body.filename)
+    target_dir = Path(body.directory).expanduser()
+
+    if not target_dir.is_absolute():
+        raise HTTPException(status_code=400, detail="保存目录必须是绝对路径")
+    if not target_dir.is_dir():
+        raise HTTPException(status_code=400, detail=f"保存目录不存在：{target_dir}")
+
+    if len(markdown) > MAX_SAVE_MARKDOWN_CHARS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"内容过大（{len(markdown)} 字符），超过 {MAX_SAVE_MARKDOWN_CHARS} 字符上限",
+        )
+
+    target = target_dir / filename
+    try:
+        await asyncio.to_thread(target.write_text, markdown, encoding="utf-8")
+    except OSError as exc:
+        raise HTTPException(status_code=400, detail=f"写入失败：{exc}") from exc
+
+    return {
+        "saved_path": str(target),
+        "filename": filename,
+        "bytes": target.stat().st_size,
+    }
+
+
+# ---------------------------------------------------------------------------
+# 转换历史：未删除的记录会一直保留，每次打开「文档转换」页都能看到
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/documents/history")
+async def list_conversion_history_endpoint() -> dict[str, object]:
+    """按转换先后顺序返回全部转换记录（不含正文）。"""
+    records = await asyncio.to_thread(converter_store.list_records)
+    return {"records": records}
+
+
+@app.get("/api/documents/history/{record_id}/content")
+async def read_conversion_content_endpoint(record_id: int) -> PlainTextResponse:
+    """返回某条转换记录的 Markdown 正文（预览、复制时按需读取）。"""
+    markdown = await asyncio.to_thread(converter_store.read_markdown, record_id)
+    if markdown is None:
+        raise HTTPException(status_code=404, detail="转换记录不存在")
+    return PlainTextResponse(markdown)
+
+
+@app.delete("/api/documents/history/{record_id}")
+async def delete_conversion_record_endpoint(record_id: int) -> dict[str, object]:
+    """删除一条转换记录（删除后不再出现在列表里）。"""
+    deleted = await asyncio.to_thread(converter_store.delete_record, record_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="转换记录不存在")
+    return {"deleted_id": record_id}
+
+
+@app.post("/api/documents/convert")
+async def convert_documents_to_markdown_endpoint(
+    files: list[UploadFile] = File(..., description="待转换文档（可多个）"),
+) -> dict[str, object]:
+    """把上传的文档转换为 Markdown 文本，并登记到转换历史。
+
+    独立功能，与建模流程无关：逐份转换、逐份登记记录，
+    单个文件失败不影响同一批次中的其余文件，失败原因同样入历史。
+
+    返回每条记录的元数据（不含正文）；正文按需通过
+    ``GET /api/documents/history/{record_id}/content`` 读取。
+    """
+    if not files:
+        raise HTTPException(status_code=400, detail="请至少选择一个文档")
+    if len(files) > MAX_CONVERT_FILES_PER_REQUEST:
+        raise HTTPException(
+            status_code=400,
+            detail=f"单次最多转换 {MAX_CONVERT_FILES_PER_REQUEST} 个文档",
+        )
+
+    results: list[dict[str, object]] = []
+    for upload in files:
+        filename = Path(upload.filename or "document").name
+        started = time.monotonic()
+        content = await upload.read()
+        try:
+            # 转换是 CPU 密集的同步调用，放到线程避免阻塞事件循环
+            markdown = await asyncio.to_thread(
+                to_markdown_from_bytes, content, filename
+            )
+        except (ValueError, DocumentConversionError) as exc:
+            results.append(
+                await asyncio.to_thread(
+                    converter_store.add_record,
+                    filename=filename,
+                    ok=False,
+                    size_bytes=len(content),
+                    elapsed_ms=int((time.monotonic() - started) * 1000),
+                    error=str(exc),
+                )
+            )
+            continue
+        results.append(
+            await asyncio.to_thread(
+                converter_store.add_record,
+                filename=filename,
+                ok=True,
+                char_count=len(markdown),
+                size_bytes=len(content),
+                elapsed_ms=int((time.monotonic() - started) * 1000),
+                markdown=markdown,
+            )
+        )
+
+    return {"results": results}
 
 
 # ---------------------------------------------------------------------------

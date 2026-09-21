@@ -7456,3 +7456,594 @@ body {
     transition: none;
   }
 }
+
+/* ============================================
+   文档转换（MarkItDown）· 排字车间 / 稿纸工作台
+   页面专属样式，全部限定在 .conv-page 作用域内
+   ============================================ */
+
+.conv-page {
+  --conv-ink: #241f14;
+  --conv-ink-2: #5c5340;
+  --conv-ink-3: #8a7f68;
+  --conv-paper: #fffdf6;
+  --conv-paper-2: #fbf7ec;
+  --conv-rule: rgba(92, 72, 28, 0.11);
+  --conv-rule-strong: rgba(92, 72, 28, 0.22);
+  --conv-gold: #b8892d;
+  --conv-gold-soft: rgba(184, 137, 45, 0.13);
+  --conv-seal: #b4432f;
+  --conv-serif: "Source Han Serif SC", "Songti SC", "STZhongsong", "Noto Serif SC", "SimSun", Georgia, serif;
+  --conv-mono: "Consolas", "JetBrains Mono", "SFMono-Regular", ui-monospace, monospace;
+
+  max-width: 1180px;
+}
+
+/* ---------- 页头：刊头 + 朱砂印 ---------- */
+.conv-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  padding-bottom: 20px;
+  border-bottom: 1px solid var(--conv-rule-strong);
+  background:
+    linear-gradient(to bottom, transparent calc(100% - 3px), var(--conv-rule) calc(100% - 3px));
+  animation: conv-rise 420ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+.conv-eyebrow {
+  margin: 0 0 8px;
+  font-size: calc(11px * var(--app-font-ratio));
+  font-weight: 500;
+  letter-spacing: 0.2em;
+  color: var(--conv-ink-3);
+  font-family: var(--conv-mono);
+}
+.conv-eyebrow::before {
+  content: "";
+  display: inline-block;
+  width: 22px;
+  height: 1px;
+  margin-right: 8px;
+  vertical-align: middle;
+  background: var(--conv-gold);
+}
+.conv-title {
+  margin: 0;
+  font-family: var(--conv-serif);
+  font-size: calc(34px * var(--app-font-ratio));
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: var(--conv-ink);
+  line-height: 1.2;
+}
+.conv-sub {
+  margin: 10px 0 0;
+  max-width: 640px;
+  font-size: calc(13.5px * var(--app-font-ratio));
+  line-height: 1.7;
+  color: var(--conv-ink-2);
+}
+
+/* 印章：全页唯一的高饱和色块 */
+.conv-seal {
+  flex: 0 0 auto;
+  width: 46px;
+  height: 46px;
+  display: grid;
+  place-items: center;
+  border-radius: 4px;
+  background: var(--conv-seal);
+  color: #fdf6ee;
+  font-family: var(--conv-serif);
+  font-size: calc(23px * var(--app-font-ratio));
+  font-weight: 700;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.28);
+  transform: rotate(-3deg);
+  opacity: 0.92;
+  user-select: none;
+}
+
+/* ---------- 提示条 ---------- */
+.conv-notice {
+  margin-top: 16px;
+  padding: 10px 14px;
+  border-left: 3px solid #3f7d6e;
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  background: rgba(63, 125, 110, 0.09);
+  color: #2f6154;
+  font-size: calc(13px * var(--app-font-ratio));
+  font-weight: 500;
+  word-break: break-all;
+}
+
+/* ---------- 上传纸盘 ---------- */
+.conv-tray {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  width: 100%;
+  margin-top: 22px;
+  padding: 30px 28px 26px;
+  text-align: center;
+  border: 1px solid var(--conv-rule-strong);
+  border-radius: 14px;
+  background: var(--conv-paper);
+  cursor: pointer;
+  transition: transform 0.25s cubic-bezier(0.22, 1, 0.36, 1), box-shadow 0.25s ease,
+    border-color 0.25s ease;
+  animation: conv-rise 420ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+/* 内层虚线：与外框形成双线层次 */
+.conv-tray::before {
+  content: "";
+  position: absolute;
+  inset: 9px;
+  border: 1px dashed var(--conv-rule-strong);
+  border-radius: 9px;
+  pointer-events: none;
+  transition: border-color 0.25s ease;
+}
+.conv-tray:hover {
+  transform: translateY(-3px);
+  border-color: var(--conv-gold);
+  box-shadow: 0 14px 32px rgba(92, 72, 28, 0.13);
+}
+.conv-tray:hover::before { border-color: var(--conv-gold); }
+.conv-tray.is-drag {
+  transform: translateY(-3px) scale(1.004);
+  border-color: var(--conv-gold);
+  box-shadow: 0 14px 32px rgba(184, 137, 45, 0.22);
+}
+.conv-tray.is-drag::before { border-color: var(--conv-gold); border-style: solid; }
+.conv-tray.is-busy { cursor: default; transform: none; }
+
+/* 已有结果时收成细条，把纵向空间让给结果表 */
+.conv-tray.is-compact {
+  flex-direction: row;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 12px;
+  padding: 14px 20px;
+  text-align: left;
+}
+.conv-tray.is-compact .conv-tray-icon {
+  width: 34px;
+  height: 34px;
+  flex: 0 0 auto;
+}
+.conv-tray.is-compact .conv-tray-icon svg { width: 17px; height: 17px; }
+.conv-tray.is-compact .conv-tray-title { font-size: calc(14px * var(--app-font-ratio)); }
+.conv-tray.is-compact .conv-tray-hint { margin-left: auto; text-align: right; }
+.conv-tray.is-compact .conv-chips { display: none; }
+
+.conv-tray-icon {
+  display: grid;
+  place-items: center;
+  width: 46px;
+  height: 46px;
+  border-radius: 50%;
+  border: 1px solid var(--conv-rule-strong);
+  background: var(--conv-paper);
+  color: var(--conv-gold);
+}
+.conv-tray-icon svg { width: 22px; height: 22px; }
+.conv-tray-title {
+  margin: 0;
+  font-family: var(--conv-serif);
+  font-size: calc(17px * var(--app-font-ratio));
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--conv-ink);
+}
+.conv-tray-hint {
+  margin: 0;
+  font-size: calc(12.5px * var(--app-font-ratio));
+  line-height: 1.6;
+  color: var(--conv-ink-3);
+}
+
+/* 支持格式：纸条标签 */
+.conv-chips {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px;
+  max-width: 720px;
+  margin: 4px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.conv-chips li {
+  padding: 3px 8px;
+  border: 1px solid var(--conv-rule);
+  border-radius: 5px;
+  background: var(--conv-paper);
+  font-family: var(--conv-mono);
+  font-size: calc(11px * var(--app-font-ratio));
+  color: var(--conv-ink-2);
+}
+
+/* 转换中：排字逐行亮起 */
+.conv-composing { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+.conv-composing-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  align-items: flex-start;
+  margin-bottom: 4px;
+}
+.conv-composing-lines span {
+  display: block;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--conv-gold);
+  animation: conv-compose 1.4s ease-in-out infinite;
+}
+.conv-composing-lines span:nth-child(1) { width: 54px; }
+.conv-composing-lines span:nth-child(2) { width: 72px; animation-delay: 0.18s; }
+.conv-composing-lines span:nth-child(3) { width: 40px; animation-delay: 0.36s; }
+
+/* ---------- 统计条 ---------- */
+.conv-stats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin: 26px 0 0;
+  padding: 14px 0;
+  border-top: 1px solid var(--conv-rule);
+  border-bottom: 1px solid var(--conv-rule);
+  animation: conv-rise 420ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+.conv-stats > div {
+  padding: 0 18px;
+  border-left: 1px solid var(--conv-rule);
+}
+.conv-stats > div:first-child { border-left: 0; padding-left: 0; }
+.conv-stats dt {
+  font-family: var(--conv-mono);
+  font-size: calc(10.5px * var(--app-font-ratio));
+  letter-spacing: 0.12em;
+  color: var(--conv-ink-3);
+}
+.conv-stats dd {
+  margin: 4px 0 0;
+  font-family: var(--conv-serif);
+  font-size: calc(22px * var(--app-font-ratio));
+  font-weight: 600;
+  color: var(--conv-ink);
+  font-variant-numeric: tabular-nums;
+}
+.conv-stats dd.is-ok { color: #2f6154; }
+.conv-stats dd.is-bad { color: var(--conv-seal); }
+
+/* ---------- 结果条状列表 ---------- */
+.conv-table-wrap {
+  margin-top: 22px;
+  overflow: hidden;
+  border: 1px solid var(--conv-rule);
+  border-radius: 12px;
+  background: var(--conv-paper);
+  animation: conv-rise 420ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+.conv-table {
+  width: 100%;
+  table-layout: fixed;
+  border-collapse: collapse;
+}
+.conv-table thead th {
+  padding: 12px 16px;
+  text-align: left;
+  border-bottom: 1px solid var(--conv-rule-strong);
+  background: var(--conv-paper-2);
+  font-family: var(--conv-mono);
+  font-size: calc(10.5px * var(--app-font-ratio));
+  font-weight: 500;
+  letter-spacing: 0.14em;
+  color: var(--conv-ink-3);
+}
+.conv-table tbody tr {
+  border-bottom: 1px solid var(--conv-rule);
+  animation: conv-rise 320ms cubic-bezier(0.22, 1, 0.36, 1);
+  transition: background 0.16s ease;
+}
+.conv-table tbody tr:last-child { border-bottom: 0; }
+.conv-table tbody tr:hover { background: var(--conv-paper-2); }
+.conv-table td {
+  padding: 13px 16px;
+  vertical-align: middle;
+}
+.conv-col-name { width: auto; }
+.conv-col-time { width: 156px; }
+.conv-col-status { width: 92px; }
+.conv-col-actions { width: 252px; text-align: right; white-space: nowrap; }
+
+.conv-name {
+  display: block;
+  font-size: calc(13.5px * var(--app-font-ratio));
+  font-weight: 600;
+  color: var(--conv-ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.conv-name-meta {
+  display: block;
+  margin-top: 3px;
+  font-family: var(--conv-mono);
+  font-size: calc(10.5px * var(--app-font-ratio));
+  color: var(--conv-ink-3);
+}
+.conv-clock {
+  display: block;
+  font-family: var(--conv-mono);
+  font-size: calc(13px * var(--app-font-ratio));
+  color: var(--conv-ink);
+  font-variant-numeric: tabular-nums;
+}
+.conv-clock-meta {
+  display: block;
+  margin-top: 3px;
+  font-family: var(--conv-mono);
+  font-size: calc(10.5px * var(--app-font-ratio));
+  color: var(--conv-ink-3);
+}
+.conv-table tbody tr.is-failed .conv-name { color: var(--conv-seal); }
+
+.conv-status {
+  display: inline-block;
+  padding: 2px 10px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  font-size: calc(11.5px * var(--app-font-ratio));
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+.conv-status.is-ok {
+  color: #2f6154;
+  background: rgba(63, 125, 110, 0.12);
+  border-color: rgba(63, 125, 110, 0.3);
+}
+.conv-status.is-fail {
+  color: var(--conv-seal);
+  background: rgba(180, 67, 47, 0.1);
+  border-color: rgba(180, 67, 47, 0.32);
+}
+
+.conv-table .conv-col-actions .api-btn {
+  flex: 0 0 auto;
+  min-width: 0;
+  margin-left: 6px;
+  padding: 5px 13px;
+  font-size: calc(12.5px * var(--app-font-ratio));
+}
+.conv-table .conv-col-actions .api-btn:disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
+}
+
+/* ---------- 弹窗：预览稿纸 ---------- */
+.conv-modal-preview {
+  width: min(940px, 100%);
+  max-height: min(92vh, 880px);
+}
+/* 四角裁切标记挂在弹窗本体上，弹窗不滚动，标记位置恒定 */
+.conv-modal-preview::before,
+.conv-modal-preview::after {
+  content: "";
+  position: absolute;
+  width: 13px;
+  height: 13px;
+  pointer-events: none;
+  border-style: solid;
+  border-color: var(--conv-rule-strong);
+}
+.conv-modal-preview { position: relative; }
+.conv-modal-preview::before {
+  top: 8px;
+  left: 8px;
+  border-width: 1px 0 0 1px;
+  border-radius: 4px 0 0 0;
+}
+.conv-modal-preview::after {
+  right: 8px;
+  bottom: 8px;
+  border-width: 0 1px 1px 0;
+  border-radius: 0 0 4px 0;
+}
+
+.conv-modal-body {
+  position: relative;
+  padding: 20px 26px 26px 68px;
+  /* 版心竖线：可滚动元素的背景默认不随内容滚动，滚动时始终贴在左侧 */
+  background-image: linear-gradient(
+    to right,
+    transparent 45px,
+    rgba(180, 67, 47, 0.34) 45px,
+    rgba(180, 67, 47, 0.34) 46px,
+    transparent 46px
+  );
+}
+.conv-modal-body > .err-box { margin-top: 0; }
+.conv-loading {
+  margin: 0;
+  padding: 24px 0;
+  text-align: center;
+  color: var(--conv-ink-3);
+  font-size: calc(13px * var(--app-font-ratio));
+}
+
+.conv-sheet-note {
+  margin: 0 0 14px;
+  padding: 8px 12px;
+  border-left: 3px solid var(--conv-gold);
+  border-radius: 0 6px 6px 0;
+  background: var(--conv-gold-soft);
+  color: #7a5a1a;
+  font-size: calc(12px * var(--app-font-ratio));
+  line-height: 1.6;
+}
+
+/* ---------- 弹窗：下载路径 ---------- */
+.conv-dir-row {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+}
+.conv-dir-row input[type="text"] {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.conv-dir-row .api-btn {
+  flex: 0 0 auto;
+  padding: 0 16px;
+  border-radius: var(--radius-md);
+}
+.conv-save-preview {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px dashed var(--conv-rule-strong);
+  border-radius: 8px;
+  background: var(--conv-paper);
+  font-family: var(--conv-mono);
+  font-size: calc(11.5px * var(--app-font-ratio));
+  line-height: 1.6;
+  color: var(--conv-ink-2);
+  word-break: break-all;
+}
+
+/* ---------- 稿纸正文排版：宋体 + Times New Roman（中文文档的常规排法） ---------- */
+.conv-md .markdown-content {
+  font-family: var(--conv-serif);
+  font-size: calc(14.5px * var(--app-font-ratio));
+  line-height: 1.95;
+  color: var(--conv-ink);
+}
+.conv-md .markdown-content > p { text-indent: 2em; }
+.conv-md .markdown-content p,
+.conv-md .markdown-content li { line-height: 1.95; }
+.conv-md .markdown-content p { margin: 12px 0; }
+.conv-md .markdown-content h1,
+.conv-md .markdown-content h2 {
+  font-family: var(--conv-serif);
+  letter-spacing: 0.04em;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--conv-rule);
+}
+.conv-md .markdown-content h1 { font-size: calc(20px * var(--app-font-ratio)); }
+.conv-md .markdown-content h2 { font-size: calc(17px * var(--app-font-ratio)); }
+.conv-md .markdown-content h3,
+.conv-md .markdown-content h4 { font-size: calc(15.5px * var(--app-font-ratio)); }
+.conv-md .markdown-content strong { font-weight: 600; }
+.conv-md .markdown-content a {
+  color: var(--conv-gold);
+  text-underline-offset: 3px;
+  text-decoration-thickness: 1px;
+}
+.conv-md .markdown-content blockquote {
+  margin: 14px 0;
+  padding: 4px 0 4px 16px;
+  border-left: 3px solid var(--conv-gold);
+  color: var(--conv-ink-2);
+}
+.conv-md .markdown-content code {
+  padding: 1px 5px;
+  border: 1px solid var(--conv-rule);
+  border-radius: 4px;
+  background: var(--conv-paper-2);
+  font-family: var(--conv-mono);
+  font-size: 0.88em;
+}
+.conv-md .markdown-content pre {
+  margin: 14px 0;
+  padding: 13px 15px;
+  border: 1px solid var(--conv-rule);
+  border-radius: 9px;
+  background: var(--conv-paper-2);
+  overflow-x: auto;
+}
+.conv-md .markdown-content pre code {
+  padding: 0;
+  border: 0;
+  background: none;
+  font-size: calc(12.5px * var(--app-font-ratio));
+  line-height: 1.7;
+}
+/* 宽表格在稿纸内独立横向滚动；采用三线表（与 md2docx 的学术排版一致） */
+.conv-md .markdown-content table {
+  display: block;
+  width: 100%;
+  margin: 16px 0;
+  overflow-x: auto;
+  border-collapse: collapse;
+  border-top: 1.5px solid var(--conv-rule-strong);
+  border-bottom: 1.5px solid var(--conv-rule-strong);
+  font-size: calc(12.5px * var(--app-font-ratio));
+  line-height: 1.7;
+}
+.conv-md .markdown-content th,
+.conv-md .markdown-content td {
+  padding: 6px 12px;
+  border: 0;
+  text-align: left;
+  vertical-align: top;
+}
+.conv-md .markdown-content thead th {
+  border-bottom: 1px solid var(--conv-rule-strong);
+  font-weight: 600;
+}
+.conv-md .markdown-content hr {
+  margin: 20px 0;
+  border: 0;
+  border-top: 1px solid var(--conv-rule);
+}
+.conv-md .markdown-content img { max-width: 100%; height: auto; }
+
+/* 细滚动条 */
+.conv-modal-body::-webkit-scrollbar,
+.conv-md .markdown-content table::-webkit-scrollbar,
+.conv-table-wrap::-webkit-scrollbar { width: 8px; height: 8px; }
+.conv-modal-body::-webkit-scrollbar-thumb,
+.conv-md .markdown-content table::-webkit-scrollbar-thumb,
+.conv-table-wrap::-webkit-scrollbar-thumb {
+  border-radius: 4px;
+  background: rgba(92, 72, 28, 0.2);
+}
+.conv-modal-body::-webkit-scrollbar-thumb:hover,
+.conv-md .markdown-content table::-webkit-scrollbar-thumb:hover { background: rgba(92, 72, 28, 0.34); }
+.conv-modal-body::-webkit-scrollbar-track,
+.conv-table-wrap::-webkit-scrollbar-track { background: transparent; }
+
+/* ---------- 动效 ---------- */
+/* 入场动画一律不用 fill-mode: both，也不加 animation-delay：
+   一旦动画没有真正运行（页面处于后台标签页、或元素在后台被动态插入），
+   both 会让元素停在 opacity: 0 的起始帧，整块内容不可见。默认状态即可见更稳妥。 */
+@keyframes conv-rise {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes conv-compose {
+  0%, 100% { opacity: 0.25; transform: scaleX(0.82); transform-origin: left; }
+  50% { opacity: 1; transform: scaleX(1); transform-origin: left; }
+}
+
+@media (max-width: 960px) {
+  .conv-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 0; }
+  .conv-stats > div:nth-child(3) { border-left: 0; padding-left: 0; }
+  .conv-table-wrap { overflow-x: auto; }
+  .conv-table { min-width: 760px; }
+  .conv-modal-body { padding-left: 24px; background-image: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .conv-head,
+  .conv-tray,
+  .conv-stats,
+  .conv-table-wrap,
+  .conv-table tbody tr { animation: none; }
+  .conv-composing-lines span { animation: none; opacity: 0.85; }
+  .conv-tray:hover,
+  .conv-tray.is-drag { transform: none; }
+}

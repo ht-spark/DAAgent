@@ -244,3 +244,12 @@ class ProjectSummary(BaseModel):
     root_path: str
     created_at: str
     updated_at: str
+
+
+class DocumentSaveBody(BaseModel):
+    """把某条转换记录另存到本机指定目录的请求。"""
+
+    record_id: int = Field(ge=1, description="转换记录 ID")
+    filename: str = Field(min_length=1, max_length=200, description="目标文件名（可含 .md 后缀）")
+    directory: str = Field(min_length=1, max_length=1000, description="目标目录的绝对路径")
+

@@ -36,13 +36,18 @@ dependencies = [
     "sentence-transformers",
     "langchain-classic",
     "pdfplumber",
-    "seaborn"
+    "seaborn",
+    "markitdown[docx,pdf,pptx,xls,xlsx]>=0.1.7",
 ]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+
+[[tool.uv.index]]
+url = "https://mirrors.aliyun.com/pypi/simple/"
+default = true
 
 [build-system]
 requires = ["setuptools>=61.0"]

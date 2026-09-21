@@ -762,3 +762,111 @@ export async function persistApiSettings(snapshot: ApiSettingsSnapshot): Promise
     /* 后端离线时保留 localStorage 缓存即可 */
   }
 }
+
+// ---------------------------------------------------------------------------
+// 文档转换（MarkItDown）
+// 独立工具能力，与建模流程无关：上传文档 -> 返回 Markdown 文本。
+// ---------------------------------------------------------------------------
+
+/** 后端支持的格式、体积上限与建议保存目录，由服务端统一提供，避免前后端两处维护。 */
+export type ConvertibleFormats = {
+  extensions: string[]
+  max_bytes: number
+  default_save_dir: string
+}
+
+/** 单条转换记录；ok 为 false 时 error 是可读的失败原因。正文不含在内，按需单独读取。 */
+export type DocumentConversionItem = {
+  id: number
+  filename: string
+  ok: boolean
+  char_count: number
+  size_bytes: number
+  elapsed_ms: number
+  converted_at: string
+  error: string | null
+}
+
+export async function getConvertibleFormats(): Promise<ConvertibleFormats> {
+  const res = await fetch('/api/documents/formats')
+  if (!res.ok) throw new Error(await extractDetail(res, '获取支持的文档格式失败'))
+  return res.json()
+}
+
+/**
+ * 上传一批文档并转换为 Markdown，同时登记到转换历史。
+ * 单个文件失败只会体现在对应记录的 error 字段，不会让整批请求失败。
+ */
+export async function convertDocumentsToMarkdown(files: File[]): Promise<DocumentConversionItem[]> {
+  const form = new FormData()
+  for (const file of files) form.append('files', file)
+  let res: Response
+  try {
+    res = await fetch('/api/documents/convert', {
+      method: 'POST',
+      body: form,
+      signal: AbortSignal.timeout(300000), // 5 分钟：大文档（如长篇 PDF）解析较慢
+    })
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    if (msg.includes('aborted') || msg.toLowerCase().includes('timeout')) {
+      throw new Error('转换超时：文档过大或解析时间过长，请减少文件数量后重试')
+    }
+    throw new Error('后端服务未启动或无法连接，请确认服务器正在运行（uvicorn server.main:app --port 8000）')
+  }
+  if (!res.ok) throw new Error(await extractDetail(res, '文档转换失败'))
+  const data = await res.json()
+  return (data.results ?? []) as DocumentConversionItem[]
+}
+
+/** 读取全部转换历史（按转换先后顺序，不含正文）。 */
+export async function listConversionHistory(): Promise<DocumentConversionItem[]> {
+  const res = await fetch('/api/documents/history')
+  if (!res.ok) throw new Error(await extractDetail(res, '读取转换历史失败'))
+  const data = await res.json()
+  return (data.records ?? []) as DocumentConversionItem[]
+}
+
+/** 按需读取某条记录的 Markdown 正文。 */
+export async function readConversionContent(recordId: number): Promise<string> {
+  const res = await fetch(`/api/documents/history/${recordId}/content`)
+  if (!res.ok) throw new Error(await extractDetail(res, '读取转换内容失败'))
+  return res.text()
+}
+
+/** 删除一条转换记录。 */
+export async function deleteConversionRecord(recordId: number): Promise<void> {
+  const res = await fetch(`/api/documents/history/${recordId}`, { method: 'DELETE' })
+  if (!res.ok) throw new Error(await extractDetail(res, '删除转换记录失败'))
+}
+
+export type SavedMarkdown = {
+  saved_path: string
+  filename: string
+  bytes: number
+}
+
+/** 把某条转换记录另存到本机指定目录（路径由用户在弹出的对话框中确定）。 */
+export async function saveConvertedMarkdown(payload: {
+  record_id: number
+  filename: string
+  directory: string
+}): Promise<SavedMarkdown> {
+  let res: Response
+  try {
+    res = await fetch('/api/documents/save', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(120000),
+    })
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    if (msg.includes('aborted') || msg.toLowerCase().includes('timeout')) {
+      throw new Error('保存超时：文件过大或磁盘响应慢，请重试')
+    }
+    throw new Error('后端服务未启动或无法连接，请确认服务器正在运行（uvicorn server.main:app --port 8000）')
+  }
+  if (!res.ok) throw new Error(await extractDetail(res, '保存失败'))
+  return res.json()
+}

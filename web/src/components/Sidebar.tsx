@@ -23,6 +23,7 @@ type Props = {
   onHome: () => void
   onModeling: () => void
   onBrainstorm: () => void
+  onConverter: () => void
   onOpenDiscussion: (id: string, projectId: string | null) => void
   onApi: () => void
   onDocs: () => void
@@ -59,6 +60,7 @@ export default function Sidebar({
   onHome,
   onModeling,
   onBrainstorm,
+  onConverter,
   onOpenDiscussion,
   onApi,
   onDocs,
@@ -257,6 +259,26 @@ export default function Sidebar({
             <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
           </svg>
           <span className="nav-text sidebar-collapse-hide">知识库</span>
+        </button>
+        <button
+          className={`nav-item ${section === 'converter' ? 'active' : ''}`}
+          onClick={onConverter}
+          title={collapsed ? '文档转换' : undefined}
+        >
+          <svg
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.8"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          >
+            <path d="M4 8h12" />
+            <path d="m13 5 3 3-3 3" />
+            <path d="M20 16H8" />
+            <path d="m11 13-3 3 3 3" />
+          </svg>
+          <span className="nav-text sidebar-collapse-hide">文档转换</span>
         </button>
       </div>
 

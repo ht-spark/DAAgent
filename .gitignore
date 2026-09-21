@@ -87,3 +87,5 @@ examples/
 server/runs.db
 # 统一会话库（sessions + messages）
 server/agent.db
+# 文档转换历史库
+server/converter.db

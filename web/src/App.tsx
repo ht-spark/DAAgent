@@ -13,8 +13,9 @@ import KnowledgeBaseStats from './pages/KnowledgeBaseStats'
 import ChunkEmbedding, { type ChunkEmbeddingOptions } from './pages/ChunkEmbedding'
 import ChunkEmbeddingProgress from './pages/ChunkEmbeddingProgress'
 import KnowledgeBaseHistory from './pages/KnowledgeBaseHistory'
+import DocConverter from './pages/DocConverter'
 
-type Section = 'modeling' | 'brainstorm' | 'api' | 'docs'
+type Section = 'modeling' | 'brainstorm' | 'converter' | 'api' | 'docs'
 type TaskStep = 'submit' | 'progress' | 'result'
 type ModelingView = 'new' | 'history'
 type BrainstormView = 'knowledge-hub' | 'knowledge' | 'knowledge-history' | 'stats' | 'chunking' | 'chunking-progress'
@@ -51,7 +52,7 @@ function resolveLevelNav(options: {
     }
   }
 
-  if (section === 'api' || section === 'docs') {
+  if (section === 'api' || section === 'docs' || section === 'converter') {
     return { parent: null, next: null }
   }
 
@@ -210,6 +211,7 @@ export default function App() {
         }}
         onApi={() => setSection('api')}
         onDocs={() => setSection('docs')}
+        onConverter={() => setSection('converter')}
         onSettings={() => setSettingsOpen(true)}
         onDiscussionDeleted={(id) => {
           if (discussionId === id) setDiscussionId(null)
@@ -327,6 +329,7 @@ export default function App() {
         {section === 'modeling' && modelingView === 'history' && <History onOpen={openFromHistory} />}
         {section === 'api' && <ApiManager />}
         {section === 'docs' && <Docs />}
+        {section === 'converter' && <DocConverter />}
       </main>
     </div>
   )
