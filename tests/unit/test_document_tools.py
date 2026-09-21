@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from scr.tools import document_tools as dt
+from server import document_tools as dt
 
 
 def _make_docx(path: Path) -> Path:

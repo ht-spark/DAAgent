@@ -16,6 +16,10 @@ from .data_tools import (
     profile_data,
     supports_data_profile,
 )
+from .markitdown import (
+    CONVERTIBLE_DOCUMENT_SUFFIXES,
+    convert_attachment_to_markdown,
+)
 from .registry import (
     DuplicateToolError,
     RegisteredTool,
@@ -40,6 +44,7 @@ __all__ = [
     "ArtifactExistsError",
     "ArtifactPathError",
     "ArtifactWorkspace",
+    "CONVERTIBLE_DOCUMENT_SUFFIXES",
     "CodeExecutionError",
     "DuplicateToolError",
     "MAX_INSPECT_DATA_ROWS",
@@ -53,6 +58,7 @@ __all__ = [
     "UnauthorizedDataPathError",
     "UnsupportedDataFileError",
     "UnsupportedArtifactFormatError",
+    "convert_attachment_to_markdown",
     "create_agent_tool_registry",
     "create_data_profile_registry",
     "execute_python_code",

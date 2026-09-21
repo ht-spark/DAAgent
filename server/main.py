@@ -105,7 +105,7 @@ from scr.math_modeling_agent.llm import (
     LLM_CALL_TIMEOUT_SECONDS as AGENT_LLM_TIMEOUT_SECONDS,
     create_llm,
 )
-from scr.tools.document_tools import (
+from server.document_tools import (
     MAX_DOCUMENT_BYTES,
     DocumentConversionError,
     supported_extensions,

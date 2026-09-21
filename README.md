@@ -269,7 +269,7 @@ cd web && npm run build
 uv run python -m server.dev
 
 # 如不使用 uv，可使用等效命令（不要省略 reload-dir 与 reload-exclude）
-uvicorn server.main:app --reload --port 8000 --reload-dir server --reload-dir scr --reload-exclude artifacts
+uvicorn server.main:app --reload --port 8000 --reload-dir server --reload-dir scr --reload-dir data_analysis --reload-exclude artifacts
 
 # 常规运行：不启用自动重载
 uvicorn server.main:app --host 0.0.0.0 --port 8000
