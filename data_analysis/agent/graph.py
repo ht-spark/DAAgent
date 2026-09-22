@@ -162,6 +162,7 @@ def iter_plan_graph(
                 todo.status = "completed"
                 todo.result_summary = decision.answer
                 state.current_todo_id = None
+                state.work_trajectory.add_decision(f"{todo.id}: {decision.answer}")
                 yield TodoCompleted(
                     todo_id=todo.id,
                     result_summary=decision.answer,
@@ -303,6 +304,7 @@ def _todo_state(state: AgentState, todo: TodoItem) -> AgentState:
         messages=list(state.messages),
         analysis_plan=state.analysis_plan,
         current_todo_id=todo.id,
+        work_trajectory=state.work_trajectory.model_copy(deep=True),
     )
 
 
@@ -332,4 +334,5 @@ def _final_state(state: AgentState, plan: AnalysisPlan) -> AgentState:
         available_artifacts=list(state.available_artifacts),
         messages=list(state.messages),
         analysis_plan=plan,
+        work_trajectory=state.work_trajectory.model_copy(deep=True),
     )

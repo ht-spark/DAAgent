@@ -17,6 +17,8 @@ from .state import (
     AgentState,
     ArtifactReference,
     Observation,
+    WorkTrajectory,
+    collect_work_trajectory_from_session,
     discover_artifacts,
 )
 from .planner import Planner, PlannerError
@@ -37,6 +39,8 @@ __all__ = [
     "Observation",
     "AnalysisPlan",
     "TodoItem",
+    "WorkTrajectory",
+    "collect_work_trajectory_from_session",
     "discover_artifacts",
     "Planner",
     "PlannerError",

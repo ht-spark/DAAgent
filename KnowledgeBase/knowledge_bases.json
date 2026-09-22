@@ -9,10 +9,10 @@
       "is_default": false
     },
     {
-      "id": "ba232578-ac08-497d-8ed3-9e0dd3a6cf0d",
+      "id": "8c1628ad-6296-413f-8f93-481277f8fe45",
       "name": "SQL",
-      "description": "常考SQL知识和题目",
-      "created_at": "2026-09-21T05:33:17.423768+00:00",
+      "description": "常考SQL题",
+      "created_at": "2026-09-22T06:49:12.812750+00:00",
       "is_default": false
     }
   ]

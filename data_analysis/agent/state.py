@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import mimetypes
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, Literal
 
@@ -232,6 +232,157 @@ def discover_artifacts(output_dir: str | Path | None) -> list[ArtifactReference]
     return artifacts
 
 
+class WorkTrajectory(BaseModel):
+    """跨轮可复用的结构化工作轨迹，供 Planner 避免重复规划与重复读文件。"""
+
+    model_config = ConfigDict(extra="forbid", validate_assignment=True)
+
+    files_read: list[str] = Field(default_factory=list)
+    files_modified: list[str] = Field(default_factory=list)
+    key_decisions: list[str] = Field(default_factory=list)
+
+    def add_read(self, path: str | None) -> None:
+        """登记已读文件路径。"""
+        self._add_path("files_read", path)
+
+    def add_modified(self, path: str | None) -> None:
+        """登记已修改或已创建文件路径。"""
+        self._add_path("files_modified", path)
+
+    def add_decision(self, text: str | None) -> None:
+        """登记一条关键决定或已完成结论。"""
+        if not isinstance(text, str):
+            return
+        normalized = text.strip()
+        if not normalized:
+            return
+        existing = {item.casefold() for item in self.key_decisions}
+        if normalized.casefold() not in existing:
+            self.key_decisions.append(normalized)
+
+    def merge(self, other: "WorkTrajectory | Mapping[str, Any] | None") -> None:
+        """合并另一份轨迹（会话历史或先前保存的 metadata）。"""
+        if other is None:
+            return
+        if isinstance(other, WorkTrajectory):
+            payload: Mapping[str, Any] = other.model_dump()
+        elif isinstance(other, Mapping):
+            payload = other
+        else:
+            return
+        for raw in payload.get("files_read") or []:
+            if isinstance(raw, str):
+                self.add_read(raw)
+        for raw in payload.get("files_modified") or []:
+            if isinstance(raw, str):
+                self.add_modified(raw)
+        for raw in payload.get("key_decisions") or []:
+            if isinstance(raw, str):
+                self.add_decision(raw)
+
+    def observe_tool(
+        self,
+        tool_name: str,
+        *,
+        arguments: Mapping[str, Any] | None = None,
+        result: JsonValue = None,
+        success: bool = True,
+    ) -> None:
+        """根据一次工具调用更新已读/已改文件。"""
+        name = (tool_name or "").strip()
+        if not name or not success:
+            return
+        args = arguments if isinstance(arguments, Mapping) else {}
+        result_map = result if isinstance(result, Mapping) else {}
+
+        if name in {"read_attachment_file", "markitdown", "inspect_image"}:
+            self.add_read(_first_str(args, result_map, "file_path", "path"))
+        elif name in {"read_workspace_file", "inspect_artifact", "inspect_generated_image"}:
+            self.add_read(_first_str(args, result_map, "relative_path", "path"))
+        elif name in {"write_artifact", "create_workspace_file", "edit_workspace_file"}:
+            self.add_modified(_first_str(args, result_map, "relative_path", "path"))
+        elif name == "execute_python":
+            artifacts = result_map.get("artifacts")
+            if isinstance(artifacts, list):
+                for item in artifacts:
+                    if isinstance(item, str):
+                        self.add_modified(item)
+                    elif isinstance(item, Mapping):
+                        self.add_modified(_first_str(item, item, "path", "relative_path"))
+
+    def absorb_completed_todos(self, plan: "AnalysisPlan | None") -> None:
+        """把已完成 Todo 的结果摘要并入关键决定。"""
+        if plan is None:
+            return
+        for todo in plan.todos:
+            if todo.status == "completed" and todo.result_summary:
+                self.add_decision(f"{todo.id}: {todo.result_summary}")
+
+    def _add_path(self, field: str, path: str | None) -> None:
+        if not isinstance(path, str):
+            return
+        normalized = path.strip().replace("\\", "/")
+        if not normalized:
+            return
+        items: list[str] = getattr(self, field)
+        existing = {item.casefold() for item in items}
+        if normalized.casefold() not in existing:
+            items.append(normalized)
+            setattr(self, field, items)
+
+
+def _first_str(*sources_and_keys: Any) -> str | None:
+    """从多个 Mapping 中按字段名顺序返回第一个非空字符串。
+
+    用法：``_first_str(args, result_map, "file_path", "path")``，前面是映射，
+    后面是候选键名。
+    """
+    sources: list[Mapping[str, Any]] = []
+    keys: list[str] = []
+    for item in sources_and_keys:
+        if isinstance(item, Mapping):
+            sources.append(item)
+        elif isinstance(item, str):
+            keys.append(item)
+    for key in keys:
+        for source in sources:
+            value = source.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return None
+
+
+def collect_work_trajectory_from_session(
+    entries: Sequence[Mapping[str, Any]],
+) -> WorkTrajectory:
+    """从持久化会话条目汇总跨轮工作轨迹。"""
+    trajectory = WorkTrajectory()
+    for entry in entries:
+        metadata = entry.get("metadata")
+        if not isinstance(metadata, Mapping):
+            continue
+        trajectory.merge(metadata.get("work_trajectory"))
+        trace = metadata.get("agent_trace")
+        if not isinstance(trace, list):
+            continue
+        for item in trace:
+            if not isinstance(item, Mapping):
+                continue
+            item_type = item.get("type")
+            if item_type == "agent_action":
+                arguments = item.get("arguments")
+                trajectory.observe_tool(
+                    str(item.get("tool_name") or ""),
+                    arguments=arguments if isinstance(arguments, Mapping) else None,
+                )
+            elif item_type == "agent_observation":
+                trajectory.observe_tool(
+                    str(item.get("tool_name") or ""),
+                    success=bool(item.get("success", True)),
+                )
+    return trajectory
+
+
 class AgentState(BaseModel):
     """一次思考—执行—观察循环的完整可变状态。"""
 
@@ -249,6 +400,7 @@ class AgentState(BaseModel):
     iteration: int = Field(default=0, ge=0)
     analysis_plan: AnalysisPlan | None = None
     current_todo_id: str | None = None
+    work_trajectory: WorkTrajectory = Field(default_factory=WorkTrajectory)
 
     @field_validator("user_query")
     @classmethod
@@ -311,9 +463,15 @@ class AgentState(BaseModel):
         """
         self.observations.append(observation)
         self.iteration += 1
+        self.work_trajectory.observe_tool(
+            observation.tool_name,
+            result=observation.result,
+            success=observation.success,
+        )
         if not observation.success or self.output_dir is None:
             return
         for artifact in _observation_artifacts(observation, self.output_dir):
+            self.work_trajectory.add_modified(artifact.relative_path)
             self._upsert_artifact(artifact)
 
     def _upsert_artifact(self, artifact: ArtifactReference) -> None:

@@ -66,6 +66,32 @@ def test_planner_creates_valid_todo_list() -> None:
     assert "{{CONTEXT_JSON}}" not in llm.calls[0][1][1]
 
 
+def test_planner_context_includes_memory_and_work_trajectory() -> None:
+    """Planner 必须拿到滚动摘要与结构化轨迹，避免跨轮重复规划。"""
+    from data_analysis.agent.state import WorkTrajectory
+
+    trajectory = WorkTrajectory()
+    trajectory.add_read("data/sales.csv")
+    trajectory.add_modified("outputs/report.md")
+    trajectory.add_decision("已确认口径为含税销售额")
+
+    state = AgentState(
+        user_query="继续分析复购",
+        memory_summary="## Goal\n分析销量\n## Files & Artifacts\nsales.csv",
+        work_trajectory=trajectory,
+    )
+    llm = ScriptedLlm([_plan_response()])
+    Planner(llm, []).create_plan(state)
+
+    context = llm.calls[0][1][1]
+    assert '"session_memory"' in context
+    assert "分析销量" in context
+    assert '"files_read"' in context
+    assert "data/sales.csv" in context
+    assert "outputs/report.md" in context
+    assert "已确认口径为含税销售额" in context
+
+
 def test_plan_rejects_dependency_cycle() -> None:
     with pytest.raises(ValueError, match="循环"):
         AnalysisPlan.model_validate({

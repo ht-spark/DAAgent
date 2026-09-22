@@ -12,8 +12,8 @@ from data_analysis.python_environment import (
 )
 from server import store
 
-MAX_PROJECT_CONTEXT_CHARS = 60_000
-PROJECT_CONTEXT_FILES = ("AGENTS.md", "Project.md")
+MAX_PROJECT_CONTEXT_CHARS = 100_000
+PROJECT_CONTEXT_FILES = ("AGENTS.md",)
 
 
 class ProjectWorkspaceError(ValueError):
@@ -72,7 +72,7 @@ def resolve_project_python(project: dict[str, Any]) -> PythonEnvironment:
 
 
 def load_project_context(root_path: str | Path) -> str | None:
-    """读取项目根目录中有限长度的项目说明文件。"""
+    """读取项目根目录中的 AGENTS.md 作为核心约束上下文。"""
     root = Path(root_path).resolve(strict=True)
     sections: list[str] = []
     remaining = MAX_PROJECT_CONTEXT_CHARS

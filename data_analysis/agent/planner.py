@@ -116,6 +116,7 @@ class Planner:
             project_id=state.project_id,
             available_artifacts=list(state.available_artifacts),
             messages=list(state.messages),
+            work_trajectory=state.work_trajectory.model_copy(deep=True),
         )
         return self.create_plan(recovery_state)
 
@@ -125,6 +126,7 @@ class Planner:
             {"name": tool.name, "description": tool.description}
             for tool in self._tools
         ]
+        trajectory = state.work_trajectory
         context = {
             "user_query": state.user_query,
             "available_data_files": [
@@ -144,6 +146,12 @@ class Planner:
             ],
             "workspace_enabled": bool(state.workspace_root),
             "available_tools": tools,
+            "session_memory": state.memory_summary,
+            "work_trajectory": {
+                "files_read": list(trajectory.files_read),
+                "files_modified": list(trajectory.files_modified),
+                "key_decisions": list(trajectory.key_decisions),
+            },
         }
         prompt = _render_planner_prompt(context, self._max_todos)
         return [

@@ -14,8 +14,9 @@ import ChunkEmbedding, { type ChunkEmbeddingOptions } from './pages/ChunkEmbeddi
 import ChunkEmbeddingProgress from './pages/ChunkEmbeddingProgress'
 import KnowledgeBaseHistory from './pages/KnowledgeBaseHistory'
 import DocConverter from './pages/DocConverter'
+import TaskExpert from './pages/TaskExpert'
 
-type Section = 'modeling' | 'brainstorm' | 'converter' | 'api' | 'docs'
+type Section = 'modeling' | 'brainstorm' | 'converter' | 'task-expert' | 'api' | 'docs'
 type TaskStep = 'submit' | 'progress' | 'result'
 type ModelingView = 'new' | 'history'
 type BrainstormView = 'knowledge-hub' | 'knowledge' | 'knowledge-history' | 'stats' | 'chunking' | 'chunking-progress'
@@ -52,7 +53,7 @@ function resolveLevelNav(options: {
     }
   }
 
-  if (section === 'api' || section === 'docs' || section === 'converter') {
+  if (section === 'api' || section === 'docs' || section === 'converter' || section === 'task-expert') {
     return { parent: null, next: null }
   }
 
@@ -212,6 +213,7 @@ export default function App() {
         onApi={() => setSection('api')}
         onDocs={() => setSection('docs')}
         onConverter={() => setSection('converter')}
+        onTaskExpert={() => setSection('task-expert')}
         onSettings={() => setSettingsOpen(true)}
         onDiscussionDeleted={(id) => {
           if (discussionId === id) setDiscussionId(null)
@@ -330,6 +332,7 @@ export default function App() {
         {section === 'api' && <ApiManager />}
         {section === 'docs' && <Docs />}
         {section === 'converter' && <DocConverter />}
+        {section === 'task-expert' && <TaskExpert />}
       </main>
     </div>
   )

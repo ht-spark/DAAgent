@@ -253,7 +253,20 @@ uv sync
 cd web && npm install
 ```
 
-### 4.4 部署运行
+### 4.4 一键启动（推荐）
+
+双击项目根目录的 `start.bat`，或在终端执行：
+
+```powershell
+.\start.ps1            # 开发模式：后端 8000 + 前端 5173，自动打开浏览器
+.\start.ps1 backend    # 仅启动后端
+.\start.ps1 frontend   # 仅启动前端
+.\start.ps1 prod       # 构建前端并启动后端（http://localhost:8000）
+```
+
+启动前会自动同步依赖：Python 走 `uv sync`；前端仅在 `package.json` / `package-lock.json` 比 `node_modules` 新时执行 `npm install`。开发模式下前后端各开一个窗口，关闭对应窗口即可停止服务。
+
+### 4.5 手动部署运行
 
 **1.构建前端：**
 

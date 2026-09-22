@@ -57,12 +57,12 @@ def test_session_binding_is_immutable_and_project_removal_keeps_folder(tmp_path)
 
 def test_project_context_loads_only_root_instruction_files(tmp_path):
     (tmp_path / "AGENTS.md").write_text("项目规则", encoding="utf-8")
-    (tmp_path / "Project.md").write_text("项目背景", encoding="utf-8")
+    (tmp_path / "Project.md").write_text("不应被注入的项目背景", encoding="utf-8")
 
     context = load_project_context(tmp_path)
 
     assert "项目规则" in context
-    assert "项目背景" in context
+    assert "项目背景" not in context
 
 
 def test_project_file_resolver_supports_nested_files(tmp_path):

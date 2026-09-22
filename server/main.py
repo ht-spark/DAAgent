@@ -39,6 +39,7 @@ from data_analysis.agent.state import (
     AgentMessage,
     AgentState,
     Observation,
+    collect_work_trajectory_from_session,
     discover_artifacts,
 )
 from data_analysis.context import compile_rolling_context, estimate_context_usage_after_turn
@@ -944,7 +945,7 @@ async def _prepare_agent_data_files(
 
 
 def _load_agent_system_prompt(workspace_root: Path | None = None) -> str:
-    """读取系统提示词，并附加当前项目根目录中的项目说明。"""
+    """读取系统提示词，并附加当前项目根目录中的 AGENTS.md 核心约束。"""
     try:
         prompt = AGENT_SYSTEM_PROMPT_PATH.read_text(encoding="utf-8")
     except OSError as exc:
@@ -1019,6 +1020,14 @@ def _agent_event_payload(
             "thought": event.thought,
             "tool_name": event.tool_name,
         }
+        # 只保留路径类参数，供跨轮工作轨迹提取；完整 arguments 可能含大段正文。
+        path_args = {
+            key: value.strip()
+            for key in ("file_path", "relative_path", "path")
+            if isinstance((value := event.arguments.get(key)), str) and value.strip()
+        }
+        if path_args:
+            payload["arguments"] = path_args
         code = event.arguments.get("code")
         if event.tool_name == "execute_python" and isinstance(code, str):
             payload["code"] = code
@@ -1558,6 +1567,9 @@ async def agent_profile_stream_endpoint(
         AgentMessage(role=str(item["role"]), content=str(item.get("content") or ""))
         for item in rolling_context.recent_messages
     ]
+    prior_trajectory = collect_work_trajectory_from_session(session_entries)
+    for artifact_path in data_paths:
+        prior_trajectory.add_read(str(artifact_path))
     output_dir = _agent_output_root(active_discussion_id, workspace_root)
     try:
         python_environment = (
@@ -1594,6 +1606,7 @@ async def agent_profile_stream_endpoint(
         available_artifacts=discover_artifacts(output_dir),
         project_id=str(project["id"]) if project else None,
         messages=history,
+        work_trajectory=prior_trajectory,
     )
     system_prompt = _load_agent_system_prompt(workspace_root)
     if workspace_root is not None and python_environment.source == "host":
@@ -1663,6 +1676,7 @@ async def agent_profile_stream_endpoint(
                 }
                 for path in uploaded_paths
             ]
+            state.work_trajectory.absorb_completed_todos(state.analysis_plan)
             return await asyncio.to_thread(
                 save_discussion_message,
                 active_discussion_id,
@@ -1673,7 +1687,11 @@ async def agent_profile_stream_endpoint(
                 attachments,
                 knowledge_base_ids=selected_base_ids,
                 mode="agent",
-                assistant_metadata={"agent_run_id": run_id, "agent_trace": trace},
+                assistant_metadata={
+                    "agent_run_id": run_id,
+                    "agent_trace": trace,
+                    "work_trajectory": state.work_trajectory.model_dump(),
+                },
                 project_id=str(project["id"]) if project else None,
                 cwd=str(workspace_root) if workspace_root else None,
             )
@@ -1789,6 +1807,7 @@ async def agent_profile_stream_endpoint(
             message,
             answer,
         )
+        state.work_trajectory.absorb_completed_todos(state.analysis_plan)
         saved_discussion_id = await asyncio.to_thread(
             save_discussion_message,
             active_discussion_id,
@@ -1804,6 +1823,7 @@ async def agent_profile_stream_endpoint(
                 "agent_trace": trace,
                 "agent_artifacts": artifacts,
                 "context_usage": context_usage,
+                "work_trajectory": state.work_trajectory.model_dump(),
             },
             project_id=str(project["id"]) if project else None,
             cwd=str(workspace_root) if workspace_root else None,

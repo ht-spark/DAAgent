@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 
 import {
@@ -14,6 +14,33 @@ import {
 } from '../api'
 import ConfirmDialog from './ConfirmDialog'
 
+/** 侧边栏拖拽宽度：与项目侧栏同一套 pointer 拖拽 + localStorage 记忆 */
+const SIDEBAR_DEFAULT_WIDTH = 260
+const SIDEBAR_MIN_WIDTH = 200
+const SIDEBAR_MAX_WIDTH = 420
+const SIDEBAR_MIN_CONTENT_WIDTH = 480
+const SIDEBAR_WIDTH_STORAGE_KEY = 'daagent.sidebar-width'
+
+function clampSidebarWidth(width: number, viewportWidth?: number): number {
+  const available = viewportWidth ?? (typeof window === 'undefined' ? SIDEBAR_DEFAULT_WIDTH : window.innerWidth)
+  const responsiveMax = Math.max(
+    SIDEBAR_MIN_WIDTH,
+    Math.min(SIDEBAR_MAX_WIDTH, available - SIDEBAR_MIN_CONTENT_WIDTH),
+  )
+  return Math.round(Math.min(responsiveMax, Math.max(SIDEBAR_MIN_WIDTH, width)))
+}
+
+function loadSidebarWidth(): number {
+  if (typeof window === 'undefined') return SIDEBAR_DEFAULT_WIDTH
+  try {
+    const saved = Number(window.localStorage.getItem(SIDEBAR_WIDTH_STORAGE_KEY))
+    if (Number.isFinite(saved) && saved > 0) return clampSidebarWidth(saved)
+  } catch {
+    // 浏览器禁用本地存储时使用默认宽度
+  }
+  return SIDEBAR_DEFAULT_WIDTH
+}
+
 type Props = {
   section: string
   collapsed: boolean
@@ -24,6 +51,7 @@ type Props = {
   onModeling: () => void
   onBrainstorm: () => void
   onConverter: () => void
+  onTaskExpert: () => void
   onOpenDiscussion: (id: string, projectId: string | null) => void
   onApi: () => void
   onDocs: () => void
@@ -61,6 +89,7 @@ export default function Sidebar({
   onModeling,
   onBrainstorm,
   onConverter,
+  onTaskExpert,
   onOpenDiscussion,
   onApi,
   onDocs,
@@ -78,6 +107,9 @@ export default function Sidebar({
   const [pendingRemoveProject, setPendingRemoveProject] = useState<ProjectSummary | null>(null)
   const [renamingId, setRenamingId] = useState<string | null>(null)
   const [renameDraft, setRenameDraft] = useState('')
+  const [isResizing, setIsResizing] = useState(false)
+  const sidebarWidthRef = useRef(SIDEBAR_DEFAULT_WIDTH)
+  const resizeStateRef = useRef<{ pointerId: number; startX: number; startWidth: number } | null>(null)
   const [pendingDelete, setPendingDelete] = useState<BrainstormDiscussionSummary | null>(null)
   const [busy, setBusy] = useState(false)
   const [projectsExpanded, setProjectsExpanded] = useState(true)
@@ -226,8 +258,100 @@ export default function Sidebar({
     }
   }
 
+  /** 把侧边栏宽度写到 CSS 变量，主内容区 margin-left 会跟着变 */
+  function applySidebarWidth(width: number): number {
+    const next = clampSidebarWidth(width)
+    sidebarWidthRef.current = next
+    document.documentElement.style.setProperty('--sidebar-width', `${next}px`)
+    return next
+  }
+
+  function saveSidebarWidth(width: number) {
+    const next = applySidebarWidth(width)
+    try {
+      window.localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, String(next))
+    } catch {
+      // 浏览器禁用本地存储时仅保留当前页面宽度
+    }
+  }
+
+  function handleResizeStart(event: React.PointerEvent<HTMLDivElement>) {
+    if (event.button !== 0 || collapsed) return
+    event.preventDefault()
+    resizeStateRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startWidth: sidebarWidthRef.current,
+    }
+    event.currentTarget.setPointerCapture(event.pointerId)
+    setIsResizing(true)
+    document.body.classList.add('is-resizing-app-sidebar')
+  }
+
+  function handleResizeMove(event: React.PointerEvent<HTMLDivElement>) {
+    const resize = resizeStateRef.current
+    if (!resize || resize.pointerId !== event.pointerId) return
+    applySidebarWidth(resize.startWidth + event.clientX - resize.startX)
+  }
+
+  function finishResize(event: React.PointerEvent<HTMLDivElement>) {
+    const resize = resizeStateRef.current
+    if (!resize || resize.pointerId !== event.pointerId) return
+    resizeStateRef.current = null
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId)
+    }
+    setIsResizing(false)
+    document.body.classList.remove('is-resizing-app-sidebar')
+    saveSidebarWidth(sidebarWidthRef.current)
+  }
+
+  function handleResizeKeyDown(event: React.KeyboardEvent<HTMLDivElement>) {
+    if (collapsed) return
+    const step = event.shiftKey ? 48 : 16
+    let next: number | null = null
+    if (event.key === 'ArrowLeft') next = sidebarWidthRef.current - step
+    if (event.key === 'ArrowRight') next = sidebarWidthRef.current + step
+    if (event.key === 'Home') next = SIDEBAR_MIN_WIDTH
+    if (event.key === 'End') next = SIDEBAR_MAX_WIDTH
+    if (next === null) return
+    event.preventDefault()
+    saveSidebarWidth(next)
+  }
+
+  // 挂载时恢复上次宽度；窗口变化时重新夹取合法区间
+  useEffect(() => {
+    applySidebarWidth(loadSidebarWidth())
+    function handleWindowResize() {
+      applySidebarWidth(sidebarWidthRef.current)
+    }
+    window.addEventListener('resize', handleWindowResize)
+    return () => {
+      window.removeEventListener('resize', handleWindowResize)
+      document.body.classList.remove('is-resizing-app-sidebar')
+    }
+  }, [])
+
   return (
-    <aside className={`sidebar ${collapsed ? 'sidebar--collapsed' : ''}`}>
+    <aside
+      className={`sidebar ${collapsed ? 'sidebar--collapsed' : ''} ${isResizing ? 'is-resizing' : ''}`}
+      aria-hidden={collapsed}
+    >
+      <div
+        className="sidebar-resizer"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="调整侧边栏宽度"
+        aria-valuemin={SIDEBAR_MIN_WIDTH}
+        aria-valuemax={SIDEBAR_MAX_WIDTH}
+        aria-valuenow={sidebarWidthRef.current}
+        tabIndex={collapsed ? -1 : 0}
+        onPointerDown={handleResizeStart}
+        onPointerMove={handleResizeMove}
+        onPointerUp={finishResize}
+        onPointerCancel={finishResize}
+        onKeyDown={handleResizeKeyDown}
+      />
       <div className="sidebar-top">
         <div className="sidebar-logo" onClick={onHome} title="DAAgent 数据分析智能体">
           {LOGO}
@@ -279,6 +403,24 @@ export default function Sidebar({
             <path d="m11 13-3 3 3 3" />
           </svg>
           <span className="nav-text sidebar-collapse-hide">文档转换</span>
+        </button>
+        <button
+          className={`nav-item ${section === 'task-expert' ? 'active' : ''}`}
+          onClick={onTaskExpert}
+          title={collapsed ? '任务专家' : undefined}
+        >
+          <svg
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.8"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          >
+            <path d="M12 3l2.2 4.5L19 8.2l-3.5 3.4.8 4.9L12 14.2 7.7 16.5l.8-4.9L5 8.2l4.8-.7L12 3z" />
+            <path d="M5 20h14" />
+          </svg>
+          <span className="nav-text sidebar-collapse-hide">任务专家</span>
         </button>
       </div>
 
