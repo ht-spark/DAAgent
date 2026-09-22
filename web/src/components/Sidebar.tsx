@@ -52,8 +52,9 @@ type Props = {
   onBrainstorm: () => void
   onConverter: () => void
   onTaskExpert: () => void
+  onSkills: () => void
+  onTemplates: () => void
   onOpenDiscussion: (id: string, projectId: string | null) => void
-  onApi: () => void
   onDocs: () => void
   onSettings: () => void
   onDiscussionDeleted?: (id: string) => void
@@ -90,8 +91,9 @@ export default function Sidebar({
   onBrainstorm,
   onConverter,
   onTaskExpert,
+  onSkills,
+  onTemplates,
   onOpenDiscussion,
-  onApi,
   onDocs,
   onSettings,
   onDiscussionDeleted,
@@ -422,6 +424,42 @@ export default function Sidebar({
           </svg>
           <span className="nav-text sidebar-collapse-hide">任务专家</span>
         </button>
+        <button
+          className={`nav-item ${section === 'skills' ? 'active' : ''}`}
+          onClick={onSkills}
+          title={collapsed ? '技能' : undefined}
+        >
+          <svg
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.8"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          >
+            <path d="M14.7 6.3a4 4 0 1 0-5.4 5.4L4 17v3h3l5.3-5.3a4 4 0 0 0 2.4-5.4z" />
+            <path d="M15 8h.01" />
+          </svg>
+          <span className="nav-text sidebar-collapse-hide">技能</span>
+        </button>
+        <button
+          className={`nav-item ${section === 'templates' ? 'active' : ''}`}
+          onClick={onTemplates}
+          title={collapsed ? '模版' : undefined}
+        >
+          <svg
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.8"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          >
+            <rect x="4" y="3" width="16" height="18" rx="2" />
+            <path d="M8 7h8M8 12h8M8 17h5" />
+          </svg>
+          <span className="nav-text sidebar-collapse-hide">模版</span>
+        </button>
       </div>
 
       {/* 项目入口：分组列表形态，底层仍走 onProjectChange / add / remove */}
@@ -563,18 +601,6 @@ export default function Sidebar({
 
       <div className="rail-section rail-secondary">
         <button
-          className={`nav-item ${section === 'api' ? 'active' : ''}`}
-          onClick={onApi}
-          title={collapsed ? 'API 管理' : undefined}
-        >
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
-            <circle cx="12" cy="12" r="9" />
-            <path d="M14.5 9.5 10 12.5 14 15.5" strokeLinecap="round" strokeLinejoin="round" />
-            <path d="M12 3v3M12 18v3M3 12h3M18 12h3" strokeLinecap="round" />
-          </svg>
-          <span className="nav-text sidebar-collapse-hide">API 管理</span>
-        </button>
-        <button
           className="nav-item"
           onClick={onSettings}
           title={collapsed ? '设置' : undefined}
@@ -597,13 +623,6 @@ export default function Sidebar({
           </svg>
           <span className="nav-text sidebar-collapse-hide">项目文档</span>
         </button>
-      </div>
-
-      <div className="rail-foot">
-        <div className="agent-status" title={collapsed ? 'Agent Online' : undefined}>
-          <span className="pulse" />
-          <span className="sidebar-collapse-hide">Agent Online</span>
-        </div>
       </div>
 
       {createPortal(

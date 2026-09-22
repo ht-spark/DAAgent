@@ -36,6 +36,11 @@ from .data_tools import (
     supports_data_profile,
 )
 from .errors import DuplicateToolError, ToolArgumentsError, ToolNotFoundError
+from .modeling_tool import (
+    MAX_RELATIONSHIP_LAWS,
+    explore_math_models,
+    supports_modeling_explore,
+)
 from .knowledge_tools import MAX_KNOWLEDGE_QUERY_CHARS, search_knowledge_base
 from .web_search import MAX_WEB_SEARCH_QUERY_CHARS, search_web
 from .workspace_tools import (
@@ -334,6 +339,55 @@ def create_agent_tool_registry(
         if profile_paths
         else ToolRegistry()
     )
+    modeling_paths = tuple(
+        path for path in bound_paths if supports_modeling_explore(path)
+    )
+    if modeling_paths:
+        registry.register(
+            ToolSpec(
+                name="explore_math_models",
+                description=(
+                    "对已授权数据做数学建模探索：发现变量间函数规律"
+                    "（线性/多项式/对数/指数/幂律拟合），可选目标列时拟合多元"
+                    "线性模型并给出特征重要性。返回公式、系数、R²、结构结论与"
+                    "建模约束。用于日常「数据间有什么规律、可用什么数学模型」"
+                    "探索；不要用它写论文或跑完整竞赛建模流程。多文件时传"
+                    " file_name，Excel 多表时传 sheet_name；已知因变量时传"
+                    " target_column。"
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "focus": {
+                            "type": "string",
+                            "description": "探索重点或业务问题，原样回显以便串联上下文",
+                        },
+                        "target_column": {
+                            "type": "string",
+                            "description": "可选的目标/因变量列名；提供后额外拟合多元模型",
+                        },
+                        "file_name": {
+                            "type": "string",
+                            "description": "存在多个授权数据文件时指定文件名",
+                        },
+                        "sheet_name": {
+                            "type": "string",
+                            "description": "Excel 存在多个工作表时指定表名",
+                        },
+                        "max_relationships": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": MAX_RELATIONSHIP_LAWS,
+                            "default": 8,
+                            "description": "返回的两两函数规律条数上限",
+                        },
+                    },
+                    "additionalProperties": False,
+                },
+            ),
+            _run_explore_math_models,
+            context={"authorized_paths": [str(path) for path in modeling_paths]},
+        )
     text_attachment_paths = tuple(
         path for path in bound_paths
         if Path(path).suffix.lower() in TEXT_ATTACHMENT_SUFFIXES
@@ -843,6 +897,46 @@ def _run_profile_data(
         raise ToolArgumentsError("profile_data 不接受调用参数")
     raw_paths = _authorized_paths(context, "profile_data")
     return profile_data(raw_paths, authorized_paths=raw_paths)
+
+
+def _run_explore_math_models(
+    arguments: Mapping[str, JsonValue],
+    context: Mapping[str, JsonValue],
+) -> JsonValue:
+    """执行已绑定授权路径的数学建模探索工具。"""
+    allowed_arguments = {
+        "focus",
+        "target_column",
+        "file_name",
+        "sheet_name",
+        "max_relationships",
+    }
+    unknown_arguments = set(arguments) - allowed_arguments
+    if unknown_arguments:
+        names = ", ".join(sorted(unknown_arguments))
+        raise ToolArgumentsError(f"explore_math_models 收到未声明参数: {names}")
+
+    focus = arguments.get("focus", "")
+    if not isinstance(focus, str):
+        raise ToolArgumentsError("focus 必须是字符串")
+    target_column = _optional_string_argument(arguments, "target_column")
+    file_name = _optional_string_argument(arguments, "file_name")
+    sheet_name = _optional_string_argument(arguments, "sheet_name")
+    max_relationships = _integer_argument(arguments, "max_relationships", default=8)
+    if not 1 <= max_relationships <= MAX_RELATIONSHIP_LAWS:
+        raise ToolArgumentsError(
+            f"max_relationships 必须在 1 到 {MAX_RELATIONSHIP_LAWS} 之间"
+        )
+    raw_paths = _authorized_paths(context, "explore_math_models")
+    return explore_math_models(
+        raw_paths,
+        authorized_paths=raw_paths,
+        focus=focus,
+        target_column=target_column,
+        file_name=file_name,
+        sheet_name=sheet_name,
+        max_relationships=max_relationships,
+    )
 
 
 def _run_inspect_data_rows(

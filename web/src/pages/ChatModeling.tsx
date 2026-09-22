@@ -1189,7 +1189,7 @@ export default function ChatModeling({
             </div>
           )}
           <div className="task-setup-footer">
-            <p className={submitError ? 'task-setup-error' : ''}>{submitError || (activeName ? `将使用 ${activeName}${activeCfg?.model ? ` / ${activeCfg.model}` : ''}` : '请先在 API 管理中添加模型，并在输入框下方选择')}</p>
+            <p className={submitError ? 'task-setup-error' : ''}>{submitError || (activeName ? `将使用 ${activeName}${activeCfg?.model ? ` / ${activeCfg.model}` : ''}` : '请先在设置中添加模型，并在输入框下方选择')}</p>
             <button className="task-start-button" onClick={handleStart} disabled={busy}>{busy ? '正在创建任务…' : '开始建模'}</button>
           </div>
         </section>
@@ -1257,7 +1257,7 @@ export default function ChatModeling({
                 {activeCfg?.model ? ` · ${activeCfg.model}` : ''}
               </>
             ) : (
-              '尚未配置 API（请到「API 管理」添加）'
+              '尚未配置 API（请到「设置 → API 配置」添加）'
             )}
             {runId && (
               <>

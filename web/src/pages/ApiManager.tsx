@@ -45,7 +45,7 @@ const SERVICE_META: Record<ExternalService, { name: string; keyLabel: string; hi
   },
 }
 
-export default function ApiManager() {
+export default function ApiManager({ embedded = false }: { embedded?: boolean }) {
   const [configs, setConfigs] = useState<ApiConfig[]>([])
   const [editing, setEditing] = useState<Partial<ApiConfig>>(EMPTY)
   const [isNew, setIsNew] = useState(false)
@@ -202,14 +202,16 @@ export default function ApiManager() {
   }
 
   return (
-    <div className="page api-page">
+    <div className={`api-page ${embedded ? 'api-page--embedded' : ''}`}>
       <div className="api-toolbar">
-        <div className="page-head-copy">
-          <h1 className="page-title">API 管理</h1>
-          <div className="page-sub">
-            管理 LLM、联网检索和文档转换服务。配置保存在本机，重新进入网页会自动恢复。
+        {!embedded && (
+          <div className="page-head-copy">
+            <h1 className="page-title">API 管理</h1>
+            <div className="page-sub">
+              管理 LLM、联网检索和文档转换服务。配置保存在本机，重新进入网页会自动恢复。
+            </div>
           </div>
-        </div>
+        )}
         <button type="button" className="api-add-btn" onClick={startNew}>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" aria-hidden="true">
             <path d="M12 5v14M5 12h14" strokeLinecap="round" />

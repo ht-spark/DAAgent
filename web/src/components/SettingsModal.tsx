@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 
+import ApiManager from '../pages/ApiManager'
 import {
   FONT_SIZE_OPTIONS,
   applyUiSettings,
@@ -13,16 +14,20 @@ type Props = {
   onClose: () => void
 }
 
+type SettingsTab = 'general' | 'api'
+
 const SEARCH_PLACEHOLDER = '搜索设置'
 
 export default function SettingsModal({ open, onClose }: Props) {
   const [settings, setSettings] = useState<UiSettings>(() => loadUiSettings())
   const [query, setQuery] = useState('')
+  const [tab, setTab] = useState<SettingsTab>('general')
 
   useEffect(() => {
     if (!open) return
     setSettings(loadUiSettings())
     setQuery('')
+    setTab('general')
   }, [open])
 
   useEffect(() => {
@@ -34,11 +39,19 @@ export default function SettingsModal({ open, onClose }: Props) {
     return () => window.removeEventListener('keydown', onKey)
   }, [open, onClose])
 
+  const q = query.trim().toLowerCase()
   const showFontSize = useMemo(() => {
-    if (!query.trim()) return true
-    const q = query.trim().toLowerCase()
+    if (!q) return true
     return '字体大小 界面字号 font size 常规 通用'.toLowerCase().includes(q) || q.includes('字')
-  }, [query])
+  }, [q])
+  const showApiTab = useMemo(() => {
+    if (!q) return true
+    return 'api 模型 服务 密钥 key 检索 mineru tavily 配置'.includes(q) || q.includes('a')
+  }, [q])
+  const showGeneralTab = useMemo(() => {
+    if (!q) return true
+    return showFontSize
+  }, [q, showFontSize])
 
   function updateFontSize(size: number) {
     const next = { ...settings, fontSize: size }
@@ -52,7 +65,7 @@ export default function SettingsModal({ open, onClose }: Props) {
   return (
     <div className="settings-mask" onClick={onClose} role="presentation">
       <div
-        className="settings-dialog"
+        className={`settings-dialog ${tab === 'api' ? 'settings-dialog--api' : ''}`}
         role="dialog"
         aria-modal="true"
         aria-labelledby="settings-title"
@@ -76,52 +89,92 @@ export default function SettingsModal({ open, onClose }: Props) {
           />
           <nav className="settings-nav" aria-label="设置分类">
             <div className="settings-nav-group">个人</div>
-            <button type="button" className="settings-nav-item active">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" aria-hidden="true">
-                <path d="M4 7h10M18 7h2M4 17h2M10 17h10" strokeLinecap="round" />
-                <circle cx="16" cy="7" r="2" />
-                <circle cx="8" cy="17" r="2" />
-              </svg>
-              <span>常规</span>
-            </button>
+            {showGeneralTab && (
+              <button
+                type="button"
+                className={`settings-nav-item ${tab === 'general' ? 'active' : ''}`}
+                onClick={() => setTab('general')}
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" aria-hidden="true">
+                  <path d="M4 7h10M18 7h2M4 17h2M10 17h10" strokeLinecap="round" />
+                  <circle cx="16" cy="7" r="2" />
+                  <circle cx="8" cy="17" r="2" />
+                </svg>
+                <span>常规</span>
+              </button>
+            )}
+            <div className="settings-nav-group">服务</div>
+            {showApiTab && (
+              <button
+                type="button"
+                className={`settings-nav-item ${tab === 'api' ? 'active' : ''}`}
+                onClick={() => setTab('api')}
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" aria-hidden="true">
+                  <circle cx="12" cy="12" r="9" />
+                  <path d="M14.5 9.5 10 12.5 14 15.5" strokeLinecap="round" strokeLinejoin="round" />
+                  <path d="M12 3v3M12 18v3M3 12h3M18 12h3" strokeLinecap="round" />
+                </svg>
+                <span>API 配置</span>
+              </button>
+            )}
           </nav>
         </div>
 
         <div className="settings-main">
-          <header className="settings-main-head">
-            <h1>常规</h1>
-          </header>
+          {tab === 'general' ? (
+            <>
+              <header className="settings-main-head">
+                <h1>常规</h1>
+              </header>
 
-          <section className="settings-section">
-            <h3 className="settings-section-title">常规</h3>
-            <div className="settings-card">
-              {showFontSize && (
-                <div className="settings-row">
-                  <div className="settings-row-copy">
-                    <div className="settings-row-label">界面字体大小</div>
-                    <p className="settings-row-desc">调整聊天、报告等正文的显示字号，立即生效并保存到本地。</p>
-                  </div>
-                  <div className="settings-row-control">
-                    <select
-                      className="settings-select"
-                      value={settings.fontSize}
-                      onChange={(e) => updateFontSize(Number(e.target.value))}
-                      aria-label="界面字体大小"
-                    >
-                      {FONT_SIZE_OPTIONS.map((opt) => (
-                        <option key={opt.value} value={opt.value}>
-                          {opt.label}（{opt.value}px）
-                        </option>
-                      ))}
-                    </select>
-                  </div>
+              <section className="settings-section">
+                <h3 className="settings-section-title">常规</h3>
+                <div className="settings-card">
+                  {showFontSize && (
+                    <div className="settings-row">
+                      <div className="settings-row-copy">
+                        <div className="settings-row-label">界面字体大小</div>
+                        <p className="settings-row-desc">调整聊天、报告等正文的显示字号，立即生效并保存到本地。</p>
+                      </div>
+                      <div className="settings-row-control">
+                        <select
+                          className="settings-select"
+                          value={settings.fontSize}
+                          onChange={(e) => updateFontSize(Number(e.target.value))}
+                          aria-label="界面字体大小"
+                        >
+                          {FONT_SIZE_OPTIONS.map((opt) => (
+                            <option key={opt.value} value={opt.value}>
+                              {opt.label}（{opt.value}px）
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
+                  )}
+                  {!showFontSize && (
+                    <div className="settings-row">
+                      <div className="settings-row-copy">
+                        <div className="settings-row-label">没有匹配的设置</div>
+                        <p className="settings-row-desc">试试搜索「字体」或「API」。</p>
+                      </div>
+                    </div>
+                  )}
                 </div>
-              )}
-              {!showFontSize && (
-                <p className="settings-empty">没有匹配「{query.trim()}」的设置项</p>
-              )}
-            </div>
-          </section>
+              </section>
+            </>
+          ) : (
+            <>
+              <header className="settings-main-head">
+                <h1>API 配置</h1>
+                <p className="settings-main-lead">管理模型与扩展服务；配置保存在本机。</p>
+              </header>
+              <div className="settings-api-host">
+                <ApiManager embedded />
+              </div>
+            </>
+          )}
         </div>
       </div>
     </div>

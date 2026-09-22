@@ -8239,3 +8239,45 @@ body {
   .conv-tray:hover,
   .conv-tray.is-drag { transform: none; }
 }
+
+
+/* ---------- 设置内嵌 API 配置 ---------- */
+.settings-main-lead {
+  margin: 4px 0 0;
+  color: var(--text-tertiary);
+  font-size: calc(12.5px * var(--app-font-ratio));
+}
+
+.settings-dialog--api {
+  height: min(720px, 92vh);
+}
+
+.settings-api-host {
+  min-height: 0;
+  flex: 1;
+  overflow: auto;
+  padding: 0 20px 20px;
+}
+
+.settings-api-host .api-page--embedded {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  max-width: none;
+  padding: 0;
+}
+
+.settings-api-host .api-page--embedded .api-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  margin: 0;
+  padding: 0;
+}
+
+.settings-api-host .api-page--embedded .api-section {
+  margin: 0;
+}
+
+.settings-api-host .api-empty {
+  min-height: 180px;
+}

@@ -1672,7 +1672,7 @@ export default function NewChat({
                     </details>
                   )
                 })() : (
-                  <span className="rag-model-empty" title="尚未在 API 管理中配置模型">
+                  <span className="rag-model-empty" title="尚未在设置中配置模型">
                     未配置模型
                   </span>
                 )}

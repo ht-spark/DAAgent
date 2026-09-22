@@ -5,7 +5,6 @@ import { syncApiSettingsCache } from './api'
 import { applyUiSettings, loadUiSettings } from './settings'
 import NewTask from './pages/NewTask'
 import History from './pages/History'
-import ApiManager from './pages/ApiManager'
 import Docs from './pages/Docs'
 import KnowledgeBaseHub from './pages/KnowledgeBaseHub'
 import KnowledgeBase from './pages/KnowledgeBase'
@@ -15,8 +14,10 @@ import ChunkEmbeddingProgress from './pages/ChunkEmbeddingProgress'
 import KnowledgeBaseHistory from './pages/KnowledgeBaseHistory'
 import DocConverter from './pages/DocConverter'
 import TaskExpert from './pages/TaskExpert'
+import Skills from './pages/Skills'
+import Templates from './pages/Templates'
 
-type Section = 'modeling' | 'brainstorm' | 'converter' | 'task-expert' | 'api' | 'docs'
+type Section = 'modeling' | 'brainstorm' | 'converter' | 'task-expert' | 'skills' | 'templates' | 'docs'
 type TaskStep = 'submit' | 'progress' | 'result'
 type ModelingView = 'new' | 'history'
 type BrainstormView = 'knowledge-hub' | 'knowledge' | 'knowledge-history' | 'stats' | 'chunking' | 'chunking-progress'
@@ -53,7 +54,7 @@ function resolveLevelNav(options: {
     }
   }
 
-  if (section === 'api' || section === 'docs' || section === 'converter' || section === 'task-expert') {
+  if (section === 'docs' || section === 'converter' || section === 'task-expert' || section === 'skills' || section === 'templates') {
     return { parent: null, next: null }
   }
 
@@ -210,10 +211,11 @@ export default function App() {
           setSection('modeling')
           setModelingView('new')
         }}
-        onApi={() => setSection('api')}
         onDocs={() => setSection('docs')}
         onConverter={() => setSection('converter')}
         onTaskExpert={() => setSection('task-expert')}
+        onSkills={() => setSection('skills')}
+        onTemplates={() => setSection('templates')}
         onSettings={() => setSettingsOpen(true)}
         onDiscussionDeleted={(id) => {
           if (discussionId === id) setDiscussionId(null)
@@ -329,10 +331,11 @@ export default function App() {
           />
         )}
         {section === 'modeling' && modelingView === 'history' && <History onOpen={openFromHistory} />}
-        {section === 'api' && <ApiManager />}
         {section === 'docs' && <Docs />}
         {section === 'converter' && <DocConverter />}
         {section === 'task-expert' && <TaskExpert />}
+        {section === 'skills' && <Skills />}
+        {section === 'templates' && <Templates />}
       </main>
     </div>
   )
