@@ -1603,7 +1603,9 @@ async def agent_profile_stream_endpoint(
         data_paths=[str(path.resolve(strict=True)) for path in data_paths],
         output_dir=str(output_dir),
         workspace_root=str(workspace_root) if workspace_root else None,
-        available_artifacts=discover_artifacts(output_dir),
+        available_artifacts=prior_trajectory.enrich_artifacts(
+            discover_artifacts(output_dir)
+        ),
         project_id=str(project["id"]) if project else None,
         messages=history,
         work_trajectory=prior_trajectory,

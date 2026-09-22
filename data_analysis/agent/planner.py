@@ -127,6 +127,7 @@ class Planner:
             for tool in self._tools
         ]
         trajectory = state.work_trajectory
+        enriched_artifacts = trajectory.enrich_artifacts(state.available_artifacts)
         context = {
             "user_query": state.user_query,
             "available_data_files": [
@@ -142,7 +143,7 @@ class Planner:
             "artifact_reuse_status": "已有产物可直接复用",
             "available_artifacts": [
                 artifact.model_dump(mode="json")
-                for artifact in state.available_artifacts
+                for artifact in enriched_artifacts
             ],
             "workspace_enabled": bool(state.workspace_root),
             "available_tools": tools,
@@ -151,6 +152,8 @@ class Planner:
                 "files_read": list(trajectory.files_read),
                 "files_modified": list(trajectory.files_modified),
                 "key_decisions": list(trajectory.key_decisions),
+                "notes": list(trajectory.notes),
+                "artifact_descriptions": dict(trajectory.artifact_descriptions),
             },
         }
         prompt = _render_planner_prompt(context, self._max_todos)

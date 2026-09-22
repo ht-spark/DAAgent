@@ -74,6 +74,7 @@ def test_planner_context_includes_memory_and_work_trajectory() -> None:
     trajectory.add_read("data/sales.csv")
     trajectory.add_modified("outputs/report.md")
     trajectory.add_decision("已确认口径为含税销售额")
+    trajectory.add_note("profile_data: rows=150, missing_rate=0.02")
 
     state = AgentState(
         user_query="继续分析复购",
@@ -90,6 +91,7 @@ def test_planner_context_includes_memory_and_work_trajectory() -> None:
     assert "data/sales.csv" in context
     assert "outputs/report.md" in context
     assert "已确认口径为含税销售额" in context
+    assert "profile_data: rows=150" in context
 
 
 def test_plan_rejects_dependency_cycle() -> None:

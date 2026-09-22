@@ -166,6 +166,7 @@ class ArtifactReference(BaseModel):
     media_type: str
     source_tool: str
     reusable: bool = True
+    description: str | None = None
 
     @field_validator("relative_path")
     @classmethod
@@ -232,6 +233,12 @@ def discover_artifacts(output_dir: str | Path | None) -> list[ArtifactReference]
     return artifacts
 
 
+MAX_TRAJECTORY_NOTES = 40
+MAX_TRAJECTORY_NOTE_CHARS = 240
+MAX_ARTIFACT_DESCRIPTION_CHARS = 200
+MAX_ARTIFACT_DESCRIPTIONS = 50
+
+
 class WorkTrajectory(BaseModel):
     """跨轮可复用的结构化工作轨迹，供 Planner 避免重复规划与重复读文件。"""
 
@@ -240,6 +247,9 @@ class WorkTrajectory(BaseModel):
     files_read: list[str] = Field(default_factory=list)
     files_modified: list[str] = Field(default_factory=list)
     key_decisions: list[str] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+    # 产物相对路径 → 简要描述（是什么/包含什么），跨轮保留
+    artifact_descriptions: dict[str, str] = Field(default_factory=dict)
 
     def add_read(self, path: str | None) -> None:
         """登记已读文件路径。"""
@@ -251,14 +261,52 @@ class WorkTrajectory(BaseModel):
 
     def add_decision(self, text: str | None) -> None:
         """登记一条关键决定或已完成结论。"""
-        if not isinstance(text, str):
+        self._add_unique_text("key_decisions", text)
+
+    def add_note(self, text: str | None) -> None:
+        """登记一条工具观察要点，供跨 Todo / 跨轮复用。"""
+        self._add_unique_text("notes", text, max_chars=MAX_TRAJECTORY_NOTE_CHARS)
+
+    def describe_artifact(self, path: str | None, description: str | None) -> None:
+        """记录产物简要描述（路径 → 是什么）。新描述覆盖旧描述。"""
+        if not isinstance(path, str) or not isinstance(description, str):
             return
-        normalized = text.strip()
-        if not normalized:
+        key = path.strip().replace("\\", "/")
+        text = description.strip()[:MAX_ARTIFACT_DESCRIPTION_CHARS].strip()
+        if not key or not text:
             return
-        existing = {item.casefold() for item in self.key_decisions}
-        if normalized.casefold() not in existing:
-            self.key_decisions.append(normalized)
+        # 规范 key，避免同一文件出现两种写法
+        key = key.lstrip("./")
+        self.artifact_descriptions[key] = text
+        if len(self.artifact_descriptions) > MAX_ARTIFACT_DESCRIPTIONS:
+            # 保留最近写入的描述
+            trimmed = dict(
+                list(self.artifact_descriptions.items())[-MAX_ARTIFACT_DESCRIPTIONS:]
+            )
+            self.artifact_descriptions = trimmed
+
+    def description_for(self, path: str | None) -> str | None:
+        """按相对路径读取产物描述。"""
+        if not isinstance(path, str):
+            return None
+        key = path.strip().replace("\\", "/").lstrip("./")
+        return self.artifact_descriptions.get(key)
+
+    def enrich_artifacts(
+        self, artifacts: Sequence[ArtifactReference]
+    ) -> list[ArtifactReference]:
+        """把轨迹中的简要描述合并进产物引用列表。"""
+        enriched: list[ArtifactReference] = []
+        for artifact in artifacts:
+            if artifact.description:
+                enriched.append(artifact)
+                continue
+            description = self.description_for(artifact.relative_path)
+            if description:
+                enriched.append(artifact.model_copy(update={"description": description}))
+            else:
+                enriched.append(artifact)
+        return enriched
 
     def merge(self, other: "WorkTrajectory | Mapping[str, Any] | None") -> None:
         """合并另一份轨迹（会话历史或先前保存的 metadata）。"""
@@ -279,6 +327,14 @@ class WorkTrajectory(BaseModel):
         for raw in payload.get("key_decisions") or []:
             if isinstance(raw, str):
                 self.add_decision(raw)
+        for raw in payload.get("notes") or []:
+            if isinstance(raw, str):
+                self.add_note(raw)
+        descriptions = payload.get("artifact_descriptions")
+        if isinstance(descriptions, Mapping):
+            for key, value in descriptions.items():
+                if isinstance(key, str) and isinstance(value, str):
+                    self.describe_artifact(key, value)
 
     def observe_tool(
         self,
@@ -288,7 +344,7 @@ class WorkTrajectory(BaseModel):
         result: JsonValue = None,
         success: bool = True,
     ) -> None:
-        """根据一次工具调用更新已读/已改文件。"""
+        """根据一次工具调用更新已读/已改文件与观察要点。"""
         name = (tool_name or "").strip()
         if not name or not success:
             return
@@ -310,6 +366,16 @@ class WorkTrajectory(BaseModel):
                     elif isinstance(item, Mapping):
                         self.add_modified(_first_str(item, item, "path", "relative_path"))
 
+        note = _note_from_tool_result(name, args, result_map)
+        if note:
+            self.add_note(note)
+
+        description = _artifact_description_from_result(name, args, result_map)
+        if description:
+            path = _first_str(args, result_map, "relative_path", "path", "file_path")
+            if path:
+                self.describe_artifact(path, description)
+
     def absorb_completed_todos(self, plan: "AnalysisPlan | None") -> None:
         """把已完成 Todo 的结果摘要并入关键决定。"""
         if plan is None:
@@ -329,6 +395,97 @@ class WorkTrajectory(BaseModel):
         if normalized.casefold() not in existing:
             items.append(normalized)
             setattr(self, field, items)
+
+    def _add_unique_text(
+        self,
+        field: str,
+        text: str | None,
+        *,
+        max_chars: int | None = None,
+    ) -> None:
+        if not isinstance(text, str):
+            return
+        normalized = text.strip()
+        if max_chars is not None:
+            normalized = normalized[:max_chars].strip()
+        if not normalized:
+            return
+        items: list[str] = getattr(self, field)
+        existing = {item.casefold() for item in items}
+        if normalized.casefold() in existing:
+            return
+        items.append(normalized)
+        if field == "notes" and len(items) > MAX_TRAJECTORY_NOTES:
+            items = items[-MAX_TRAJECTORY_NOTES:]
+        setattr(self, field, items)
+
+
+def _artifact_description_from_result(
+    tool_name: str,
+    arguments: Mapping[str, Any],
+    result: Mapping[str, Any],
+) -> str | None:
+    """从工具结果/写入参数提炼产物简要描述。"""
+    for key in ("description", "summary", "analysis"):
+        value = result.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        if isinstance(value, Mapping):
+            compact = ", ".join(
+                f"{item_key}={item_value}"
+                for item_key, item_value in list(value.items())[:6]
+                if item_value is not None and str(item_value).strip()
+            )
+            if compact:
+                return compact
+
+    # write_artifact：用正文首行概括「是什么」
+    content = arguments.get("content")
+    if isinstance(content, str) and content.strip():
+        for line in content.strip().splitlines():
+            text = line.strip().lstrip("#*- ").strip()
+            if text:
+                return f"写入：{text[:MAX_ARTIFACT_DESCRIPTION_CHARS]}"
+    return None
+
+
+def _note_from_tool_result(
+    tool_name: str,
+    arguments: Mapping[str, Any],
+    result: Mapping[str, Any],
+) -> str | None:
+    """从工具结果提取一条短观察要点，供跨 Todo 复用。"""
+    path = _first_str(arguments, result, "file_path", "relative_path", "path")
+    prefix = f"{tool_name} {path}:" if path else f"{tool_name}:"
+
+    summary = result.get("summary")
+    if isinstance(summary, str) and summary.strip():
+        return f"{prefix} {_clip(summary.strip())}"
+    if isinstance(summary, Mapping):
+        compact = ", ".join(
+            f"{key}={value}"
+            for key, value in list(summary.items())[:8]
+            if value is not None and str(value).strip()
+        )
+        if compact:
+            return f"{prefix} {_clip(compact)}"
+
+    analysis = result.get("analysis")
+    if isinstance(analysis, str) and analysis.strip():
+        return f"{prefix} {_clip(analysis.strip())}"
+
+    fields = result.get("fields") or result.get("columns")
+    if isinstance(fields, list) and fields:
+        names = [str(item) for item in fields[:12]]
+        return f"{prefix} 字段 {_clip(', '.join(names))}"
+    return None
+
+
+def _clip(text: str) -> str:
+    """裁剪单条观察要点，避免轨迹被长输出撑爆。"""
+    if len(text) <= MAX_TRAJECTORY_NOTE_CHARS:
+        return text
+    return text[: MAX_TRAJECTORY_NOTE_CHARS - 1] + "…"
 
 
 def _first_str(*sources_and_keys: Any) -> str | None:
@@ -376,9 +533,12 @@ def collect_work_trajectory_from_session(
                     arguments=arguments if isinstance(arguments, Mapping) else None,
                 )
             elif item_type == "agent_observation":
+                success = bool(item.get("success", True))
+                summary = item.get("summary")
                 trajectory.observe_tool(
                     str(item.get("tool_name") or ""),
-                    success=bool(item.get("success", True)),
+                    result={"summary": summary} if summary is not None else None,
+                    success=success,
                 )
     return trajectory
 
@@ -477,6 +637,10 @@ class AgentState(BaseModel):
     def _upsert_artifact(self, artifact: ArtifactReference) -> None:
         """按相对路径更新产物状态，避免同一文件重复进入上下文。"""
         identity = artifact.relative_path.casefold()
+        if not artifact.description:
+            description = self.work_trajectory.description_for(artifact.relative_path)
+            if description:
+                artifact = artifact.model_copy(update={"description": description})
         self.available_artifacts = [
             current
             for current in self.available_artifacts
