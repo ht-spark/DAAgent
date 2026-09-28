@@ -6038,6 +6038,35 @@
   white-space: pre-wrap;
 }
 
+/* 模型真实思考过程（reasoning_content / <think> 等）展示区 */
+.agent-model-reasoning {
+  margin: 0 10px 9px 26px;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--rag-border) 80%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--rag-bg-panel) 55%, transparent);
+}
+
+.agent-model-reasoning-label {
+  margin: 0 0 6px;
+  color: var(--rag-text-muted);
+  font-size: calc(10px * var(--app-font-ratio));
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.agent-model-reasoning-text {
+  margin: 0;
+  max-height: 280px;
+  overflow: auto;
+  color: var(--rag-text-secondary);
+  font-size: calc(11px * var(--app-font-ratio));
+  line-height: 1.65;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .agent-thought-details:focus-within {
   border-color: var(--rag-accent-border);
 }

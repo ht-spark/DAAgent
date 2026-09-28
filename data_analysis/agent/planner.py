@@ -5,12 +5,14 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any, Sequence
 
 from pydantic import ValidationError
 
 from ..tools.registry import ToolSpec
-from .loop import LlmClient
+from ..cancellation import invoke_cancellable, raise_if_cancelled
+from .loop import LlmClient, extract_model_reasoning
 from .state import AgentState, AnalysisPlan
 
 _PLANNER_PROMPT_PATH = Path(__file__).resolve().parents[1] / "prompts" / "planner.md"
@@ -30,6 +32,7 @@ class Planner:
         *,
         max_todos: int = 8,
         retries: int = 2,
+        cancel_check: Callable[[], bool] | None = None,
     ) -> None:
         if max_todos < 1 or max_todos > 12:
             raise ValueError("max_todos 必须在 1 到 12 之间")
@@ -39,16 +42,25 @@ class Planner:
         self._tools = tuple(tools)
         self._max_todos = max_todos
         self._retries = retries
+        self._cancel_check = cancel_check
 
     def create_plan(self, state: AgentState) -> AnalysisPlan:
         """根据用户目标、附件与工具生成经过校验的执行计划。"""
         messages = self.build_messages(state)
         last_error: Exception | None = None
         for attempt in range(self._retries + 1):
-            response = self._llm.invoke(messages)
+            raise_if_cancelled(self._cancel_check)
+            response = invoke_cancellable(
+                lambda: self._llm.invoke(messages),
+                cancel_check=self._cancel_check,
+            )
             raw = _response_text(response)
+            # 抽取模型真实思考过程，挂到计划上供前端展示
+            model_reasoning = extract_model_reasoning(response, raw)
             try:
                 plan = _parse_plan(raw)
+                if model_reasoning:
+                    plan.model_reasoning = model_reasoning
                 if len(plan.todos) > self._max_todos:
                     raise PlannerError(
                         f"Todo 数量 {len(plan.todos)} 超过上限 {self._max_todos}"

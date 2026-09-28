@@ -17,7 +17,9 @@ from data_analysis.agent.loop import (
     IterationLimitError,
     ToolSpec,
     UnknownToolError,
+    extract_model_reasoning,
     parse_decision,
+    split_think_blocks,
 )
 
 
@@ -258,3 +260,98 @@ def test_build_messages_exposes_runtime_attachment_paths() -> None:
     assert '"file_name": "sales.csv"' in context
     expected_path = str(Path("D:/private/uploads/sales.csv").resolve(strict=False))
     assert json.dumps(expected_path) in context
+
+def test_split_think_blocks_extracts_paired_thinking_tags() -> None:
+    thinking, body = split_think_blocks(
+        "<think>先看数据规模。</think>\n{\"type\":\"finish\",\"answer\":\"完成\"}"
+    )
+
+    assert thinking == "先看数据规模。"
+    assert "finish" in body
+    assert "think" not in body.lower()
+
+
+def test_extract_model_reasoning_reads_additional_kwargs() -> None:
+    response = SimpleNamespace(
+        content='{"type":"finish","answer":"完成"}',
+        additional_kwargs={"reasoning_content": "需要先核对数据质量再下结论。"},
+    )
+
+    assert extract_model_reasoning(response) == "需要先核对数据质量再下结论。"
+
+
+def test_extract_model_reasoning_reads_thinking_content_blocks() -> None:
+    response = SimpleNamespace(
+        content=[
+            {"type": "thinking", "thinking": "先拆分子任务。"},
+            {"type": "text", "text": '{"type":"finish","answer":"完成"}'},
+        ]
+    )
+
+    assert extract_model_reasoning(response) == "先拆分子任务。"
+
+
+def test_step_attaches_model_reasoning_to_decision() -> None:
+    llm = FakeLlm(
+        SimpleNamespace(
+            content=(
+                "<think>应该先读取授权数据再画像。</think>\n"
+                '{"type":"action","thought":"读取数据",'
+                '"tool_name":"profile_data","arguments":{}}'
+            )
+        )
+    )
+    loop = AgentLoop(
+        llm,
+        [ToolSpec("profile_data", "生成基础画像")],
+        "必须依据真实数据回答。",
+    )
+
+    decision = loop.step(FakeState())
+
+    assert isinstance(decision, Action)
+    assert decision.thought == "读取数据"
+    assert decision.reasoning == "应该先读取授权数据再画像。"
+
+
+def test_step_attaches_reasoning_content_to_finish() -> None:
+    response = SimpleNamespace(
+        content='{"type":"finish","thought":"信息充分","answer":"结论[1]"}',
+        additional_kwargs={"reasoning_content": "已有足够观察，可以直接作答。"},
+    )
+    loop = AgentLoop(FakeLlm(response), [], "回答必须带引用。")
+
+    decision = loop.step(FakeState())
+
+    assert isinstance(decision, Finish)
+    assert decision.reasoning == "已有足够观察，可以直接作答。"
+
+
+def test_step_raises_task_cancelled_during_llm_invoke() -> None:
+    """用户终止后应立即打断正在进行的 LLM 调用。"""
+    import threading
+    import time
+
+    from data_analysis.cancellation import TaskCancelledError
+
+    flag = {"cancelled": False}
+
+    def cancel_check() -> bool:
+        return flag["cancelled"]
+
+    class SlowLlm:
+        def invoke(self, messages):
+            time.sleep(10)
+            return '{"type":"finish","answer":"不应返回"}'
+
+    loop = AgentLoop(SlowLlm(), [], "规则", cancel_check=cancel_check)
+
+    def cancel_soon():
+        time.sleep(0.2)
+        flag["cancelled"] = True
+
+    threading.Thread(target=cancel_soon, daemon=True).start()
+    started = time.monotonic()
+    with pytest.raises(TaskCancelledError):
+        loop.step(FakeState())
+    assert time.monotonic() - started < 3

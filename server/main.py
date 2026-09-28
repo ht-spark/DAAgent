@@ -43,6 +43,7 @@ from data_analysis.agent.state import (
     discover_artifacts,
 )
 from data_analysis.context import compile_rolling_context, estimate_context_usage_after_turn
+from data_analysis.cancellation import TaskCancelledError
 from data_analysis.runtime import (
     ExecutionContext,
     Harness,
@@ -977,7 +978,7 @@ def _agent_event_payload(
 ) -> dict[str, object]:
     """把内部 Agent 事件转换为可公开展示的精简载荷。"""
     if isinstance(event, PlanCreated):
-        return {
+        payload: dict[str, object] = {
             "type": "agent_plan",
             "objective": event.plan.objective,
             "reasoning_summary": event.plan.reasoning_summary,
@@ -991,6 +992,9 @@ def _agent_event_payload(
                 for todo in event.plan.todos
             ],
         }
+        if event.plan.model_reasoning.strip():
+            payload["model_reasoning"] = event.plan.model_reasoning
+        return payload
     if isinstance(event, TodoStarted):
         return {
             "type": "agent_todo_started",
@@ -1010,16 +1014,21 @@ def _agent_event_payload(
             "error": event.error,
         }
     if isinstance(event, Finish):
-        return {
+        payload = {
             "type": "agent_reasoning",
             "summary": event.thought,
         }
+        if event.reasoning.strip():
+            payload["model_reasoning"] = event.reasoning
+        return payload
     if isinstance(event, Action):
-        payload: dict[str, object] = {
+        payload = {
             "type": "agent_action",
             "thought": event.thought,
             "tool_name": event.tool_name,
         }
+        if event.reasoning.strip():
+            payload["model_reasoning"] = event.reasoning
         # 只保留路径类参数，供跨轮工作轨迹提取；完整 arguments 可能含大段正文。
         path_args = {
             key: value.strip()
@@ -1618,14 +1627,21 @@ async def agent_profile_stream_endpoint(
             "若已确认项目中有环境目录（包括项目根目录本身），请显式传入"
             " python_environment；否则先创建环境或向用户说明。"
         )
+    chat_run = AgentChatRun(active_discussion_id, message)
+    _agent_chat_runs[run_id] = chat_run
+
+    def _agent_cancel_check() -> bool:
+        return chat_run.cancel_requested
+
     loop = AgentLoop(
         llm,
         registry.specs(),
         system_prompt,
         max_iterations=60,
         decision_retries=8,
+        cancel_check=_agent_cancel_check,
     )
-    planner = Planner(llm, registry.specs())
+    planner = Planner(llm, registry.specs(), cancel_check=_agent_cancel_check)
     approved_command_actions: set[int] = set()
 
     def consume_command_approval(action: Action) -> bool:
@@ -1649,9 +1665,8 @@ async def agent_profile_stream_endpoint(
         ),
         command_approval=consume_command_approval,
         execution_context=execution_context,
+        cancel_check=_agent_cancel_check,
     )
-    chat_run = AgentChatRun(active_discussion_id, message)
-    _agent_chat_runs[run_id] = chat_run
 
     async def event_stream():
         started_event: dict[str, object] = {
@@ -1700,13 +1715,22 @@ async def agent_profile_stream_endpoint(
 
         try:
             async with asyncio.timeout(AGENT_RUN_TIMEOUT_SECONDS):
-                while (event := await asyncio.to_thread(_next_agent_event, iterator)) is not None:
+                while True:
+                    try:
+                        event = await asyncio.to_thread(_next_agent_event, iterator)
+                    except TaskCancelledError:
+                        await save_stopped_run("任务已终止。")
+                        yield json.dumps({"type": "cancelled", "run_id": run_id}, ensure_ascii=False) + "\n"
+                        return
+                    if event is None:
+                        break
                     if chat_run.cancel_requested:
                         await save_stopped_run("任务已终止。")
                         yield json.dumps({"type": "cancelled", "run_id": run_id}, ensure_ascii=False) + "\n"
                         return
                     if isinstance(event, Finish):
-                        if event.thought.strip():
+                        # 只要公开摘要或真实思考任一存在，就推送阶段思考事件
+                        if event.thought.strip() or event.reasoning.strip():
                             payload = _agent_event_payload(event)
                             trace.append(payload)
                             yield json.dumps(payload, ensure_ascii=False) + "\n"

@@ -308,6 +308,27 @@ def test_agent_finish_exposes_public_reasoning_summary():
     }
 
 
+def test_agent_events_expose_model_reasoning_when_present():
+    """模型真实思考过程应随决策事件透传给前端。"""
+    action = Action(
+        thought="读取数据",
+        tool_name="profile_data",
+        arguments={},
+        reasoning="先确认字段类型，再决定画像指标。",
+    )
+    finish = Finish(
+        thought="信息充分",
+        answer="分析完成",
+        reasoning="已有足够观察，可以作答。",
+    )
+
+    action_payload = main._agent_event_payload(action)
+    finish_payload = main._agent_event_payload(finish)
+
+    assert action_payload["model_reasoning"] == "先确认字段类型，再决定画像指标。"
+    assert finish_payload["model_reasoning"] == "已有足够观察，可以作答。"
+
+
 def test_agent_artifacts_only_include_generated_outputs(monkeypatch, tmp_path):
     monkeypatch.setattr(main, "ARTIFACTS_ROOT", tmp_path)
     run_id = "a" * 32

@@ -12,6 +12,7 @@ from pathlib import Path
 from pydantic import JsonValue
 
 from ..tools.registry import RegisteredTool
+from ..cancellation import run_cancellable_process
 
 __all__ = [
     "SandboxConfigurationError",
@@ -93,6 +94,7 @@ class SubprocessSandbox:
         arguments: Mapping[str, JsonValue],
         *,
         context_override: Mapping[str, JsonValue] | None = None,
+        cancel_check: object | None = None,
     ) -> JsonValue:
         """在子进程中执行工具并返回 JSON 结果。
 
@@ -100,6 +102,7 @@ class SubprocessSandbox:
             tool: 已由注册表解析的可信工具。
             arguments: LLM 生成且已经解析为对象的工具参数。
             context_override: 当前 Run 需要覆盖到工具的最新上下文。
+            cancel_check: 用户请求终止时返回 True，立即杀死工具进程树。
 
         Returns:
             工具返回的 JSON 值。
@@ -132,8 +135,9 @@ class SubprocessSandbox:
             "data_analysis.runtime._sandbox_worker",
         ]
         try:
-            completed = subprocess.run(
+            completed = run_cancellable_process(
                 command,
+                cancel_check=cancel_check,
                 input=payload,
                 capture_output=True,
                 text=True,
@@ -143,7 +147,6 @@ class SubprocessSandbox:
                 env=_safe_environment(),
                 timeout=self._timeout_seconds,
                 shell=False,
-                check=False,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
         except subprocess.TimeoutExpired as exc:

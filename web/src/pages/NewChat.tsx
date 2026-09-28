@@ -807,6 +807,12 @@ const AgentInlineProcess = memo(function AgentInlineProcess({
               {plan.reasoning_summary?.trim()
                 || `已根据目标拆分为 ${plan.todos.length} 个可执行任务，并按依赖关系安排执行顺序。`}
             </p>
+            {plan.model_reasoning?.trim() && (
+              <div className="agent-model-reasoning">
+                <p className="agent-model-reasoning-label">深度思考</p>
+                <p className="agent-model-reasoning-text">{plan.model_reasoning}</p>
+              </div>
+            )}
           </details>
         )}
         {activityTrace.map((event, index) => (
@@ -826,6 +832,12 @@ const AgentInlineProcess = memo(function AgentInlineProcess({
                     <small>{event.tool_name}</small>
                   </summary>
                   <p>{event.thought || '正在判断下一步操作。'}</p>
+                  {event.model_reasoning?.trim() && (
+                    <div className="agent-model-reasoning">
+                      <p className="agent-model-reasoning-label">深度思考</p>
+                      <p className="agent-model-reasoning-text">{event.model_reasoning}</p>
+                    </div>
+                  )}
                 </details>
                 <p className="agent-inline-activity">调用了工具 · {event.tool_name}</p>
                 {event.code && (
@@ -842,7 +854,13 @@ const AgentInlineProcess = memo(function AgentInlineProcess({
             ) : event.type === 'agent_reasoning' ? (
               <details className="agent-thought-details">
                 <summary><span>阶段思考</span></summary>
-                <p>{event.summary}</p>
+                {event.summary?.trim() && <p>{event.summary}</p>}
+                {event.model_reasoning?.trim() && (
+                  <div className="agent-model-reasoning">
+                    <p className="agent-model-reasoning-label">深度思考</p>
+                    <p className="agent-model-reasoning-text">{event.model_reasoning}</p>
+                  </div>
+                )}
               </details>
             ) : (
               <>
@@ -1682,7 +1700,7 @@ export default function NewChat({
                   onClick={() => isSubmitting ? void stopActiveRun() : void submit()}
                   disabled={isSubmitting ? !activeRunId || isStopping : (!draft.trim() && files.length === 0)}
                   aria-label={isSubmitting ? (isStopping ? '正在终止任务' : '终止任务') : '发送'}
-                  title={isSubmitting ? (isStopping ? '正在等待当前工具结束' : '终止当前任务') : '发送'}
+                  title={isSubmitting ? (isStopping ? '正在终止任务' : '终止当前任务') : '发送'}
                 >
                   {isSubmitting ? <span className="rag-stop-icon" aria-hidden="true" /> : (
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">

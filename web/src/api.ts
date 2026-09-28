@@ -502,6 +502,8 @@ export type AgentTraceEvent = {
   type: 'agent_plan'
   objective: string
   reasoning_summary?: string
+  /** 模型真实思考过程（reasoning_content / <think> 等） */
+  model_reasoning?: string
   todos: Array<{
     id: string
     objective: string
@@ -523,11 +525,15 @@ export type AgentTraceEvent = {
 } | {
   type: 'agent_action'
   thought: string
+  /** 模型真实思考过程（reasoning_content / <think> 等） */
+  model_reasoning?: string
   tool_name: string
   code?: string
 } | {
   type: 'agent_reasoning'
   summary: string
+  /** 模型真实思考过程（reasoning_content / <think> 等） */
+  model_reasoning?: string
 } | {
   type: 'agent_observation'
   tool_name: string

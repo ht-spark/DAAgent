@@ -72,7 +72,9 @@ def test_sandbox_converts_timeout(monkeypatch, tmp_path) -> None:
     def raise_timeout(*args, **kwargs):
         raise subprocess.TimeoutExpired(cmd="python", timeout=0.01)
 
-    monkeypatch.setattr(subprocess, "run", raise_timeout)
+    monkeypatch.setattr(
+        "data_analysis.runtime.sandbox.run_cancellable_process", raise_timeout
+    )
 
     with pytest.raises(SandboxTimeoutError, match="超过"):
         SubprocessSandbox(timeout_seconds=0.01).execute(tool, {})
@@ -91,7 +93,9 @@ def test_sandbox_rejects_invalid_worker_response(monkeypatch, tmp_path) -> None:
             stderr="",
         )
 
-    monkeypatch.setattr(subprocess, "run", return_invalid)
+    monkeypatch.setattr(
+        "data_analysis.runtime.sandbox.run_cancellable_process", return_invalid
+    )
 
     with pytest.raises(SandboxProtocolError, match="合法 JSON"):
         SubprocessSandbox().execute(tool, {})

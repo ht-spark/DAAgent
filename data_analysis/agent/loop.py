@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any, Literal, Mapping, Protocol, Sequence, TypeAlias
 
 from pydantic import (
@@ -21,6 +22,7 @@ from pydantic import (
 )
 
 from ..tools.registry import ToolSpec
+from ..cancellation import invoke_cancellable, raise_if_cancelled
 
 
 class AgentLoopError(RuntimeError):
@@ -69,6 +71,8 @@ class Action(BaseModel):
     thought: str = ""
     tool_name: str = Field(min_length=1)
     arguments: dict[str, Any] = Field(default_factory=dict)
+    # 模型真实思考过程（reasoning_content / <think> 等），供前端展示；与 thought 摘要区分
+    reasoning: str = ""
 
     @field_validator("tool_name")
     @classmethod
@@ -93,6 +97,8 @@ class Finish(BaseModel):
     type: Literal["finish"] = "finish"
     thought: str = ""
     answer: str = Field(min_length=1)
+    # 模型真实思考过程（reasoning_content / <think> 等），供前端展示；与 thought 摘要区分
+    reasoning: str = ""
 
     @field_validator("answer")
     @classmethod
@@ -123,6 +129,7 @@ class AgentLoop:
         *,
         max_iterations: int = 50,
         decision_retries: int = 5,
+        cancel_check: Callable[[], bool] | None = None,
     ) -> None:
         """Initialize the decision-only loop.
 
@@ -132,6 +139,7 @@ class AgentLoop:
             system_prompt: Agent role, retrieval policy, and citation rules.
             max_iterations: Maximum number of decisions in one graph run.
             decision_retries: 决策格式错误或工具名无效时的纠错重试次数。
+            cancel_check: 用户请求终止时返回 True；将在调用 LLM 前后检查。
 
         Raises:
             ValueError: If configuration is empty, duplicated, or out of range.
@@ -152,6 +160,7 @@ class AgentLoop:
         self._system_prompt = system_prompt.strip()
         self._max_iterations = max_iterations
         self._decision_retries = decision_retries
+        self._cancel_check = cancel_check
 
     def step(self, state: AgentStateView) -> Decision:
         """Return the next decision without executing the selected tool.
@@ -174,10 +183,18 @@ class AgentLoop:
                 f"Agent 已达到最大决策轮数 {self._max_iterations}"
             )
 
+        raise_if_cancelled(self._cancel_check)
         messages = self.build_messages(state)
         last_error: DecisionParseError | None = None
         for attempt in range(self._decision_retries + 1):
-            response_text = _response_text(self._llm.invoke(messages))
+            raise_if_cancelled(self._cancel_check)
+            raw_response = invoke_cancellable(
+                lambda: self._llm.invoke(messages),
+                cancel_check=self._cancel_check,
+            )
+            response_text = _response_text(raw_response)
+            # 先抽出真实思考过程，再解析决策，避免 <think> 被 parse 丢弃后无法展示
+            reasoning = extract_model_reasoning(raw_response, response_text)
             try:
                 decision = parse_decision(response_text)
                 if (
@@ -189,6 +206,8 @@ class AgentLoop:
                         f"LLM 选择了未注册工具: {decision.tool_name}；"
                         f"可用工具: {available}"
                     )
+                if reasoning:
+                    decision = decision.model_copy(update={"reasoning": reasoning})
                 return decision
             except DecisionParseError as exc:
                 last_error = exc
@@ -288,12 +307,144 @@ class AgentLoop:
         return messages
 
 
+def extract_model_reasoning(response: Any, raw_text: str = "") -> str:
+    """从 LLM 响应对象与原始文本中提取真实思考过程。
+
+    兼容常见推理模型输出形态：
+      - ``additional_kwargs.reasoning_content`` / ``reasoning`` / ``thinking``
+      - 内容块中的 ``thinking`` / ``reasoning`` 分段
+      - 正文中的 ``<think>…</think>`` / ``<thinking>…</thinking>`` 包装
+
+    Args:
+        response: LangChain 风格的模型响应对象，或纯字符串。
+        raw_text: 已抽出的正文文本；缺省时从 response 再取一次。
+
+    Returns:
+        合并后的思考过程文本；无思考内容时返回空字符串。
+    """
+    parts: list[str] = []
+    for candidate in _iter_reasoning_candidates(response):
+        text = candidate.strip()
+        if text:
+            parts.append(text)
+    body = raw_text if raw_text.strip() else _safe_response_text(response)
+    tagged, _ = split_think_blocks(body)
+    if tagged.strip():
+        parts.append(tagged.strip())
+    # 兼容只写了开标签的推理前缀（如 DeepSeek 风格 <think>… 后直接跟 JSON）
+    prefix = re.match(
+        r"^\s*<think>(.*?)(?:</think>|<\s*/\s*(?:think|thinking|thought)\s*>|$)",
+        body,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    if prefix:
+        prefix_text = prefix.group(1).strip()
+        if prefix_text and prefix_text not in parts:
+            parts.append(prefix_text)
+    # 去重并保持顺序，避免同一段思考被 content 与 additional_kwargs 重复记录
+    seen: set[str] = set()
+    unique: list[str] = []
+    for part in parts:
+        if part not in seen:
+            seen.add(part)
+            unique.append(part)
+    return "\n\n".join(unique)
+
+
+def split_think_blocks(text: str) -> tuple[str, str]:
+    """把正文中成对的思考标签拆成 (思考内容, 去掉思考后的正文)。
+
+    仅剥离成对标签；未闭合的思考片段原样保留在正文里，避免吞掉决策 JSON。
+    """
+    chunks: list[str] = []
+
+    def _collect(match: re.Match[str]) -> str:
+        body = match.group(2).strip()
+        if body:
+            chunks.append(body)
+        return "\n"
+
+    cleaned = re.sub(
+        r"(?is)<(think|thinking|thought)>(.*?)</\1>",
+        _collect,
+        text,
+    )
+    return "\n\n".join(chunks), cleaned
+
+
+def _iter_reasoning_candidates(response: Any) -> list[str]:
+    """收集响应对象里可能承载思考过程的字段值。"""
+    if isinstance(response, str) or response is None:
+        return []
+    sources: list[Any] = [response]
+    extra = getattr(response, "additional_kwargs", None)
+    if isinstance(extra, Mapping):
+        sources.append(extra)
+    elif extra is not None:
+        sources.append(extra)
+
+    values: list[str] = []
+    for source in sources:
+        for key in (
+            "reasoning_content",
+            "reasoning",
+            "thinking",
+            "thought",
+            "reasoning_text",
+        ):
+            value = _read_field(source, key)
+            if isinstance(value, str) and value.strip():
+                values.append(value)
+            elif isinstance(value, list):
+                values.extend(_text_from_content_blocks(value))
+    content = _read_field(response, "content")
+    if isinstance(content, list):
+        values.extend(_text_from_content_blocks(content, thinking_only=True))
+    return values
+
+
+def _read_field(source: Any, key: str) -> Any:
+    if isinstance(source, Mapping):
+        return source.get(key)
+    return getattr(source, key, None)
+
+
+def _text_from_content_blocks(
+    blocks: Sequence[Any],
+    *,
+    thinking_only: bool = False,
+) -> list[str]:
+    """从 LangChain 内容块列表中抽取思考或纯文本分段。"""
+    picked: list[str] = []
+    for item in blocks:
+        if not isinstance(item, Mapping):
+            continue
+        block_type = str(item.get("type") or "").strip().lower()
+        is_thinking = block_type in {"thinking", "reasoning", "reasoning_text", "thought"}
+        if thinking_only and not is_thinking:
+            continue
+        for key in ("thinking", "reasoning", "reasoning_content", "text", "content"):
+            value = item.get(key)
+            if isinstance(value, str) and value.strip():
+                picked.append(value.strip())
+                break
+    return picked
+
+
+def _safe_response_text(response: Any) -> str:
+    try:
+        return _response_text(response)
+    except DecisionParseError:
+        return ""
+
+
 def parse_decision(raw_response: str) -> Decision:
     """解析唯一决策对象，并兼容推理模型常见的文本包装。"""
+    _, text = split_think_blocks(raw_response)
     text = re.sub(
         r"^\s*<think>.*?</think>\s*",
         "",
-        raw_response,
+        text,
         count=1,
         flags=re.DOTALL | re.IGNORECASE,
     ).strip()

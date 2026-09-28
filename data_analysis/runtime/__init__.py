@@ -1,5 +1,12 @@
 """Agent 工具执行运行时。"""
 
+from ..cancellation import (
+    TaskCancelledError,
+    invoke_cancellable,
+    kill_process_tree,
+    raise_if_cancelled,
+    run_cancellable_process,
+)
 from .harness import Harness
 from .execution_context import ExecutionContext
 from .failure_tracker import FailureCircuitOpen, FailureTracker, RepeatedToolFailureError
@@ -31,5 +38,10 @@ __all__ = [
     "SandboxTimeoutError",
     "SandboxToolError",
     "SubprocessSandbox",
+    "TaskCancelledError",
+    "invoke_cancellable",
+    "kill_process_tree",
+    "raise_if_cancelled",
     "resolve_python_environment",
+    "run_cancellable_process",
 ]

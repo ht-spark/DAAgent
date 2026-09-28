@@ -261,6 +261,7 @@ def _merge_recovery_plan(
     return AnalysisPlan(
         objective=previous.objective,
         reasoning_summary=recovery.reasoning_summary,
+        model_reasoning=recovery.model_reasoning,
         todos=[*preserved, *revised],
     )
 

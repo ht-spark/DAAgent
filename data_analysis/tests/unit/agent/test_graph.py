@@ -32,7 +32,7 @@ class FakeSandbox:
         self.result = result if result is not None else {"ok": True}
         self.call_count = 0
 
-    def execute(self, tool, arguments) -> Any:
+    def execute(self, tool, arguments, **kwargs) -> Any:
         self.call_count += 1
         return self.result
 

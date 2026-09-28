@@ -62,6 +62,8 @@ class AnalysisPlan(BaseModel):
 
     objective: str
     reasoning_summary: str = ""
+    # 模型真实思考过程（reasoning_content / <think> 等），供前端展示
+    model_reasoning: str = ""
     todos: list[TodoItem] = Field(min_length=1, max_length=12)
 
     @field_validator("objective", "reasoning_summary")

@@ -9,6 +9,7 @@ from ..agent.loop import Action
 from ..agent.state import Observation
 from ..tools.registry import ToolNotFoundError, ToolRegistry
 from .execution_context import ExecutionContext
+from ..cancellation import TaskCancelledError, raise_if_cancelled
 from .sandbox import SandboxError, SubprocessSandbox
 
 __all__ = ["Harness"]
@@ -23,6 +24,7 @@ class Harness:
         sandbox: SubprocessSandbox | None = None,
         command_approval: Callable[[Action], bool] | None = None,
         execution_context: ExecutionContext | None = None,
+        cancel_check: Callable[[], bool] | None = None,
     ) -> None:
         """初始化执行框架。
 
@@ -31,11 +33,13 @@ class Harness:
             sandbox: subprocess 沙箱；缺省时创建默认实例。
             command_approval: 项目命令的一次性人工批准检查。
             execution_context: 当前 Run 可由工具自动继承的动态执行上下文。
+            cancel_check: 用户请求终止时返回 True，将打断工具执行。
         """
         self._registry = registry
         self._sandbox = sandbox or SubprocessSandbox()
         self._command_approval = command_approval
         self._execution_context = execution_context
+        self._cancel_check = cancel_check
 
     def execute(self, action: Action) -> Observation:
         """执行一个 Action 并始终转换为标准 Observation。
@@ -47,6 +51,7 @@ class Harness:
             包含结果、错误与耗时的标准化 Observation。
         """
         started_at = time.monotonic()
+        raise_if_cancelled(self._cancel_check)
         if action.tool_name == "run_project_command" and (
             self._command_approval is None or not self._command_approval(action)
         ):
@@ -74,13 +79,18 @@ class Harness:
                     context.update(context_override)
                 result = tool.handler(effective_action.arguments, context)
             elif context_override is None:
-                result = self._sandbox.execute(tool, effective_action.arguments)
+                result = self._sandbox.execute(
+                    tool, effective_action.arguments, cancel_check=self._cancel_check
+                )
             else:
                 result = self._sandbox.execute(
                     tool,
                     effective_action.arguments,
                     context_override=context_override,
+                    cancel_check=self._cancel_check,
                 )
+        except TaskCancelledError:
+            raise
         except (ToolNotFoundError, SandboxError, ValueError, RuntimeError) as exc:
             return Observation(
                 tool_name=action.tool_name,
