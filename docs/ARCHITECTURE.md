@@ -1,204 +1,276 @@
-# DAAgent — 架构说明
+# DAAgent 架构说明
 
-面向产品经理与数据分析师的 **RAG 智能体**：基于私有知识库的检索增强生成 + Agent 自主决策。核心能力是从用户上传的文档中检索相关知识、自主判断信息是否充分、多次检索后生成带引用的回答；同时可按需调用数据分析和建模工具。
+> 本文定义 DAAgent 的目标架构，并以 `data_analysis/` 的统一 Agent 运行时为核心。`scr/` 下的旧数学建模脚本不属于架构组成部分，后续会删除；本文不将其工作流、接口或状态模型视为系统能力。
 
-## 设计原则
+DAAgent 是一个以 LLM 为决策核心、以受限工具为执行边界的任务型数据分析与数学建模智能体。用户通过自然语言、数据附件、项目工作区和可选知识库发起任务；Agent 自主规划分析与建模路径，调用真实工具获得证据，最后交付可复核的结论、代码和文件产物。
 
-- **检索优先**：回答基于知识库中的真实内容，不依赖 LLM 参数化记忆
-- **Agent 自主决策**：LLM 自主决定是否检索、如何改写查询、检索几次、何时信息足够
-- **引用可追溯**：每个结论都能定位到源文档的具体片段
-- **现有代码零侵入**：复用 `KnowledgeBase/` 的检索管线和 `scr/` 的建模/执行能力
-- **Loop / ReAct / Harness 分离**：决策与执行解耦，独立测试、独立演进
+数学建模不是一套独立的后台流程或产品线，而是统一 Agent 可按需调用的一项工具能力。它与数据画像、动态代码、知识库检索、项目文件和联网搜索共同构成同一个工具集，并遵循同一套授权、执行、观测、取消和产物管理机制。
 
-## 与纯 RAG 的区别
+## 1. 设计目标与边界
 
-|            | 纯 RAG             | RAG Agent（本项目）                  |
-| ---------- | ------------------ | ------------------------------------ |
-| 流程       | 固定：检索 → 生成 | 动态：LLM 自主规划检索策略           |
-| 检索次数   | 一次               | 可多次，可改写查询，可交叉验证       |
-| 信息充分性 | 不判断             | LLM 自主评估"够不够，不够继续查"     |
-| 工具       | 只有检索           | 检索 + 数据分析 + 建模 + 可视化      |
-| 多跳推理   | 不支持             | "A 文档说 X，B 文档说 Y，对比得出 Z" |
+### 1.1 核心目标
 
-## 项目结构
-
-```
-data_analysis/
-├── ARCHITECTURE.md          ← 本文件
-│
-├── agent/                   #   Agent 决策编排层（大脑）
-│   ├── graph.py             #   驱动循环：串联 loop（决策）与 harness（执行）
-│   ├── loop.py              #   决策循环：LLM 推理 → 输出 Action（不执行）
-│   ├── state.py             #   Agent 状态：对话历史 + 检索结果 + 工具结果
-│   └── planner.py           #   复杂问题分解：将大问题拆成多跳检索子问题
-
-├── rag/                     # RAG 管线层（检索基础设施）
-│   ├── ingest/              #   文档摄入管线
-│   │   ├── loader.py        #     文档加载：PDF/DOCX/PPTX/MD/TXT/图片
-│   │   ├── parser.py        #     内容解析：MinerU 转 Markdown（公式/表格）
-│   │   ├── chunker.py       #     分块策略：语义分块 / 递归分块 / 按标题分块
-│   │   └── pipeline.py      #     摄入编排：加载→解析→分块→嵌入→入库
-│   ├── retrieve/            #   检索引擎
-│   │   ├── dense.py         #     稠密检索：BGE 语义向量
-│   │   ├── sparse.py        #     稀疏检索：BM25 关键词
-│   │   ├── hybrid.py        #     混合检索：双路召回 + RRF 融合
-│   │   ├── reranker.py      #     重排序：Cross-encoder 精排 Top-K
-│   │   └── query_rewrite.py #     查询改写（供 agent 调用，也可独立使用）
-│   ├── index/               #   索引管理
-│   │   ├── vector_store.py  #     向量存储：Qdrant 读写封装
-│   │   ├── embedding.py     #     嵌入模型：BGE 调用与批量编码
-│   │   └── index_manager.py #     索引生命周期：创建/更新/删除/重建
-│   └── schemas.py           #   RAG 数据模型：Document, Chunk, RetrievalResult, Citation
-│
-├── runtime/                 # Agent 运行时（身体）
-│   ├── harness.py           #   执行框架：Action → Observation（超时、重试、日志）
-│   ├── session.py           #   会话管理：多轮对话状态、上下文压缩
-│   ├── persistence.py       #   状态持久化：中断/恢复
-│   ├── streaming.py         #   流式输出：token 级流式 + 检索进度推送
-│   ├── interrupt.py         #   中断/恢复
-│   ├── queue.py             #   任务队列：并发调度
-│   ├── sandbox.py           #   沙箱执行：LLM 生成代码的隔离运行
-│   └── config.py            #   运行时配置：模型、检索参数、工具开关
-│
-├── gateway/                 # 模型网关层
-│   ├── router.py            #   模型路由：简单问答用小模型，复杂推理用大模型
-│   ├── fallback.py          #   降级策略：主模型超时自动切换备用
-│   ├── cache.py             #   缓存：相同查询的检索结果缓存 + LLM 响应缓存
-│   ├── ratelimit.py         #   限流
-│   └── metering.py          #   计量：token 用量与检索次数归属
-│
-├── memory/                  # 记忆系统
-│   ├── working.py           #   工作记忆：当前任务已检索的片段、已得出的中间结论
-│   ├── short_term.py        #   短期记忆：对话历史、用户偏好
-│   ├── long_term.py         #   长期记忆：用户过往分析、领域知识图谱
-│   └── episodic.py          #   情景记忆：历史检索轨迹，"上次类似问题查了什么"
-│
-├── observability/           # 可观测性
-│   ├── trace.py             #   追踪：完整链路（查询改写→检索→重排→生成）
-│   ├── metrics.py           #   指标：检索命中率、引用准确率、token 用量
-│   ├── logging.py           #   结构化日志
-│   └── dashboard.py         #   面板接口
-│
-├── security/                # 安全与权限
-│   ├── input_filter.py      #   输入过滤：prompt injection 检测
-│   ├── output_guard.py      #   输出审查：防泄露、防幻觉标记
-│   ├── permissions.py       #   权限：知识库级访问控制（不同用户看不同库）
-│   └── audit.py             #   操作审计
-│
-├── prompts/             #   Agent System Prompt 与工具描述模板
-│     ├── system.md        #     系统提示词（角色、检索策略、引用规范）
-│     ├── tool_descriptions.md  # 工具描述（供 LLM 选择工具时参考）
-│     ├── query_rewrite.md   #     查询改写提示词（同义扩展、多跳拆解）
-│     └── reflection.md    #     信息充分性自评（够不够？要不要再查？）
-│
-├── tools/                     # Agent 可调用的工具定义（schema + 描述，不含执行逻辑）
-│     ├── registry.py          # 工具注册与发现机制
-│     ├── retrieval_tools.py   # 知识库检索（核心工具）
-│     ├── data_tools.py        # 数据加载、画像、探索
-│     ├── viz_tools.py         # 图表生成
-│     ├── modeling_tool.py     # 触发建模工作流（包装 scr/math_modeling_agent）
-│     └── export_tools.py      # 导出报告（带引用的 Markdown / DOCX）
-│
-├── evaluation/              # 评测与质量
-│   ├── test_cases/          #   固定测试集：问题 + 期望引用 + 期望答案
-│   ├── runner.py            #   回归测试
-│   ├── retrieval_eval.py    #   检索质量评估：Recall@K, MRR, NDCG
-│   ├── faithfulness_eval.py #   忠实度评估：回答是否基于检索内容
-│   └── feedback.py          #   在线反馈
-│
-├── server/                  # API 服务层
-│   ├── app.py               #   FastAPI 入口
-│   ├── routes_chat.py       #   对话接口
-│   ├── routes_kb.py         #   知识库管理：上传文档、建索引、删库
-│   ├── routes_files.py      #   文件接口
-│   └── routes_admin.py      #   管理接口
-│
-└── web/                     # 前端界面
-    ├── chat/                #   对话界面：消息流 + 引用标注 + 检索过程可视化
-    ├── kb/                  #   知识库管理：文档上传、索引状态、检索测试
-    ├── dashboard/           #   任务面板
-    └── shared/              #   共享组件
+```text
+用户问题 + 数据/资料/项目上下文
+  → LLM 理解与规划
+  → 工具执行与观察
+  → 基于证据的再决策
+  → 结论、图表、代码和报告交付
 ```
 
-## 分层依赖关系
+- **问题驱动**：从用户的实际目标出发，不用预定义问题分类或固定分析模板限制模型。
+- **LLM 决策、工具求证**：LLM 决定是否建模、选择何种探索和验证路径；数据事实、拟合结果和文件内容必须来自工具观察结果。
+- **可控执行**：每个工具都只获得本次会话显式绑定的文件、工作区和输出目录；可能改变项目的命令必须由用户逐条批准。
+- **可追溯交付**：保留工具轨迹、来源、动态代码和产物清单，使关键结论可回到真实数据、资料或生成文件核验。
+- **连续协作**：会话历史经滚动压缩后参与后续追问；已产出的文件和已完成的 Todo 可以被后续决策复用。
 
-```
-web/ ──→ server/ ──→ agent/graph.py
-                         │
-              ┌──────────┼──────────┐
-              ▼          ▼          ▼
-         agent/loop  runtime/harness  memory/
-         (决策)      (执行)           (记忆)
-              │          │
-              ▼          ▼
-         agent/tools  runtime/sandbox
-              │
-    ┌─────────┼─────────┐
-    ▼         ▼         ▼
-  rag/     scr/      tools/
-  (检索)   (建模)    (代码执行)
-```
+### 1.2 产品边界
 
-- `agent/` 是决策核心，不直接执行工具；`runtime/harness.py` 负责安全执行
-- `rag/` 是检索基础设施，被 `agent/tools/retrieval_tools.py` 调用
-- `agent/tools/modeling_tool.py` 调用现有 `scr/` 的 `run_graph()`，不修改其内部
-- `server/` 和 `web/` 只与 `agent/graph.py` 交互
-- `observability/`、`security/`、`evaluation/` 横切所有层
+| 范围 | 当前定位 |
+| --- | --- |
+| 数据来源 | 以用户上传附件和用户登记的本地项目文件夹为主，不替代企业数仓、指标平台或实时 BI。 |
+| 数学建模 | 是 Agent 工具集的一部分，当前覆盖表格数值关系探索和回归建模；不作为独立竞赛建模工作流或论文生产流水线。 |
+| 知识库 | 为业务口径、文档资料和历史信息提供可选检索上下文；不是所有回答都必经的步骤。 |
+| 联网信息 | 仅在模型判断有必要且服务端已配置 Tavily 时检索，并在结果中保留来源。 |
+| 运行模式 | 本地优先、单机运行；当前采用路径授权与工作区隔离，不包含多用户认证、租户隔离或分布式队列。 |
+| 旧实现 | `scr/` 及其 LangGraph、质量门和独立运行管理是待移除的历史代码，不应被新功能依赖。 |
 
-## Agent Loop 与 Harness 的边界
+## 2. 总体架构
 
-```
-agent/loop.py（决策层 — 大脑）          runtime/harness.py（执行层 — 身体）
-─────────────────────────            ─────────────────────────
-"下一步该做什么？"                      "怎么安全地执行这个 action？"
-
-  组装 prompt（系统提示+对话+工具列表）    权限检查
-  调 LLM                              超时控制
-  解析输出 → Action(tool_name, args)   沙箱/隔离调用工具
-  或 Finish(answer)                   错误捕获与标准化
-  返回给 graph.py                     记录 trace 日志
-  （不自己执行）                        返回 Observation(result, error, duration)
-```
-
-驱动循环：
-
-```python
-while not done:
-    action = loop.step(state)              # agent/loop.py 决策
-    if action.is_finish:
-        break
-    observation = harness.execute(action)  # runtime/harness.py 执行
-    state.append(observation)              # 更新状态，进入下一轮
+```text
+┌──────────────────────────── React + Vite（web/）────────────────────────────┐
+│ Agent 对话 │ 项目工作区 │ 知识库 │ 文档转换 │ 设置 │ 产物与会话历史          │
+└─────────────────────────────────────┬───────────────────────────────────────┘
+                                      │ HTTP + NDJSON 流
+┌───────────────────────────── FastAPI（server/）─────────────────────────────┐
+│ 请求校验 │ 会话/项目 │ 附件准备 │ 流式事件 │ 预览/下载 │ 本地配置 │ 持久化    │
+└─────────────────────────────────────┬───────────────────────────────────────┘
+                                      │
+┌────────────────────── 统一 Agent 运行时（data_analysis/）───────────────────┐
+│ AgentState + Rolling Memory                                                  │
+│ Planner ──→ Todo 调度 ──→ AgentLoop（Action / Finish）                       │
+│                            │                                                  │
+│                            ▼                                                  │
+│                      Harness ──→ Observation ──→ 再决策                       │
+└─────────────────────────────┬───────────────────────────────────────────────┘
+                              │ 动态注册、受限执行的工具
+    ┌───────────────┬─────────┼──────────┬───────────┬─────────────┐
+    ▼               ▼         ▼          ▼           ▼             ▼
+数据画像/取行   数学建模工具  Python代码  文件/产物   项目工作区   知识库/联网
+                                      │                         │
+                                      ▼                         ▼
+                         受限子进程与安全工作区      Qdrant + BGE + BM25 + RRF
+                                      │                         │
+                             artifacts/、SQLite 会话与项目元数据
 ```
 
-**ReAct 是 loop 内的思考策略**（Thought → Action → Observation），不是独立模块。
+### 2.1 分层职责
 
-## RAG Agent 典型执行轨迹
+| 层 | 目录 | 责任 |
+| --- | --- | --- |
+| 前端 | `web/` | 提交消息和附件、展示 Agent 事件与产物、管理项目/会话/知识库、收集命令批准。前端不直接执行分析逻辑或访问本地文件系统。 |
+| 服务层 | `server/` | 验证 HTTP 请求、解析模型配置、准备授权上下文、管理流式运行和取消、提供受限预览及下载，并持久化项目和会话。 |
+| 决策层 | `data_analysis/agent/` | 通过 Planner 拆分目标，通过 AgentLoop 在每一步生成结构化 `Action` 或 `Finish`；不直接执行工具。 |
+| 执行层 | `data_analysis/runtime/` | 用 Harness 解析工具、执行批准检查、管理动态运行上下文、将结果统一为 `Observation`；用子进程隔离普通工具。 |
+| 工具层 | `data_analysis/tools/` | 实现数据、建模、代码、产物、附件、项目、知识库、视觉和联网能力，并通过注册表声明参数与运行上下文。 |
+| 知识基础设施 | `KnowledgeBase/` | 管理资料、Markdown 转换、结构化分块、本地向量索引和混合检索。 |
 
+### 2.2 关键依赖规则
+
+1. `web/` 只调用 `server/` 暴露的 API，不直接依赖 `data_analysis/` 或 `KnowledgeBase/`。
+2. `server/` 负责创建 `AgentState`、`ToolRegistry`、`Harness` 和流式运行；它不实现模型决策或数据分析算法。
+3. `AgentLoop`、`Planner` 只依赖工具规格和状态，不持有文件系统权限，也不得直接调用工具处理函数。
+4. 所有 Agent 工具必须通过 `ToolRegistry` 注册并由 `Harness` 执行；工具不能绕过授权上下文自行扩大可读写范围。
+5. `KnowledgeBase/` 是可复用基础设施，仅通过 `search_knowledge_base` 工具向 Agent 暴露检索能力。
+6. `scr/` 不是新依赖的目标；迁移或删除过程中，禁止向其中添加功能或从统一 Agent 运行时反向依赖它。
+
+## 3. 统一 Agent 运行时
+
+### 3.1 从请求到完成的主链路
+
+```text
+1. 用户提交消息、附件、项目 ID 与可选知识库 ID
+2. server/ 恢复会话并用 rolling memory 压缩历史
+3. server/ 准备受限输入路径、会话产物目录、项目 Python 环境和工具注册表
+4. Planner 生成有依赖关系的 Todo 列表
+5. 每个 Todo 使用 ReAct 循环：AgentLoop → Action → Harness → Observation
+6. 工具观察写回 Todo 状态、总状态和工作轨迹；LLM 据此继续决策
+7. Todo 全部完成后，AgentLoop 汇总结果，必要时继续工具核验
+8. server/ 保存用户消息、回答、来源、事件轨迹、产物和上下文用量
+9. 前端收到 done 事件并展示回答、引用、文件与运行过程
 ```
-用户: "我们产品的退款政策和竞品相比有什么优势？"
 
-第 1 轮
-  Loop:  思考"需要先查我们的退款政策"
-         → Action("retrieve", {"query": "产品退款政策", "kb": "internal"})
-  Harness: 混合检索 + 重排 → 返回 5 个片段（含引用）
+复杂任务的 Todo 可以声明依赖和预期输出。对于重复的同一工具失败，运行时按“工具名、参数、规范化错误”累计失败次数；达到熔断阈值后停止盲目重试，Planner 可以在限定次数内创建恢复计划。
 
-第 2 轮
-  Loop:  看到我们的政策，但缺竞品信息
-         → Action("retrieve", {"query": "竞品退款政策对比", "kb": "market"})
-  Harness: 检索市场资料库 → 返回 3 个片段
+### 3.2 Agent 状态与决策模型
 
-第 3 轮
-  Loop:  信息足够 → Finish("我们的优势是...[1][2]，竞品普遍...[3][4]")
-         引用标注：每个结论对应具体文档片段
+| 模块 | 职责 |
+| --- | --- |
+| `data_analysis/agent/state.py` | 定义 `AgentState`、`AnalysisPlan`、`TodoItem`、`Action`、`Finish`、`Observation`、工作轨迹和产物引用，并在边界处进行 Pydantic 校验。 |
+| `data_analysis/agent/planner.py` | 将用户目标和当前工具规格转换为至多 12 个可验收 Todo；处理工具反复失败后的恢复规划。 |
+| `data_analysis/agent/loop.py` | 组装系统提示、历史、当前任务和工具描述；解析 LLM 返回的 `action` 或 `finish`，并处理格式纠错与迭代上限。 |
+| `data_analysis/agent/graph.py` | 执行基本 ReAct 循环和 Plan-and-Execute 循环，将计划、Todo、动作、观察和完成状态作为事件输出。 |
+| `data_analysis/context/rolling_memory.py` | 对历史会话生成摘要与工具摘要，保留近期原文，从而控制多轮对话上下文规模。 |
+
+决策层对外只承诺结构化动作、可读摘要和最终答案；内部推理文本不是前端或工具之间的稳定数据契约。
+
+## 4. 工具架构
+
+### 4.1 动态注册与授权上下文
+
+`data_analysis/tools/registry.py` 中的 `create_agent_tool_registry()` 根据当前运行条件动态注册工具：
+
+- 数据附件决定是否注册数据画像、取行和数学建模工具。
+- 文本或图片附件决定是否注册读取、转换或视觉识读工具。
+- 选定知识库决定是否注册知识库检索工具。
+- Tavily 密钥存在时才注册联网检索工具；密钥只在服务端工具上下文中保存。
+- 绑定项目工作区时才注册项目文件读写、搜索和命令工具。
+
+工具规格中的名称、描述和 JSON Schema 可见给模型；绝对路径、API 密钥、输出路径和 Python 环境仅存在于 `RegisteredTool.context`，不会进入模型提示。
+
+### 4.2 工具分类
+
+| 工具类别 | 当前能力 | 典型约束 |
+| --- | --- | --- |
+| 数据理解 | `profile_data`、`inspect_data_rows` | 只能读取本次授权的数据文件；支持 CSV、Excel 等可画像表格。 |
+| 数学建模 | `explore_math_models` | 对授权表格进行两两函数关系发现，并可对指定目标列做多元线性拟合；返回公式、系数、R²、RMSE、特征重要性、结构结论与适用约束。 |
+| 动态分析 | `execute_python` | 运行时注入 `DATA_FILES`、`DATA_FILE_MAP`、`OUTPUT_DIR`、`ARTIFACTS`；模型将结构化结论写入全局 `result` 回传。 |
+| 产物复核 | `write_artifact`、`inspect_artifact`、`inspect_generated_image` | 产物仅能写入会话输出目录；支持 Markdown、DOCX、CSV、XLSX、JSON 与代码等格式。 |
+| 附件与项目 | 读附件、文档转 Markdown、读/搜/创建/精确编辑项目文件 | 上传附件与项目工作区是两个独立授权边界。 |
+| 项目命令 | `run_project_command` | 每条命令在前端获得一次性人工批准后才可执行。 |
+| 外部资料 | `search_knowledge_base`、`search_web` | 知识库仅查用户选择的库；联网来源随工具结果返回。 |
+
+### 4.3 数学建模工具的定位
+
+数学建模功能由 `data_analysis/tools/modeling_tool.py` 提供，是统一运行时的普通受限工具，而不是 Agent 的第二套图编排：
+
+```text
+AgentLoop 判断“需要发现变量关系或拟合模型”
+  → Action(explore_math_models, 参数)
+  → Harness 在受限上下文执行工具
+  → Observation 返回可序列化的建模证据
+  → AgentLoop 结合数据画像、实际行、代码验证或业务资料解释结果
 ```
 
-## 与现有模块的复用映射
+工具当前包含以下确定性能力：
 
-| 现有模块                       | 在本项目中的角色                                    | 改动           |
-| ------------------------------ | --------------------------------------------------- | -------------- |
-| `KnowledgeBase/` 检索管线    | 被`rag/retrieve/` 复用：混合检索（BGE+BM25+RRF）  | 封装为独立模块 |
-| `KnowledgeBase/` 摄入流程    | 被`rag/ingest/` 复用：MinerU 转换 + 分块 + 向量化 | 封装为独立模块 |
-| `scr/math_modeling_agent/`   | 被`agent/tools/modeling_tool.py` 按需调用         | 无             |
-| `scr/tools/code_executor.py` | 被`code_tools.py` 和 `runtime/sandbox.py` 复用  | 无             |
-| `scr/tools/md2docx.py`       | 被`export_tools.py` 复用                          | 无             |
+- 从可数值化字段中发现线性、二次/三次多项式、对数、指数和幂律关系，并按拟合质量排序。
+- 可选择一个目标列，依据相关性和共线性约束筛选特征，拟合多元普通最小二乘模型。
+- 返回样本量、缺失率、相关方向、公式、系数、R²、调整 R²、RMSE、特征重要性与建模限制。
+- 当样本不足、字段退化、列不适合函数变换或特征强共线时，显式返回限制，而非伪造模型结论。
+
+这项工具只负责可复现的数值探索。是否调用、如何进一步验证、如何把统计证据转换为业务或建模结论、以及是否生成报告，均由 Agent 在同一 ReAct 循环中决定。
+
+### 4.4 Harness、隔离与取消
+
+```text
+Action
+  → Harness：检查取消、解析工具、继承执行环境
+  → 命令工具：等待用户一次性批准
+  → 普通工具：SubprocessSandbox 子进程执行
+  → 成功/失败：统一为 Observation(result/error/duration_ms)
+  → 写回 AgentState，作为下一轮唯一工具事实来源
+```
+
+- `SubprocessSandbox` 限制工具超时、JSON 请求大小和返回大小，并以最小化环境变量启动子进程。
+- `execute_python` 使用独立解释器模式，并将临时文件、Matplotlib 和计算缓存限定在当前运行目录。
+- `ExecutionContext` 追踪当前项目 Python 环境；项目未发现可用环境时，不允许默认借用 Agent 宿主环境运行项目代码。
+- 取消请求会中断等待批准与子进程执行，并在事件流中返回取消状态。
+- 这些措施是应用层隔离，不等价于操作系统级强沙箱；因此项目命令必须保留人工批准环节。
+
+## 5. 服务层、会话与文件
+
+### 5.1 FastAPI 服务职责
+
+`server/main.py` 是统一 HTTP 入口：
+
+| API 组 | 主要职责 |
+| --- | --- |
+| 项目与工作区 | 登记本地项目、浏览受限文件树、预览文件、打开本地目录、创建项目会话。 |
+| Agent 对话 | 接收消息与附件、启动或重连 NDJSON 流、取消运行、提交项目命令批准、读取会话和产物。 |
+| 知识库 | 管理知识库、上传/转换/删除资料、启动分块和嵌入、查询处理状态。 |
+| 文档与设置 | 保存/转换文档、查询转换历史、保存模型及外部服务配置。 |
+
+Agent 对话采用 `application/x-ndjson` 流式事件，包含启动、计划、Todo、动作、观察、令牌、命令批准请求、取消、错误和完成等状态。服务端缓存已产生事件，使前端可以在连接中断后重连并回放。
+
+### 5.2 持久化边界
+
+```text
+SQLite（server/store.py）
+  projects      已登记项目根目录及显示元数据
+  sessions      对话会话及其所属项目
+  messages      用户消息、助手回答、压缩摘要与运行元数据
+
+文件系统
+  artifacts/agent_sessions/<discussion_id>/
+    input/      本会话上传附件
+    其他目录     Agent 生成的代码、数据、图表和报告
+  KnowledgeBase/
+    raw/、documents/、chunks/、qdrant_db/
+```
+
+SQLite 保存轻量元数据和对话文本；大文件、图表和报告保留在文件系统。助手消息元数据包括运行 ID、事件轨迹、知识来源、产物清单、工作轨迹与上下文用量，因此历史会话能重新展示过程，但不把历史工具输出重新当作未验证的新事实。
+
+### 5.3 文件安全
+
+- 附件上传后被复制到会话独立 `input/` 目录，后续工具只能使用服务端恢复的授权路径。
+- `ArtifactWorkspace` 拒绝绝对路径、空路径、`..` 路径穿越以及写入 `input/`、`.runs/` 等受保护区域；默认禁止覆盖产物。
+- 项目工具必须先通过项目根解析路径；预览和下载接口同样在项目根或会话产物根内做边界校验。
+- 前端只能使用服务端给出的预览或下载 API，不直接拼接本地文件路径。
+
+## 6. 知识库架构
+
+知识库是统一 Agent 的可选信息工具，由 `KnowledgeBase/` 实现：
+
+```text
+上传原始文件 / ZIP
+  → 原件归档与上传清单
+  → MinerU 转 Markdown（Markdown 可直接进入下一步）
+  → 按标题结构构造句子窗口分块
+  → 本地 BGE 嵌入
+  → Qdrant 持久化向量
+
+search_knowledge_base(query)
+  → 稠密向量召回 + BM25 稀疏召回
+  → RRF 融合并按所选知识库过滤
+  → 返回内容、上下文窗口、来源文件、文档 ID、知识库 ID 和相关分数
+```
+
+知识库目录使用稳定 ID 管理知识库和文档。分块保留来源文件、文档标题、标题路径、原句、上下文窗口和序号，确保 Agent 的回答能附带可定位来源。删除资料或知识库时，应同步清除清单、原件、转换文件和关联向量，并基于剩余资料重建分块。
+
+## 7. 前端架构
+
+`web/` 使用 React、TypeScript 与 Vite。前端的核心界面是统一 Agent 对话：它提交问题、附件、项目和知识库选择，消费事件流，并渲染回答、工具过程、来源、产物和命令批准弹窗。
+
+| 区域 | 责任 |
+| --- | --- |
+| `web/src/pages/NewChat.tsx` | Agent 对话、附件、工具轨迹、知识库来源、产物和项目文件预览。 |
+| `web/src/pages/KnowledgeBase*.tsx` | 知识库、资料上传、转换、分块嵌入和处理状态。 |
+| `web/src/pages/DocConverter.tsx` | 通用文档转换及历史记录。 |
+| `web/src/components/Sidebar.tsx` | 项目、会话与页面导航。 |
+| `web/src/components/CommandApprovalDialog.tsx` | 展示待执行项目命令，要求用户明确批准或拒绝。 |
+| `web/src/api.ts` | API 客户端、NDJSON 事件解析、流式重连与前端数据类型。 |
+
+任何仍直接面向旧 `scr/` 数学建模运行的页面、API 类型或任务面板都属于迁移删除范围，不应作为统一 Agent 前端的长期契约。
+
+## 8. 外部依赖与配置
+
+| 依赖 | 用途 | 边界 |
+| --- | --- | --- |
+| OpenAI 兼容 Chat Model | Planner、AgentLoop、可选视觉识读。 | 支持 OpenAI、DeepSeek 或兼容 endpoint；模型配置经服务端解析。 |
+| Tavily | Agent 按需查询公开网络资料。 | 密钥只保存在服务端设置并注入工具上下文。 |
+| MinerU | 将非 Markdown 知识库资料转换为 Markdown。 | 仅在用户显式触发转换时使用。 |
+| BGE + Qdrant | 本地嵌入与混合检索。 | 模型、分块与索引位于 `KnowledgeBase/`。 |
+| Python 数据生态 | pandas、numpy、scipy、scikit-learn、matplotlib、seaborn 等。 | 用于确定性工具和 Agent 代码执行；项目代码使用已解析的项目环境。 |
+
+## 9. 测试与演进约束
+
+测试位于 `tests/unit/` 和 `data_analysis/tests/unit/`，应重点覆盖 LLM 与工具的 Schema 边界、授权路径、工具执行、建模结果、会话压缩、流式事件和服务 API。LLM、视觉和网络调用必须 mock，测试不得依赖真实 API Key。
+
+后续开发需遵守：
+
+1. 新的分析或建模能力优先实现为 `data_analysis/tools/` 中的受限工具，再由 LLM 决定何时调用；不要新建第二套专用 Agent 图或固定工作流。
+2. 工具的输入输出须为明确、可序列化且可测试的 Schema；发现适用性限制时返回限制与证据，不能以生成文本掩盖失败。
+3. 所有文件读写、代码执行和项目命令都必须从服务端授权上下文获取路径与环境，不能让模型任意指定宿主机资源。
+4. API、工具参数或 NDJSON 事件变动时，必须同步更新 `web/src/api.ts`、相关界面和单元测试。
+5. 删除 `scr/` 时，应同时删除其独立接口、运行管理、前端入口和测试；如其中某项可复用能力仍有价值，应先迁入 `data_analysis/` 或 `KnowledgeBase/`，并纳入统一工具注册表和测试体系。
