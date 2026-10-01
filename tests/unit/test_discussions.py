@@ -53,10 +53,17 @@ def test_discussion_title_is_user_supplied_and_can_be_renamed():
 def test_saved_discussion_retains_attachment_context():
     attachments = [{"kind": "text", "name": "data.json", "content": '{"x": 1}'}]
     discussion_id = discussions.save_discussion_message(
-        None, "分析附件", "已分析", [], attachments=attachments
+        None,
+        "分析附件",
+        "已分析",
+        [],
+        attachments=attachments,
+        attachment_context="字段 x，取值 1",
     )
 
-    assert discussions.get_discussion(discussion_id)["messages"][0]["attachments"] == attachments
+    message = discussions.get_discussion(discussion_id)["messages"][0]
+    assert message["attachments"] == attachments
+    assert message["metadata"]["attachment_context"] == "字段 x，取值 1"
 
 
 def test_saved_agent_discussion_retains_mode_and_trace():

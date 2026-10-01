@@ -211,7 +211,10 @@ def test_graph_stops_at_loop_iteration_limit(tmp_path) -> None:
 
     assert state.iteration == 2
     assert len(state.observations) == 2
-    assert sandbox.call_count == 2
+    # 第二次是参数完全相同的重复调用：运行时直接拦截，工具不再真正执行
+    assert sandbox.call_count == 1
+    assert state.observations[1].success is False
+    assert "重复调用已拦截" in (state.observations[1].error or "")
     assert state.messages == []
 
 

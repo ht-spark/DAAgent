@@ -44,6 +44,7 @@ def test_collect_tool_digests_from_trace_and_notes() -> None:
                         "tool_name": "execute_python",
                         "success": False,
                         "summary": {"err": "boom"},
+                        "error": "SyntaxError: invalid syntax",
                     },
                 ],
             },
@@ -54,7 +55,27 @@ def test_collect_tool_digests_from_trace_and_notes() -> None:
 
     assert "inspect_data_rows: 150行" in digests
     assert "profile_data: rows=150, missing=0" in digests
-    assert "execute_python" not in digests
+    # 失败证据同样进入摘要，避免重规划重复踩同一个坑
+    assert "失败 execute_python: err=boom（SyntaxError: invalid syntax）" in digests
+
+
+def test_collect_tool_digests_includes_trajectory_failures() -> None:
+    entries = [
+        {
+            "role": "assistant",
+            "content": "上一轮尝试过。",
+            "seq": 2,
+            "metadata": {
+                "work_trajectory": {
+                    "failures": ["execute_python report.py: KeyError: 'sales'"],
+                },
+            },
+        }
+    ]
+
+    digests = _collect_tool_digests(entries)
+
+    assert "execute_python report.py: KeyError: 'sales'" in digests
 
 
 def test_generate_summary_prompt_includes_tool_observations() -> None:

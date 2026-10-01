@@ -1,4 +1,5 @@
-import { useEffect } from 'react'
+import { useEffect, useRef } from 'react'
+import { pushModalLayer } from '../modalLayer'
 
 type Props = {
   open: boolean
@@ -26,19 +27,15 @@ export default function ConfirmDialog({
   onConfirm,
   onCancel,
 }: Props) {
+  // onCancel 多为内联箭头函数，用 ref 取最新值，避免每次渲染重新注册模态层
+  const onCancelRef = useRef(onCancel)
+  onCancelRef.current = onCancel
+
+  // 压入模态层：统一处理页面滚动锁，且 Esc 只作用于最上层弹窗
   useEffect(() => {
     if (!open) return
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onCancel()
-    }
-    window.addEventListener('keydown', onKey)
-    const prev = document.body.style.overflow
-    document.body.style.overflow = 'hidden'
-    return () => {
-      window.removeEventListener('keydown', onKey)
-      document.body.style.overflow = prev
-    }
-  }, [open, onCancel])
+    return pushModalLayer(() => onCancelRef.current())
+  }, [open])
 
   if (!open) return null
 

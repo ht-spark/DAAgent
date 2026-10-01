@@ -23,6 +23,17 @@ import {
   type ProjectFileNode,
 } from '../api'
 import { loadConfigs, type ApiConfig } from '../apiConfigs'
+import {
+  TODO_STATUS_LABELS,
+  countTodoStates,
+  deriveTodoStates,
+  latestAgentPlan,
+  summarizeTodoObjective,
+  type AgentPlan,
+  type TodoStateMap,
+  type TodoStatus,
+} from '../agentTasks'
+import AgentTrace from '../components/AgentTrace'
 import CommandApprovalDialog from '../components/CommandApprovalDialog'
 import MarkdownContent from '../components/MarkdownContent'
 import ChatModeling from './ChatModeling'
@@ -126,36 +137,6 @@ const CLIPBOARD_IMAGE_EXTENSIONS: Record<string, string> = {
   'image/jpeg': 'jpg',
   'image/png': 'png',
   'image/webp': 'webp',
-}
-
-const MAX_OBSERVATION_ERROR_LENGTH = 220
-
-function summarizeObservationError(error: string | null | undefined): string {
-  if (!error) return '未提供错误详情'
-
-  const errorSection = error
-    .split(/(?:---\s*)?(?:执行|运行)输出(?:\s*---)?\s*[:：]?/i, 1)[0]
-    .trim()
-  const errorLines = errorSection.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
-  const coreError = (errorLines.length > 1 ? errorLines[errorLines.length - 1] : errorSection)
-    ?.replace(/\s+/g, ' ')
-    .trim() || ''
-  if (!coreError) return '运行输出过长，已隐藏具体内容'
-  if (coreError.length <= MAX_OBSERVATION_ERROR_LENGTH) return coreError
-  return `${coreError.slice(0, MAX_OBSERVATION_ERROR_LENGTH).trimEnd()}…`
-}
-
-function describeObservation(event: Extract<AgentTraceEvent, { type: 'agent_observation' }>): string {
-  if (!event.success) return summarizeObservationError(event.error)
-  const summary = event.summary
-  if (!summary) return `工具执行完成，耗时 ${event.duration_ms} ms`
-  if (typeof summary.match_count === 'number') {
-    return `知识库命中 ${summary.match_count} 个相关片段，耗时 ${event.duration_ms} ms`
-  }
-  const missingRate = typeof summary.missing_rate === 'number'
-    ? `，缺失率 ${(summary.missing_rate * 100).toFixed(1)}%`
-    : ''
-  return `${summary.file_count ?? 0} 个文件，${summary.table_count ?? 0} 张表，${summary.row_count ?? 0} 行，${summary.column_count ?? 0} 列${missingRate}`
 }
 
 /** 收集目录路径，用于「全部展开 / 全部收起」 */
@@ -759,175 +740,131 @@ function ProjectFileExplorer({
   )
 }
 
-const AgentInlineProcess = memo(function AgentInlineProcess({
-  trace,
-  running,
+
+/**
+ * 输入框上方的任务卡片：按执行计划逐条列出任务，可展开或收起。
+ * 收起后保留标题栏，用户随时能重新展开查看当前进度。
+ */
+const AgentTaskCard = memo(function AgentTaskCard({
+  plan,
+  todoState,
+  working,
 }: {
-  trace: AgentTraceEvent[]
-  running: boolean
+  plan: AgentPlan
+  todoState: TodoStateMap
+  /** Agent 是否仍在推进计划，用于标题栏的“进行中”文案与状态点动画 */
+  working: boolean
 }) {
-  const plan = trace.reduce<
-    Extract<AgentTraceEvent, { type: 'agent_plan' }> | undefined
-  >((latest, event) => event.type === 'agent_plan' ? event : latest, undefined)
-  const todoState = new Map<string, {
-    status: 'pending' | 'in_progress' | 'completed' | 'failed'
-  }>()
-  plan?.todos.forEach((todo) => todoState.set(todo.id, { status: 'pending' }))
-  trace.forEach((event) => {
-    if (event.type === 'agent_todo_started') {
-      todoState.set(event.todo_id, { status: 'in_progress' })
-    }
-    if (event.type === 'agent_todo_completed') {
-      todoState.set(event.todo_id, { status: 'completed' })
-    }
-    if (event.type === 'agent_todo_failed') {
-      todoState.set(event.todo_id, { status: 'failed' })
-    }
-  })
-  const completedCount = plan?.todos.filter(
-    (todo) => todoState.get(todo.id)?.status === 'completed',
-  ).length ?? 0
-  const progress = plan?.todos.length
-    ? Math.round((completedCount / plan.todos.length) * 100)
-    : 0
-  const activityTrace = trace.filter(
-    (event) => !['agent_plan', 'agent_todo_started', 'agent_todo_completed', 'agent_todo_failed'].includes(event.type),
-  )
+  const [collapsed, setCollapsed] = useState(false)
+  // 每次重新规划（新任务/新计划）时自动展开，让用户看到最新任务列表
+  const planKeyRef = useRef('')
+  const planKey = `${plan.objective}|${plan.todos.map((todo) => todo.id).join('|')}`
+  useEffect(() => {
+    if (planKeyRef.current === planKey) return
+    planKeyRef.current = planKey
+    setCollapsed(false)
+  }, [planKey])
+
+  const items = plan.todos.map((todo) => ({
+    id: todo.id,
+    objective: todo.objective,
+    status: todoState[todo.id] ?? ('pending' as TodoStatus),
+  }))
+  const total = items.length
+  const completedCount = items.filter((item) => item.status === 'completed').length
+  const failedCount = items.filter((item) => item.status === 'failed').length
+  const runningCount = items.filter((item) => item.status === 'in_progress').length
+  const pendingCount = items.filter((item) => item.status === 'pending').length
+  const progress = total ? Math.round((completedCount / total) * 100) : 0
+  const panelId = 'agent-task-card-list'
+
+  /**
+   * 标题栏摘要：运行中优先看进行中的任务，结束后看整体完成度。
+   * “进行中”只在摘要或后置高亮片段里出现一次，避免重复。
+   */
+  const summary = working && runningCount > 0
+    ? `任务 ${runningCount} 进行中 · ${pendingCount} 待处理`
+    : `任务 ${completedCount}/${total} 已完成`
+  const summaryDetail = working && runningCount > 0
+    ? ''
+    : failedCount > 0
+      ? `· ${failedCount} 失败`
+      : runningCount > 0
+        ? `· ${runningCount} 进行中`
+        : ''
 
   return (
-    <div className={`agent-inline-process ${running ? 'is-running' : ''}`}>
-      <div className="agent-inline-steps">
-        {plan && (
-          <details className="agent-thought-details">
-            <summary>
-              <span>规划思考</span>
-              <small>{plan.todos.length} 个任务</small>
-            </summary>
-            <p>
-              {plan.reasoning_summary?.trim()
-                || `已根据目标拆分为 ${plan.todos.length} 个可执行任务，并按依赖关系安排执行顺序。`}
-            </p>
-            {plan.model_reasoning?.trim() && (
-              <div className="agent-model-reasoning">
-                <p className="agent-model-reasoning-label">深度思考</p>
-                <p className="agent-model-reasoning-text">{plan.model_reasoning}</p>
-              </div>
-            )}
-          </details>
-        )}
-        {activityTrace.map((event, index) => (
-          <div
-            className={`agent-inline-step ${event.type}`}
-            key={`${event.type}-${index}`}
-          >
-            {event.type === 'agent_started' ? (
-              <p className="agent-inline-activity">
-                {event.files.length ? `已查看 ${event.files.length} 个附件` : '已开始处理任务'}
-              </p>
-            ) : event.type === 'agent_action' ? (
-              <>
-                <details className="agent-thought-details">
-                  <summary>
-                    <span>行动思考</span>
-                    <small>{event.tool_name}</small>
-                  </summary>
-                  <p>{event.thought || '正在判断下一步操作。'}</p>
-                  {event.model_reasoning?.trim() && (
-                    <div className="agent-model-reasoning">
-                      <p className="agent-model-reasoning-label">深度思考</p>
-                      <p className="agent-model-reasoning-text">{event.model_reasoning}</p>
-                    </div>
-                  )}
-                </details>
-                <p className="agent-inline-activity">调用了工具 · {event.tool_name}</p>
-                {event.code && (
-                  <details className="agent-inline-code">
-                    <summary>查看本轮 Python 代码</summary>
-                    <pre><code>{event.code}</code></pre>
-                  </details>
-                )}
-              </>
-            ) : event.type === 'agent_command_approval_required' ? (
-              <p className="agent-inline-activity">等待人工批准 · {event.command}</p>
-            ) : event.type === 'agent_command_approval_decision' ? (
-              <p className="agent-inline-activity">{event.approved ? '已批准命令' : '已拒绝命令'}</p>
-            ) : event.type === 'agent_reasoning' ? (
-              <details className="agent-thought-details">
-                <summary><span>阶段思考</span></summary>
-                {event.summary?.trim() && <p>{event.summary}</p>}
-                {event.model_reasoning?.trim() && (
-                  <div className="agent-model-reasoning">
-                    <p className="agent-model-reasoning-label">深度思考</p>
-                    <p className="agent-model-reasoning-text">{event.model_reasoning}</p>
-                  </div>
-                )}
-              </details>
-            ) : (
-              <>
-                <p className={`agent-inline-activity ${event.success ? '' : 'failed'}`}>
-                  {event.success ? '完成了工具' : '工具执行失败'} · {event.tool_name} · {describeObservation(event)}
-                </p>
-                {event.details && (
-                  <details className="agent-inline-code">
-                    <summary>查看命令输出或文件差异</summary>
-                    <pre><code>{event.details}</code></pre>
-                  </details>
-                )}
-              </>
-            )}
-          </div>
-        ))}
-        {running && <p className="agent-inline-activity is-running">正在继续分析…</p>}
+    <section
+      className={`agent-task-card${collapsed ? ' is-collapsed' : ''}`}
+      aria-label="任务列表"
+    >
+      <header className="agent-task-head">
+        <button
+          type="button"
+          className="agent-task-toggle"
+          aria-expanded={!collapsed}
+          aria-controls={panelId}
+          onClick={() => setCollapsed((value) => !value)}
+          title={collapsed ? '展开任务列表' : '收起任务列表'}
+        >
+          <span className="agent-task-icon" aria-hidden="true">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9">
+              <path d="M9.5 6.5h10M9.5 12h10M9.5 17.5h10" strokeLinecap="round" />
+              <path d="M4 6.5l1.4 1.4L7.8 5.4M4 12l1.4 1.4L7.8 10.9M4 17.5l1.4 1.4L7.8 16.4" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </span>
+          <span className="agent-task-title">
+            <span className="agent-task-kicker">任务</span>
+            <span className="agent-task-summary" aria-live="polite">
+              {summary}
+              {summaryDetail && <em>{summaryDetail}</em>}
+            </span>
+          </span>
+        </button>
+        <button
+          type="button"
+          className="agent-task-chevron"
+          aria-expanded={!collapsed}
+          aria-controls={panelId}
+          onClick={() => setCollapsed((value) => !value)}
+          title={collapsed ? '展开任务列表' : '收起任务列表'}
+          aria-label={collapsed ? '展开任务列表' : '收起任务列表'}
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+            <path d="M6 9.5l6 6 6-6" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        </button>
+      </header>
+      {/* 进度条始终显示，收起后仍能看出整体推进程度 */}
+      <div
+        className="agent-task-progress"
+        role="progressbar"
+        aria-label="任务完成进度"
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={progress}
+      >
+        <span style={{ width: `${progress}%` }} />
       </div>
-      {plan && (
-        <section className="agent-plan-card" aria-label="任务执行计划">
-          <header className="agent-plan-head">
-            <div>
-              <p className="agent-plan-label">执行计划</p>
-              <h3>{plan.objective}</h3>
-            </div>
-            <p className="agent-plan-count" aria-live="polite">
-              {completedCount}/{plan.todos.length}
-            </p>
-          </header>
-          <div
-            className="agent-plan-progress"
-            role="progressbar"
-            aria-label="计划完成进度"
-            aria-valuemin={0}
-            aria-valuemax={100}
-            aria-valuenow={progress}
-          >
-            <span style={{ width: `${progress}%` }} />
-          </div>
-          <ol className="agent-plan-list">
-            {plan.todos.map((todo, index) => {
-              const state = todoState.get(todo.id) ?? { status: 'pending' as const }
-              const statusLabel = state.status === 'completed'
-                ? '已完成'
-                : state.status === 'in_progress'
-                  ? '进行中'
-                  : state.status === 'failed'
-                    ? '失败'
-                    : '等待中'
-              return (
-                <li
-                  className={`agent-plan-item is-${state.status}`}
-                  key={todo.id}
-                  aria-current={state.status === 'in_progress' ? 'step' : undefined}
-                >
-                  <span className="agent-plan-index" aria-hidden="true">{index + 1}</span>
-                  <div className="agent-plan-row">
-                    <p>{todo.objective}</p>
-                    <span className="agent-plan-status">{statusLabel}</span>
-                  </div>
-                </li>
-              )
-            })}
-          </ol>
-        </section>
+      {!collapsed && (
+        <ol className="agent-task-list" id={panelId}>
+          {items.map((item) => (
+            <li
+              className={`agent-task-item is-${item.status}`}
+              key={item.id}
+              aria-current={item.status === 'in_progress' ? 'step' : undefined}
+            >
+              {/* 任务不使用序号标记，仅用状态圆点区分进行中/已完成/失败 */}
+              <span className="agent-task-dot" aria-hidden="true" />
+              <p className="agent-task-objective" title={item.objective}>
+                {summarizeTodoObjective(item.objective)}
+              </p>
+              <span className="agent-task-status">{TODO_STATUS_LABELS[item.status]}</span>
+            </li>
+          ))}
+        </ol>
       )}
-    </div>
+    </section>
   )
 })
 
@@ -973,9 +910,14 @@ const KnowledgeSourcePanel = memo(function KnowledgeSourcePanel({
 const ChatMessage = memo(function ChatMessage({
   message,
   running = false,
+  plan,
+  todoState,
 }: {
   message: Message
   running?: boolean
+  /** 当前讨论的执行计划与任务状态（由父组件统一推导，避免每条消息重复计算） */
+  plan?: AgentPlan
+  todoState?: TodoStateMap
 }) {
   if (!message.content && !message.trace?.length) return null
   const sources = message.sources?.length
@@ -988,7 +930,12 @@ const ChatMessage = memo(function ChatMessage({
         {message.role === 'assistant' ? (
           <div className="rag-answer">
             {message.trace && message.trace.length > 0 && (
-              <AgentInlineProcess trace={message.trace} running={running} />
+              <AgentTrace
+                trace={message.trace}
+                running={running}
+                plan={plan}
+                todoState={todoState}
+              />
             )}
             {message.content && <MarkdownContent content={message.content} />}
             {sources.length > 0 && <KnowledgeSourcePanel sources={sources} />}
@@ -1036,6 +983,16 @@ export default function NewChat({
   const [files, setFiles] = useState<File[]>([])
   const [title, setTitle] = useState('新讨论')
   const [agentTrace, setAgentTrace] = useState<AgentTraceEvent[]>([])
+  // 当前讨论的执行计划与任务状态：驱动输入框上方的任务卡片
+  const agentPlan = useMemo(() => latestAgentPlan(agentTrace), [agentTrace])
+  const agentTodoState = useMemo(
+    () => deriveTodoStates(agentPlan, agentTrace),
+    [agentPlan, agentTrace],
+  )
+  const agentPlanCounts = useMemo(
+    () => countTodoStates(agentPlan, agentTodoState),
+    [agentPlan, agentTodoState],
+  )
   // 右侧项目文件面板默认收起，由顶部按钮开关
   const [sourcesCollapsed, setSourcesCollapsed] = useState(true)
   const [projectSidebarWidth, setProjectSidebarWidth] = useState(loadProjectSidebarWidth)
@@ -1502,6 +1459,8 @@ export default function NewChat({
                   key={`${message.role}-${index}`}
                   message={message}
                   running={isSubmitting && index === messages.length - 1}
+                  plan={agentPlan}
+                  todoState={agentTodoState}
                 />
               ))}
               {messages.length === 0 && (
@@ -1528,6 +1487,14 @@ export default function NewChat({
           </div>
 
           <div className="rag-composer-wrap">
+            {agentPlan && (
+              // 任务卡片固定在输入框上方，可展开/收起查看完整任务列表
+              <AgentTaskCard
+                plan={agentPlan}
+                todoState={agentTodoState}
+                working={isSubmitting && (agentPlanCounts.inProgress > 0 || agentPlanCounts.pending > 0)}
+              />
+            )}
             {approval ? (
               <CommandApprovalDialog
                 command={approval.command}

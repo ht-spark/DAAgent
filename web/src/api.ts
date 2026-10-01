@@ -529,6 +529,8 @@ export type AgentTraceEvent = {
   model_reasoning?: string
   tool_name: string
   code?: string
+  /** 摘要类短参数（路径、命令、查询词等），用于生成单行轨迹摘要 */
+  arguments?: Record<string, string>
 } | {
   type: 'agent_reasoning'
   summary: string

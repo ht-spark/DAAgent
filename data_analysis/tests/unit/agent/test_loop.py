@@ -21,6 +21,13 @@ from data_analysis.agent.loop import (
     parse_decision,
     split_think_blocks,
 )
+from data_analysis.agent.state import AgentState, RunBudget, WorkTrajectory
+
+
+def _context_payload(messages: list[tuple[str, str]]) -> dict[str, Any]:
+    """从最后一条决策消息中取出状态 JSON。"""
+    text = messages[-1][1]
+    return json.loads(text[text.index("{"):])
 
 
 class FakeLlm:
@@ -131,6 +138,25 @@ def test_parse_decision_accepts_unescaped_newlines_in_answer() -> None:
 
     assert isinstance(decision, Finish)
     assert "共 10 行" in decision.answer
+
+
+def test_parse_decision_recovers_finish_with_unescaped_quotes() -> None:
+    decision = parse_decision(
+        '{"type":"finish","thought":"分析完成","answer":"字段 "numclicks" '
+        '呈长尾分布，建议使用 "log1p" 变换。"}'
+    )
+
+    assert isinstance(decision, Finish)
+    assert decision.answer == '字段 "numclicks" 呈长尾分布，建议使用 "log1p" 变换。'
+
+
+def test_parse_decision_recovers_finish_missing_final_brace() -> None:
+    decision = parse_decision(
+        '{"type":"finish","thought":"分析完成","answer":"数据画像已完成。"'
+    )
+
+    assert isinstance(decision, Finish)
+    assert decision.answer == "数据画像已完成。"
 
 
 def test_parse_decision_rejects_multiple_decision_objects() -> None:
@@ -260,6 +286,105 @@ def test_build_messages_exposes_runtime_attachment_paths() -> None:
     assert '"file_name": "sales.csv"' in context
     expected_path = str(Path("D:/private/uploads/sales.csv").resolve(strict=False))
     assert json.dumps(expected_path) in context
+
+
+def test_build_messages_budgets_observations_into_recent_and_digests() -> None:
+    """最近的观察完整保留，更早的折叠成一行摘要，避免单次 run 撑爆窗口。"""
+    loop = AgentLoop(FakeLlm('{"type":"finish","answer":"完成"}'), [], "系统规则")
+    observations = [
+        {"tool_name": "profile_data", "success": True, "result": {"summary": f"rows={index}"}}
+        for index in range(12)
+    ]
+
+    payload = _context_payload(loop.build_messages(FakeState(observations=observations)))
+    projected = payload["observations"]
+
+    assert len(projected["recent"]) == 8
+    assert projected["earlier_digests"][0] == "profile_data: rows=0"
+    assert "rows=0" not in json.dumps(projected["recent"], ensure_ascii=False)
+
+
+def test_build_messages_folds_digests_that_exceed_the_budget() -> None:
+    """单条观察过大时，更早的完整观察要降级为摘要行。"""
+    loop = AgentLoop(FakeLlm('{"type":"finish","answer":"完成"}'), [], "系统规则")
+    observations = [
+        {"tool_name": "read_attachment_file", "success": True, "result": "甲" * 9000}
+        for _ in range(8)
+    ]
+
+    payload = _context_payload(loop.build_messages(FakeState(observations=observations)))
+    projected = payload["observations"]
+
+    assert len(projected["recent"]) < 8
+    assert projected["earlier_digests"]
+
+
+def test_build_messages_includes_work_trajectory_view() -> None:
+    """内层 ReAct 也要看到已读文件、关键决定与失败要点。"""
+    trajectory = WorkTrajectory()
+    trajectory.add_read("data/sales.csv")
+    trajectory.add_note("profile_data: rows=150")
+    trajectory.add_failure("execute_python a.py: SyntaxError")
+    state = AgentState(user_query="继续分析", work_trajectory=trajectory)
+
+    payload = _context_payload(
+        AgentLoop(FakeLlm('{"type":"finish","answer":"完成"}'), [], "系统规则").build_messages(state)
+    )
+
+    assert payload["work_trajectory"]["files_read"] == ["data/sales.csv"]
+    assert payload["work_trajectory"]["notes"] == ["profile_data: rows=150"]
+    assert payload["work_trajectory"]["failures"] == ["execute_python a.py: SyntaxError"]
+
+
+def test_build_messages_keeps_newest_observation_verbatim() -> None:
+    """刚拿到的工具结果必须原样进入上下文，不能被运行时静默裁剪。"""
+    loop = AgentLoop(FakeLlm('{"type":"finish","answer":"完成"}'), [], "系统规则")
+    content = "题目正文" * 500
+    observations = [
+        {
+            "tool_name": "read_attachment_file",
+            "success": True,
+            "result": {"content": content, "truncated": False},
+        }
+    ]
+
+    payload = _context_payload(loop.build_messages(FakeState(observations=observations)))
+    result = payload["observations"]["recent"][0]["result"]
+
+    assert result["content"] == content
+    assert result["truncated"] is False
+
+
+def test_single_oversized_observation_is_clipped_with_explanation() -> None:
+    """只有单条结果自身超预算时才裁剪，且必须说明是运行时截断并保留头尾。"""
+    loop = AgentLoop(FakeLlm('{"type":"finish","answer":"完成"}'), [], "系统规则")
+    observations = [
+        {
+            "tool_name": "read_attachment_file",
+            "success": True,
+            "result": {"content": "甲" * 40_000},
+        }
+    ]
+
+    payload = _context_payload(loop.build_messages(FakeState(observations=observations)))
+    clipped = payload["observations"]["recent"][0]["result"]["content"]
+
+    assert len(clipped) <= 8_000
+    assert "运行时已按上下文预算截断" in clipped
+    assert clipped.startswith("甲")
+    assert clipped.endswith("甲")
+
+
+def test_step_respects_shared_run_budget() -> None:
+    """整轮 run 共享的预算耗尽后不应再调用模型。"""
+    llm = FakeLlm('{"type":"finish","answer":"不应调用"}')
+    loop = AgentLoop(llm, [], "优先检索。", max_iterations=2)
+    state = AgentState(user_query="继续分析", run_budget=RunBudget(iterations=2))
+
+    with pytest.raises(IterationLimitError):
+        loop.step(state)
+
+    assert llm.messages == []
 
 def test_split_think_blocks_extracts_paired_thinking_tags() -> None:
     thinking, body = split_think_blocks(

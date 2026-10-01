@@ -51,6 +51,30 @@ async def test_agent_chat_run_replays_events_after_subscriber_disconnect():
 
 
 @pytest.mark.asyncio
+async def test_agent_chat_run_cleans_temporary_attachments(monkeypatch, tmp_path):
+    """后台运行结束后应删除本轮上传原文件。"""
+    runtime_root = tmp_path / "agent_uploads"
+    run_dir = runtime_root / "run-cleanup"
+    input_dir = run_dir / "input"
+    input_dir.mkdir(parents=True)
+    (input_dir / "notes.txt").write_text("临时附件", encoding="utf-8")
+    monkeypatch.setattr(main, "AGENT_RUNTIME_ROOT", runtime_root)
+    run = main.AgentChatRun(
+        "discussion-cleanup",
+        "分析附件",
+        runtime_dir=run_dir,
+    )
+
+    async def events():
+        yield '{"type":"done"}\n'
+
+    await main._publish_agent_chat_run(run, events())
+
+    assert run.done
+    assert not run_dir.exists()
+
+
+@pytest.mark.asyncio
 async def test_cancel_agent_chat_run_rejects_pending_command_approval():
     """终止请求应设置标记并立即拒绝当前等待审批的命令。"""
     run = main.AgentChatRun("discussion-cancel", "运行命令")
@@ -125,8 +149,9 @@ async def test_agent_command_decision_requires_pending_request():
         main._pending_agent_commands.pop("test-request", None)
 
 
-def test_agent_uploads_are_saved_under_session_run_input_directory(monkeypatch, tmp_path):
-    monkeypatch.setattr(main, "ARTIFACTS_ROOT", tmp_path)
+def test_agent_uploads_are_saved_under_temporary_run_directory(monkeypatch, tmp_path):
+    runtime_root = tmp_path / "agent_uploads"
+    monkeypatch.setattr(main, "AGENT_RUNTIME_ROOT", runtime_root)
 
     paths = asyncio.run(main._prepare_agent_data_files(
         [_upload("../sales.csv"), _upload("sales.csv")],
@@ -135,18 +160,23 @@ def test_agent_uploads_are_saved_under_session_run_input_directory(monkeypatch, 
     ))
 
     assert [path.name for path in paths] == ["sales.csv", "sales-2.csv"]
-    assert all(path.parent == (tmp_path / "agent_sessions" / "discussion-1" / ".runs" / "run-1" / "input").resolve() for path in paths)
+    assert all(path.parent == (runtime_root / "run-1" / "input").resolve() for path in paths)
     assert all(path.read_bytes() == b"x,y\n1,2\n" for path in paths)
+    assert not (tmp_path / "artifacts").exists()
+
+    main._cleanup_agent_runtime_dir(paths[0].parents[1])
+
+    assert not (runtime_root / "run-1").exists()
 
 
 def test_agent_upload_rejects_unsupported_file(monkeypatch, tmp_path):
-    monkeypatch.setattr(main, "ARTIFACTS_ROOT", tmp_path)
+    monkeypatch.setattr(main, "AGENT_RUNTIME_ROOT", tmp_path / "agent_uploads")
 
     with pytest.raises(HTTPException, match="不支持") as exc:
         asyncio.run(main._prepare_agent_data_files([_upload("program.exe")], "discussion-2", "run-2"))
 
     assert exc.value.status_code == 400
-    assert not (tmp_path / "agent_sessions" / "discussion-2").exists()
+    assert not (tmp_path / "agent_uploads" / "run-2").exists()
 
 
 @pytest.mark.parametrize(
@@ -171,7 +201,7 @@ def test_agent_upload_accepts_documents_data_and_images(
     tmp_path,
     file_name: str,
 ):
-    monkeypatch.setattr(main, "ARTIFACTS_ROOT", tmp_path)
+    monkeypatch.setattr(main, "AGENT_RUNTIME_ROOT", tmp_path / "agent_uploads")
 
     paths = asyncio.run(
         main._prepare_agent_data_files(
@@ -295,6 +325,40 @@ def test_agent_code_event_exposes_generated_code_only():
         "tool_name": "execute_python",
         "code": "result = {'mean': 2.0}",
     }
+
+
+def test_agent_action_exposes_summary_arguments_only():
+    """轨迹单行摘要只下发短参数白名单（路径/命令/查询词），并截断超长值。"""
+    edit = Action(
+        thought="修改文件",
+        tool_name="edit_workspace_file",
+        arguments={
+            "relative_path": "src/a.py",
+            "old_text": "o" * 500,
+            "new_text": "n" * 500,
+            "content": "c" * 500,
+        },
+    )
+
+    assert main._agent_event_payload(edit)["arguments"] == {"relative_path": "src/a.py"}
+
+    search = Action(
+        thought="搜索关键词",
+        tool_name="search_workspace_text",
+        arguments={"query": "相关系数", "pattern": None},
+    )
+
+    assert main._agent_event_payload(search)["arguments"] == {"query": "相关系数"}
+
+    command = Action(
+        thought="运行测试",
+        tool_name="run_project_command",
+        arguments={"command": "python -m pytest " + "a" * 500, "python_environment": ".venv"},
+    )
+
+    command_args = main._agent_event_payload(command)["arguments"]
+    assert len(command_args["command"]) == main.SUMMARY_ARGUMENT_MAX_LENGTH
+    assert "python_environment" not in command_args
 
 
 def test_agent_finish_exposes_public_reasoning_summary():
@@ -510,110 +574,25 @@ def test_deleting_discussion_removes_its_artifact_workspace(monkeypatch, tmp_pat
     assert not root.exists()
 
 
-def test_agent_restores_existing_session_attachments(monkeypatch, tmp_path):
-    monkeypatch.setattr(main, "PROJECT_ROOT", tmp_path)
-    monkeypatch.setattr(main, "ARTIFACTS_ROOT", tmp_path / "artifacts")
-    old_input = (
-        tmp_path
-        / "artifacts"
-        / "agent_sessions"
-        / "discussion-restore"
-        / ".runs"
-        / "old-run"
-        / "input"
-    )
-    old_input.mkdir(parents=True)
-    source = old_input / "sales.csv"
-    source.write_text("x,y\n1,2\n", encoding="utf-8")
-    entries = [
-        {
-            "role": "user",
-            "metadata": {
-                "attachments": [
-                    {
-                        "kind": "data",
-                        "name": "sales.csv",
-                        "content": (
-                            "artifacts/agent_sessions/discussion-restore/"
-                            ".runs/old-run/input/sales.csv"
-                        ),
-                    }
-                ]
-            },
-        }
-    ]
+def test_agent_compiles_text_attachment_into_context(tmp_path):
+    source = tmp_path / "notes.txt"
+    source.write_text("指标口径：含税销售额", encoding="utf-8")
 
-    restored = main._restore_agent_data_files(entries, "discussion-restore")
+    context = main._compile_uploaded_attachment_context([source], object())
 
-    assert restored == [source.resolve()]
+    assert "notes.txt" in context
+    assert "指标口径：含税销售额" in context
 
 
-def test_agent_restores_uploaded_python_for_direct_read(monkeypatch, tmp_path):
-    monkeypatch.setattr(main, "PROJECT_ROOT", tmp_path)
-    monkeypatch.setattr(main, "ARTIFACTS_ROOT", tmp_path / "artifacts")
-    source = (
-        tmp_path / "artifacts" / "agent_sessions" / "discussion-python"
-        / ".runs" / "old-run" / "input" / "data_loader.py"
-    )
-    source.parent.mkdir(parents=True)
-    source.write_text("def load_data():\n    return []\n", encoding="utf-8")
-    entries = [{
-        "role": "user",
-        "metadata": {"attachments": [{
-            "kind": "file",
-            "name": "data_loader.py",
-            "content": "artifacts/agent_sessions/discussion-python/.runs/old-run/input/data_loader.py",
-        }]},
+def test_attachment_metadata_does_not_persist_temporary_path(tmp_path):
+    source = tmp_path / "sales.csv"
+    source.write_text("x\n1\n", encoding="utf-8")
+
+    metadata = main._attachment_metadata([source])
+
+    assert metadata == [{
+        "kind": "data",
+        "name": "sales.csv",
+        "content": "已加载到会话上下文",
     }]
-
-    restored = main._restore_agent_data_files(entries, "discussion-python")
-
-    assert restored == [source.resolve()]
-
-def test_agent_ignores_missing_and_out_of_session_attachments(monkeypatch, tmp_path):
-    monkeypatch.setattr(main, "PROJECT_ROOT", tmp_path)
-    monkeypatch.setattr(main, "ARTIFACTS_ROOT", tmp_path / "artifacts")
-    outside = tmp_path / "outside.csv"
-    outside.write_text("x\n1\n", encoding="utf-8")
-    entries = [
-        {
-            "role": "user",
-            "metadata": {
-                "attachments": [
-                    {"kind": "data", "name": "outside.csv", "content": "outside.csv"},
-                    {
-                        "kind": "data",
-                        "name": "missing.csv",
-                        "content": (
-                            "artifacts/agent_sessions/discussion-safe/"
-                            ".runs/old/input/missing.csv"
-                        ),
-                    },
-                    {"kind": "text", "name": "inline.txt", "content": "not-a-path"},
-                ]
-            },
-        }
-    ]
-
-    restored = main._restore_agent_data_files(entries, "discussion-safe")
-
-    assert restored == []
-
-
-def test_agent_new_upload_replaces_same_named_restored_attachment(tmp_path):
-    restored = tmp_path / "old" / "sales.csv"
-    uploaded = tmp_path / "new" / "sales.csv"
-    other = tmp_path / "old" / "weather.csv"
-
-    merged = main._merge_agent_data_files([restored, other], [uploaded])
-
-    assert merged == [other, uploaded]
-
-
-def test_agent_restored_attachments_respect_active_file_limit(monkeypatch, tmp_path):
-    monkeypatch.setattr(main, "MAX_AGENT_ATTACHMENTS", 2)
-    restored = [tmp_path / f"old-{index}.csv" for index in range(3)]
-
-    merged = main._merge_agent_data_files(restored, [])
-
-    assert merged == restored[-2:]
+    assert str(tmp_path) not in str(metadata)

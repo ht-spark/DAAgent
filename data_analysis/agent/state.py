@@ -237,8 +237,63 @@ def discover_artifacts(output_dir: str | Path | None) -> list[ArtifactReference]
 
 MAX_TRAJECTORY_NOTES = 40
 MAX_TRAJECTORY_NOTE_CHARS = 240
+MAX_TRAJECTORY_FAILURES = 20
+MAX_TRAJECTORY_PATHS = 200
+MAX_TRAJECTORY_DECISIONS = 100
+MAX_TRAJECTORY_DECISION_CHARS = 400
 MAX_ARTIFACT_DESCRIPTION_CHARS = 200
 MAX_ARTIFACT_DESCRIPTIONS = 50
+
+# 单条文本裁剪标记，供轨迹/结果摘要共用
+CLIP_MARKER = "…（已截断）"
+
+
+def clip_text(text: str, limit: int) -> str:
+    """按字符上限裁剪文本，超长时追加统一的截断标记。
+
+    Args:
+        text: 原始文本。
+        limit: 允许保留的最大字符数。
+
+    Returns:
+        不超过 limit 个字符的文本。
+    """
+    if limit < 1:
+        raise ValueError("裁剪上限必须大于 0")
+    if len(text) <= limit:
+        return text
+    tail = CLIP_MARKER if limit > len(CLIP_MARKER) else ""
+    return text[: limit - len(tail)] + tail
+
+
+def summarize_tool_payload(result: JsonValue = None) -> str | None:
+    """从工具结果中提炼一行可读摘要（字段、质量结论等）。
+
+    Args:
+        result: 工具返回的 JSON 结果。
+
+    Returns:
+        单行摘要；无法提炼时返回 None。
+    """
+    if not isinstance(result, Mapping):
+        return None
+    for key in ("summary", "analysis", "message"):
+        value = result.get(key)
+        if isinstance(value, str) and value.strip():
+            return _clip(value.strip())
+        if isinstance(value, Mapping):
+            compact = ", ".join(
+                f"{item_key}={item_value}"
+                for item_key, item_value in list(value.items())[:8]
+                if item_value is not None and str(item_value).strip()
+            )
+            if compact:
+                return _clip(compact)
+    fields = result.get("fields") or result.get("columns")
+    if isinstance(fields, list) and fields:
+        names = [str(item) for item in fields[:12]]
+        return _clip("字段 " + ", ".join(names))
+    return None
 
 
 class WorkTrajectory(BaseModel):
@@ -250,6 +305,8 @@ class WorkTrajectory(BaseModel):
     files_modified: list[str] = Field(default_factory=list)
     key_decisions: list[str] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
+    # 已尝试且失败的调用要点（工具 + 路径 + 错误），供重规划与追问避免重复踩坑
+    failures: list[str] = Field(default_factory=list)
     # 产物相对路径 → 简要描述（是什么/包含什么），跨轮保留
     artifact_descriptions: dict[str, str] = Field(default_factory=dict)
 
@@ -263,11 +320,30 @@ class WorkTrajectory(BaseModel):
 
     def add_decision(self, text: str | None) -> None:
         """登记一条关键决定或已完成结论。"""
-        self._add_unique_text("key_decisions", text)
+        self._add_unique_text(
+            "key_decisions",
+            text,
+            max_chars=MAX_TRAJECTORY_DECISION_CHARS,
+            max_items=MAX_TRAJECTORY_DECISIONS,
+        )
 
     def add_note(self, text: str | None) -> None:
         """登记一条工具观察要点，供跨 Todo / 跨轮复用。"""
-        self._add_unique_text("notes", text, max_chars=MAX_TRAJECTORY_NOTE_CHARS)
+        self._add_unique_text(
+            "notes",
+            text,
+            max_chars=MAX_TRAJECTORY_NOTE_CHARS,
+            max_items=MAX_TRAJECTORY_NOTES,
+        )
+
+    def add_failure(self, text: str | None) -> None:
+        """登记一条失败调用要点，供重规划与跨轮追问复用。"""
+        self._add_unique_text(
+            "failures",
+            text,
+            max_chars=MAX_TRAJECTORY_NOTE_CHARS,
+            max_items=MAX_TRAJECTORY_FAILURES,
+        )
 
     def describe_artifact(self, path: str | None, description: str | None) -> None:
         """记录产物简要描述（路径 → 是什么）。新描述覆盖旧描述。"""
@@ -279,6 +355,8 @@ class WorkTrajectory(BaseModel):
             return
         # 规范 key，避免同一文件出现两种写法
         key = key.lstrip("./")
+        # 重新插入以把刚更新的描述移到末尾，裁剪时保留最近更新的条目
+        self.artifact_descriptions.pop(key, None)
         self.artifact_descriptions[key] = text
         if len(self.artifact_descriptions) > MAX_ARTIFACT_DESCRIPTIONS:
             # 保留最近写入的描述
@@ -286,6 +364,39 @@ class WorkTrajectory(BaseModel):
                 list(self.artifact_descriptions.items())[-MAX_ARTIFACT_DESCRIPTIONS:]
             )
             self.artifact_descriptions = trimmed
+
+    def prompt_view(
+        self,
+        *,
+        max_paths: int = 40,
+        max_decisions: int = 12,
+        max_notes: int = 15,
+        max_failures: int = 8,
+        max_item_chars: int = 400,
+    ) -> dict[str, list[str]]:
+        """生成给 LLM 阅读的精简轨迹视图：只保留最近条目并裁剪单条长度。
+
+        Args:
+            max_paths: 已读/已改文件各自保留的条数。
+            max_decisions: 关键决定保留的条数。
+            max_notes: 观察要点保留的条数。
+            max_failures: 失败要点保留的条数。
+            max_item_chars: 单条文本的字符上限。
+
+        Returns:
+            可直接放入 prompt 的轨迹字典（按时间尾部取值）。
+        """
+
+        def tail(items: list[str], limit: int) -> list[str]:
+            return [clip_text(item, max_item_chars) for item in items[-limit:]]
+
+        return {
+            "files_read": tail(self.files_read, max_paths),
+            "files_modified": tail(self.files_modified, max_paths),
+            "key_decisions": tail(self.key_decisions, max_decisions),
+            "notes": tail(self.notes, max_notes),
+            "failures": tail(self.failures, max_failures),
+        }
 
     def description_for(self, path: str | None) -> str | None:
         """按相对路径读取产物描述。"""
@@ -332,6 +443,9 @@ class WorkTrajectory(BaseModel):
         for raw in payload.get("notes") or []:
             if isinstance(raw, str):
                 self.add_note(raw)
+        for raw in payload.get("failures") or []:
+            if isinstance(raw, str):
+                self.add_failure(raw)
         descriptions = payload.get("artifact_descriptions")
         if isinstance(descriptions, Mapping):
             for key, value in descriptions.items():
@@ -345,13 +459,27 @@ class WorkTrajectory(BaseModel):
         arguments: Mapping[str, Any] | None = None,
         result: JsonValue = None,
         success: bool = True,
+        error: str | None = None,
     ) -> None:
-        """根据一次工具调用更新已读/已改文件与观察要点。"""
+        """根据一次工具调用更新已读/已改文件、观察要点与失败证据。
+
+        Args:
+            tool_name: 工具名。
+            arguments: 本次调用的参数。
+            result: 工具返回结果。
+            success: 是否执行成功。
+            error: 失败时的错误信息，用于记录失败证据。
+        """
         name = (tool_name or "").strip()
-        if not name or not success:
+        if not name:
             return
         args = arguments if isinstance(arguments, Mapping) else {}
         result_map = result if isinstance(result, Mapping) else {}
+
+        if not success:
+            # 失败调用既不登记为已读/已改，也要留下可复用的失败证据
+            self.add_failure(_failure_text(name, args, result_map, error))
+            return
 
         if name in {"read_attachment_file", "markitdown", "inspect_image"}:
             self.add_read(_first_str(args, result_map, "file_path", "path"))
@@ -396,6 +524,9 @@ class WorkTrajectory(BaseModel):
         existing = {item.casefold() for item in items}
         if normalized.casefold() not in existing:
             items.append(normalized)
+            if len(items) > MAX_TRAJECTORY_PATHS:
+                # 只保留最近使用的路径，避免轨迹无界增长
+                items = items[-MAX_TRAJECTORY_PATHS:]
             setattr(self, field, items)
 
     def _add_unique_text(
@@ -404,12 +535,13 @@ class WorkTrajectory(BaseModel):
         text: str | None,
         *,
         max_chars: int | None = None,
+        max_items: int | None = None,
     ) -> None:
         if not isinstance(text, str):
             return
         normalized = text.strip()
         if max_chars is not None:
-            normalized = normalized[:max_chars].strip()
+            normalized = clip_text(normalized, max_chars).strip()
         if not normalized:
             return
         items: list[str] = getattr(self, field)
@@ -417,8 +549,8 @@ class WorkTrajectory(BaseModel):
         if normalized.casefold() in existing:
             return
         items.append(normalized)
-        if field == "notes" and len(items) > MAX_TRAJECTORY_NOTES:
-            items = items[-MAX_TRAJECTORY_NOTES:]
+        if max_items is not None and len(items) > max_items:
+            items = items[-max_items:]
         setattr(self, field, items)
 
 
@@ -457,37 +589,30 @@ def _note_from_tool_result(
     result: Mapping[str, Any],
 ) -> str | None:
     """从工具结果提取一条短观察要点，供跨 Todo 复用。"""
+    summary = summarize_tool_payload(result)
+    if summary is None:
+        return None
     path = _first_str(arguments, result, "file_path", "relative_path", "path")
     prefix = f"{tool_name} {path}:" if path else f"{tool_name}:"
+    return f"{prefix} {summary}"
 
-    summary = result.get("summary")
-    if isinstance(summary, str) and summary.strip():
-        return f"{prefix} {_clip(summary.strip())}"
-    if isinstance(summary, Mapping):
-        compact = ", ".join(
-            f"{key}={value}"
-            for key, value in list(summary.items())[:8]
-            if value is not None and str(value).strip()
-        )
-        if compact:
-            return f"{prefix} {_clip(compact)}"
 
-    analysis = result.get("analysis")
-    if isinstance(analysis, str) and analysis.strip():
-        return f"{prefix} {_clip(analysis.strip())}"
-
-    fields = result.get("fields") or result.get("columns")
-    if isinstance(fields, list) and fields:
-        names = [str(item) for item in fields[:12]]
-        return f"{prefix} 字段 {_clip(', '.join(names))}"
-    return None
+def _failure_text(
+    tool_name: str,
+    arguments: Mapping[str, Any],
+    result: Mapping[str, Any],
+    error: str | None,
+) -> str:
+    """生成一行失败要点：工具 + 目标路径 + 错误原因。"""
+    path = _first_str(arguments, result, "file_path", "relative_path", "path", "command")
+    prefix = f"{tool_name} {path}:" if path else f"{tool_name}:"
+    detail = error.strip() if isinstance(error, str) and error.strip() else "工具执行失败"
+    return f"{prefix} {_clip(detail)}"
 
 
 def _clip(text: str) -> str:
     """裁剪单条观察要点，避免轨迹被长输出撑爆。"""
-    if len(text) <= MAX_TRAJECTORY_NOTE_CHARS:
-        return text
-    return text[: MAX_TRAJECTORY_NOTE_CHARS - 1] + "…"
+    return clip_text(text, MAX_TRAJECTORY_NOTE_CHARS)
 
 
 def _first_str(*sources_and_keys: Any) -> str | None:
@@ -537,12 +662,26 @@ def collect_work_trajectory_from_session(
             elif item_type == "agent_observation":
                 success = bool(item.get("success", True))
                 summary = item.get("summary")
+                error = item.get("error")
                 trajectory.observe_tool(
                     str(item.get("tool_name") or ""),
                     result={"summary": summary} if summary is not None else None,
                     success=success,
+                    error=error if isinstance(error, str) else None,
                 )
     return trajectory
+
+
+class RunBudget(BaseModel):
+    """一次 Agent 运行共享的决策预算。
+
+    Plan-and-Execute 为每个 Todo 创建独立状态，若各自计数则总预算会被
+    放大到「Todo 数 × 上限」；本对象按引用在所有 Todo 与最终汇总间共享。
+    """
+
+    model_config = ConfigDict(extra="forbid", validate_assignment=True)
+
+    iterations: int = Field(default=0, ge=0)
 
 
 class AgentState(BaseModel):
@@ -563,6 +702,8 @@ class AgentState(BaseModel):
     analysis_plan: AnalysisPlan | None = None
     current_todo_id: str | None = None
     work_trajectory: WorkTrajectory = Field(default_factory=WorkTrajectory)
+    # 同一次运行内所有 Todo 与最终汇总共享的决策预算
+    run_budget: RunBudget = Field(default_factory=RunBudget)
 
     @field_validator("user_query")
     @classmethod
@@ -618,17 +759,30 @@ class AgentState(BaseModel):
         self.messages.append(AgentMessage(role=role, content=content))
 
     def record_observation(self, observation: Observation) -> None:
-        """记录工具观察结果、真实产物并推进一次决策轮次。
+        """记录本决策循环的一次工具观察，并推进一步决策轮次。
 
         Args:
             observation: Harness 返回的标准化工具结果。
         """
         self.observations.append(observation)
+        self.absorb_observation(observation)
         self.iteration += 1
+        self.run_budget.iterations += 1
+
+    def absorb_observation(self, observation: Observation) -> None:
+        """只聚合观察带来的轨迹与真实产物，不保留结果、不推进决策轮次。
+
+        运行级状态用它收集跨 Todo 的产物与要点；决策轮次由正在执行决策的状态
+        （Todo 内部循环）计数，避免同一次工具调用被重复计入运行预算。
+
+        Args:
+            observation: Harness 返回的标准化工具结果。
+        """
         self.work_trajectory.observe_tool(
             observation.tool_name,
             result=observation.result,
             success=observation.success,
+            error=observation.error,
         )
         if not observation.success or self.output_dir is None:
             return

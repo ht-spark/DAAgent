@@ -76,6 +76,7 @@ def save_discussion_message(
     assistant_metadata: dict[str, Any] | None = None,
     project_id: str | None = None,
     cwd: str | None = None,
+    attachment_context: str | None = None,
 ) -> str:
     """追加一轮 user/assistant 消息，返回会话 id。"""
     normalized_title = (title or user_message or "新讨论").strip()[:80]
@@ -107,6 +108,8 @@ def save_discussion_message(
     }
     if attachments:
         user_meta["attachments"] = attachments
+    if isinstance(attachment_context, str) and attachment_context.strip():
+        user_meta["attachment_context"] = attachment_context.strip()
     store.append_message(
         session_id,
         store.ROLE_USER,

@@ -6,11 +6,23 @@ import json
 
 import pytest
 
-from data_analysis.agent.graph import TodoFailed, iter_plan_graph, run_plan_graph
-from data_analysis.agent.loop import AgentLoop
-from data_analysis.agent.planner import Planner, PlannerError
-from data_analysis.agent.state import AgentState, AnalysisPlan
-from data_analysis.runtime import Harness
+from data_analysis.agent.graph import (
+    TodoFailed,
+    _merge_recovery_plan,
+    _todo_state,
+    iter_plan_graph,
+    run_plan_graph,
+)
+from data_analysis.agent.loop import AgentLoop, IterationLimitError
+from data_analysis.agent.planner import (
+    MAX_PLANNER_HISTORY_CHARS,
+    MAX_PLANNER_HISTORY_ITEM_CHARS,
+    MAX_PLANNER_HISTORY_MESSAGES,
+    Planner,
+    PlannerError,
+)
+from data_analysis.agent.state import AgentMessage, AgentState, AnalysisPlan, Observation
+from data_analysis.runtime import Harness, RepeatedToolFailureError
 from data_analysis.tools import ToolRegistry, ToolSpec, create_agent_tool_registry
 
 
@@ -22,6 +34,15 @@ class ScriptedLlm:
     def invoke(self, messages: list[tuple[str, str]]) -> str:
         self.calls.append(messages)
         return next(self._responses)
+
+
+def _planner_context(prompt: str) -> dict:
+    """从 Planner 提示词尾部取出注入的上下文 JSON。
+
+    planner.md 模板里含示例 JSON，因此只能按上下文对象的首键定位。
+    """
+    marker = '{\n  "user_query"'
+    return json.loads(prompt[prompt.rindex(marker):])
 
 
 def _plan_response() -> str:
@@ -61,6 +82,8 @@ def test_planner_creates_valid_todo_list() -> None:
     assert "优先检查并复用 `available_artifacts`" in llm.calls[0][1][1]
     assert "最多生成 8 个必要 Todo" in llm.calls[0][1][1]
     assert "最短充分证据链" in llm.calls[0][1][1]
+    assert "Todo 的 `objective` 必须是短摘要" in llm.calls[0][1][1]
+    assert "不超过 30 个中文字符" in llm.calls[0][1][1]
     assert "不得把数据质量问题直接解释为业务变化" in llm.calls[0][1][1]
     assert "不能直接表述为因果关系" in llm.calls[0][1][1]
     assert "{{CONTEXT_JSON}}" not in llm.calls[0][1][1]
@@ -306,3 +329,282 @@ def test_todo_rejects_missing_or_blank_expected_outputs(
                 "expected_outputs": expected_outputs,
             }],
         })
+
+
+def test_planner_context_includes_recent_conversation() -> None:
+    """短会话下 Planner 也必须看到最近原文，才能理解追问所指。"""
+    state = AgentState(
+        user_query="按上面那个口径再算一遍",
+        messages=[
+            AgentMessage(role="user", content="先看总量"),
+            AgentMessage(role="assistant", content="采用含税口径，全量合计 100 万"),
+        ],
+    )
+    llm = ScriptedLlm([_plan_response()])
+
+    Planner(llm, []).create_plan(state)
+
+    context = llm.calls[0][1][1]
+    assert '"recent_conversation"' in context
+    assert "采用含税口径，全量合计 100 万" in context
+
+
+def test_planner_recent_conversation_is_bounded() -> None:
+    """最近对话必须按条数与字符预算裁剪。"""
+    state = AgentState(
+        user_query="继续",
+        messages=[
+            AgentMessage(role="user", content=f"{index}：" + "长" * 4000)
+            for index in range(30)
+        ],
+    )
+    llm = ScriptedLlm([_plan_response()])
+
+    Planner(llm, []).create_plan(state)
+
+    recent = _planner_context(llm.calls[0][1][1])["recent_conversation"]
+
+    assert 0 < len(recent) <= MAX_PLANNER_HISTORY_MESSAGES
+    assert all(len(item["content"]) <= MAX_PLANNER_HISTORY_ITEM_CHARS for item in recent)
+    assert sum(len(item["content"]) for item in recent) <= (
+        MAX_PLANNER_HISTORY_CHARS + MAX_PLANNER_HISTORY_ITEM_CHARS
+    )
+    # 保留的是最近轮次
+    assert recent[-1]["content"].startswith("29：")
+
+
+def test_todo_state_shares_run_budget_and_clips_result_summaries() -> None:
+    """Todo 的内部状态必须共用运行预算，且不整段复制超长结果。"""
+    plan = AnalysisPlan.model_validate({
+        "objective": "生成并复核报告",
+        "todos": [
+            {
+                "id": "todo_1",
+                "objective": "写报告",
+                "expected_outputs": ["报告文件"],
+                "status": "completed",
+                "result_summary": "甲" * 5000,
+            },
+            {
+                "id": "todo_2",
+                "objective": "复核报告",
+                "expected_outputs": ["复核结论"],
+            },
+        ],
+    })
+    state = AgentState(user_query="生成并复核报告", analysis_plan=plan)
+
+    todo_state = _todo_state(state, plan.todos[1])
+
+    assert todo_state.run_budget is state.run_budget
+    assert "（已截断）" in todo_state.user_query
+    assert "甲" * 2000 not in todo_state.user_query
+    assert "复核报告" in todo_state.user_query
+
+
+def test_merge_recovery_plan_maps_and_drops_dependencies() -> None:
+    """恢复计划的依赖需重映射；遇到未经校验的越界引用也不能崩。"""
+    previous = AnalysisPlan.model_validate({
+        "objective": "目标",
+        "todos": [{
+            "id": "todo_1",
+            "objective": "已完成",
+            "expected_outputs": ["结果"],
+            "status": "completed",
+            "result_summary": "完成",
+        }],
+    })
+    recovery = AnalysisPlan.model_validate({
+        "objective": "恢复目标",
+        "todos": [
+            {"id": "a", "objective": "A", "expected_outputs": ["结果 A"]},
+            {"id": "b", "objective": "B", "expected_outputs": ["结果 B"], "depends_on": ["a"]},
+        ],
+    })
+    # 模拟未经校验的计划：依赖里出现未知标识与已保留的历史标识
+    unvalidated = recovery.model_copy(deep=True)
+    unvalidated.todos[1].depends_on = ["a", "todo_1", "ghost"]
+
+    merged = _merge_recovery_plan(previous, unvalidated, 1)
+
+    assert [todo.id for todo in merged.todos] == [
+        "todo_1",
+        "recovery_1_a",
+        "recovery_1_b",
+    ]
+    assert merged.todos[2].depends_on == ["recovery_1_a", "todo_1"]
+
+
+def _noop_registry(result: dict[str, object]) -> ToolRegistry:
+    """构造只含一个无操作工具的注册表。"""
+    registry = ToolRegistry()
+    registry.register_in_process(
+        ToolSpec(name="noop", description="无操作测试工具"),
+        lambda _arguments, _context: result,
+    )
+    return registry
+
+
+def test_plan_graph_shares_one_iteration_budget_across_todos() -> None:
+    """整轮 run 的决策预算必须跨 Todo 共享，不能被逐个 Todo 重置。"""
+    plan = json.dumps({
+        "objective": "两步操作",
+        "todos": [
+            {"id": "todo_1", "objective": "第一步", "expected_outputs": ["结果一"]},
+            {
+                "id": "todo_2",
+                "objective": "第二步",
+                "expected_outputs": ["结果二"],
+                "depends_on": ["todo_1"],
+            },
+        ],
+    }, ensure_ascii=False)
+    action = json.dumps(
+        {"type": "action", "tool_name": "noop", "arguments": {}},
+        ensure_ascii=False,
+    )
+    llm = ScriptedLlm([
+        plan,
+        action,
+        action,
+        '{"type":"finish","answer":"第一步完成。"}',
+        action,
+        '{"type":"finish","answer":"第二步完成。"}',
+    ])
+    registry = _noop_registry({"ok": True})
+    state = AgentState(user_query="完成任务")
+
+    with pytest.raises(IterationLimitError):
+        run_plan_graph(
+            state,
+            Planner(llm, registry.specs()),
+            AgentLoop(llm, registry.specs(), "依据当前 Todo 工作", max_iterations=3),
+            Harness(registry),
+        )
+
+    assert state.run_budget.iterations == 3
+    # 预算耗尽后不再调用模型
+    assert len(llm.calls) == 5
+
+
+def test_plan_graph_keeps_run_state_free_of_full_observations() -> None:
+    """运行级状态只聚合轨迹，不重复留存完整工具结果。"""
+    plan = json.dumps({
+        "objective": "核对数据",
+        "todos": [{
+            "id": "todo_1",
+            "objective": "核对数据规模",
+            "expected_outputs": ["数据规模结论"],
+        }],
+    }, ensure_ascii=False)
+    action = json.dumps(
+        {"type": "action", "tool_name": "noop", "arguments": {}},
+        ensure_ascii=False,
+    )
+    llm = ScriptedLlm([
+        plan,
+        action,
+        '{"type":"finish","answer":"共 150 行。"}',
+        '{"type":"finish","answer":"任务完成。"}',
+    ])
+    registry = _noop_registry({"summary": {"rows": 150}})
+    state = AgentState(user_query="核对数据")
+
+    finish = run_plan_graph(
+        state,
+        Planner(llm, registry.specs()),
+        AgentLoop(llm, registry.specs(), "依据当前 Todo 工作"),
+        Harness(registry),
+    )
+
+    assert finish.answer == "任务完成。"
+    assert state.observations == []
+    assert state.run_budget.iterations == 1
+    assert any("rows=150" in note for note in state.work_trajectory.notes)
+
+
+def test_plan_graph_blocks_duplicate_identical_calls() -> None:
+    """参数完全相同的重复调用只执行一次，其余被拦截并提示复用已有结果。"""
+    plan = json.dumps({
+        "objective": "核对数据",
+        "todos": [{
+            "id": "todo_1",
+            "objective": "核对数据规模",
+            "expected_outputs": ["数据规模结论"],
+        }],
+    }, ensure_ascii=False)
+    action = json.dumps(
+        {"type": "action", "tool_name": "noop", "arguments": {"value": 1}},
+        ensure_ascii=False,
+    )
+    llm = ScriptedLlm([
+        plan,
+        action,
+        action,
+        '{"type":"finish","answer":"共 1 条记录。"}',
+        '{"type":"finish","answer":"任务完成。"}',
+    ])
+    executed: list[int] = []
+    registry = ToolRegistry()
+    registry.register_in_process(
+        ToolSpec(name="noop", description="无操作测试工具"),
+        lambda arguments, _context: (
+            executed.append(arguments["value"]) or {"summary": "value=1"}
+        ),
+    )
+    state = AgentState(user_query="核对数据")
+
+    events = list(iter_plan_graph(
+        state,
+        Planner(llm, registry.specs()),
+        AgentLoop(llm, registry.specs(), "依据当前 Todo 工作"),
+        Harness(registry),
+    ))
+
+    assert executed == [1]
+    blocked = [
+        event
+        for event in events
+        if isinstance(event, Observation) and not event.success
+    ]
+    assert any("重复调用已拦截" in (event.error or "") for event in blocked)
+    assert any(
+        "重复调用已拦截" in failure for failure in state.work_trajectory.failures
+    )
+
+
+def test_plan_graph_fails_todo_at_step_limit_instead_of_looping() -> None:
+    """单个 Todo 超过步数上限时按失败处理并交给恢复规划，而不是继续空转。"""
+    plan = json.dumps({
+        "objective": "核对数据",
+        "todos": [{
+            "id": "todo_1",
+            "objective": "反复核对",
+            "expected_outputs": ["核对结论"],
+        }],
+    }, ensure_ascii=False)
+    actions = [
+        json.dumps(
+            {"type": "action", "tool_name": "noop", "arguments": {"value": index}},
+            ensure_ascii=False,
+        )
+        for index in range(1, 4)
+    ]
+    llm = ScriptedLlm([plan, *actions])
+    registry = _noop_registry({"summary": "ok"})
+    state = AgentState(user_query="核对数据")
+
+    with pytest.raises(RepeatedToolFailureError, match="决策轮数上限"):
+        list(iter_plan_graph(
+            state,
+            Planner(llm, registry.specs()),
+            AgentLoop(llm, registry.specs(), "依据当前 Todo 工作"),
+            Harness(registry),
+            max_todo_steps=2,
+            max_replans=0,
+        ))
+
+    assert state.run_budget.iterations == 2
+    assert state.analysis_plan is not None
+    assert state.analysis_plan.todos[0].status == "failed"
+    assert "决策轮数上限" in (state.analysis_plan.todos[0].result_summary or "")

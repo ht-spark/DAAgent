@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 
 import ApiManager from '../pages/ApiManager'
+import { pushModalLayer } from '../modalLayer'
 import {
   FONT_SIZE_OPTIONS,
   applyUiSettings,
@@ -22,22 +23,24 @@ export default function SettingsModal({ open, onClose }: Props) {
   const [settings, setSettings] = useState<UiSettings>(() => loadUiSettings())
   const [query, setQuery] = useState('')
   const [tab, setTab] = useState<SettingsTab>('general')
+  // API 分类首次进入后才挂载，之后保持挂载：来回切分类不会重新请求后端配置，
+  // 也不会先闪一次空列表（原来的写法每次切换都会卸载重挂 ApiManager）。
+  const [apiMounted, setApiMounted] = useState(false)
+
+  // onClose 通常是父组件里的内联箭头函数，每次渲染都是新引用；
+  // 用 ref 取最新值，避免监听器每次渲染都重新注册。
+  const onCloseRef = useRef(onClose)
+  onCloseRef.current = onClose
 
   useEffect(() => {
     if (!open) return
     setSettings(loadUiSettings())
     setQuery('')
     setTab('general')
+    setApiMounted(false)
+    // 压入模态层：统一接管 Esc 与页面滚动锁，并让氛围背景动画停下来
+    return pushModalLayer(() => onCloseRef.current())
   }, [open])
-
-  useEffect(() => {
-    if (!open) return
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose()
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [open, onClose])
 
   const q = query.trim().toLowerCase()
   const showFontSize = useMemo(() => {
@@ -60,12 +63,17 @@ export default function SettingsModal({ open, onClose }: Props) {
     applyUiSettings(next)
   }
 
+  function selectTab(next: SettingsTab) {
+    setTab(next)
+    if (next === 'api') setApiMounted(true)
+  }
+
   if (!open) return null
 
   return (
     <div className="settings-mask" onClick={onClose} role="presentation">
       <div
-        className={`settings-dialog ${tab === 'api' ? 'settings-dialog--api' : ''}`}
+        className="settings-dialog"
         role="dialog"
         aria-modal="true"
         aria-labelledby="settings-title"
@@ -93,7 +101,7 @@ export default function SettingsModal({ open, onClose }: Props) {
               <button
                 type="button"
                 className={`settings-nav-item ${tab === 'general' ? 'active' : ''}`}
-                onClick={() => setTab('general')}
+                onClick={() => selectTab('general')}
               >
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" aria-hidden="true">
                   <path d="M4 7h10M18 7h2M4 17h2M10 17h10" strokeLinecap="round" />
@@ -108,7 +116,7 @@ export default function SettingsModal({ open, onClose }: Props) {
               <button
                 type="button"
                 className={`settings-nav-item ${tab === 'api' ? 'active' : ''}`}
-                onClick={() => setTab('api')}
+                onClick={() => selectTab('api')}
               >
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" aria-hidden="true">
                   <circle cx="12" cy="12" r="9" />
@@ -121,8 +129,8 @@ export default function SettingsModal({ open, onClose }: Props) {
           </nav>
         </div>
 
-        <div className="settings-main">
-          {tab === 'general' ? (
+        <div className={`settings-main${tab === 'api' ? ' settings-main--api' : ''}`}>
+          {tab === 'general' && (
             <>
               <header className="settings-main-head">
                 <h1>常规</h1>
@@ -164,16 +172,18 @@ export default function SettingsModal({ open, onClose }: Props) {
                 </div>
               </section>
             </>
-          ) : (
-            <>
+          )}
+
+          {apiMounted && (
+            <div className={`settings-api-pane${tab === 'api' ? '' : ' is-hidden'}`}>
               <header className="settings-main-head">
                 <h1>API 配置</h1>
                 <p className="settings-main-lead">管理模型与扩展服务；配置保存在本机。</p>
               </header>
               <div className="settings-api-host">
-                <ApiManager embedded />
+                <ApiManager embedded active={tab === 'api'} />
               </div>
-            </>
+            </div>
           )}
         </div>
       </div>

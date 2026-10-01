@@ -7,6 +7,7 @@ import asyncio
 import json
 import logging
 import mimetypes
+import os
 import re
 import shutil
 import subprocess
@@ -42,7 +43,13 @@ from data_analysis.agent.state import (
     collect_work_trajectory_from_session,
     discover_artifacts,
 )
-from data_analysis.context import compile_rolling_context, estimate_context_usage_after_turn
+from data_analysis.context import (
+    AttachmentText,
+    compile_attachment_context,
+    compile_rolling_context,
+    compose_user_message,
+    estimate_context_usage_after_turn,
+)
 from data_analysis.cancellation import TaskCancelledError
 from data_analysis.runtime import (
     ExecutionContext,
@@ -111,6 +118,7 @@ from server.document_tools import (
     MAX_DOCUMENT_BYTES,
     DocumentConversionError,
     supported_extensions,
+    to_markdown,
     to_markdown_from_bytes,
 )
 from server.schemas import (
@@ -141,10 +149,12 @@ from server.schemas import (
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 ARTIFACTS_ROOT = PROJECT_ROOT / "artifacts"
+AGENT_RUNTIME_ROOT = PROJECT_ROOT / ".runtime" / "agent_uploads"
 WEB_DIST = PROJECT_ROOT / "web" / "dist"
 API_SETTINGS_PATH = Path(__file__).resolve().parent / "api_settings.json"
 AGENT_TOOL_TIMEOUT_SECONDS = 2 * 60 * 60          # Agent 单次工具执行超时时间（2 小时）
 AGENT_RUN_TIMEOUT_SECONDS = 3 * 60 * 60           # Agent 整轮运行硬超时时间（3 小时）
+AGENT_MAX_DECISIONS = 160                         # 整轮运行共享的决策轮数上限（含全部 Todo 与最终汇总）
 AGENT_COMMAND_APPROVAL_TIMEOUT_SECONDS = 300      # 单条项目命令等待人工批准的上限
 _pending_agent_commands: dict[str, asyncio.Future[bool]] = {}
 
@@ -160,6 +170,7 @@ class AgentChatRun:
     done: bool = False
     cancel_requested: bool = False
     approval_id: str | None = None
+    runtime_dir: Path | None = None
 
 
 _agent_chat_runs: dict[str, AgentChatRun] = {}
@@ -199,6 +210,8 @@ async def _publish_agent_chat_run(run: AgentChatRun, stream) -> None:
             run.events.append(json.dumps({"type": "error", "detail": f"Agent 运行失败：{exc}"}, ensure_ascii=False) + "\n")
             run.condition.notify_all()
     finally:
+        if run.runtime_dir is not None:
+            await asyncio.to_thread(_cleanup_agent_runtime_dir, run.runtime_dir)
         async with run.condition:
             run.done = True
             run.condition.notify_all()
@@ -208,6 +221,21 @@ MAX_AGENT_PREVIEW_TEXT_BYTES = 20 * 1024 * 1024    #文本预览最多读取20MB
 MAX_AGENT_PREVIEW_ROWS = 200                      # 表格预览最多展示200行
 MAX_AGENT_PREVIEW_COLUMNS = 40                    # 表格预览最多展示40列
 MAX_AGENT_PREVIEW_SHEETS = 8                      # 工作簿预览最多展示8个工作表
+# 轨迹单行摘要允许下发的参数白名单与单值长度上限。
+# 这些参数是「读取 · <路径>」「运行命令 · <命令>」这类摘要的唯一来源；
+# 其余参数（content / old_text / new_text 等）可能很长，既不适合公开展示，
+# 也会撑大会话持久化体积，因此一律不下发。
+SUMMARY_ARGUMENT_KEYS = (
+    "file_path",
+    "relative_path",
+    "path",
+    "relative_dir",
+    "pattern",
+    "query",
+    "command",
+    "file_name",
+)
+SUMMARY_ARGUMENT_MAX_LENGTH = 200
 AGENT_ATTACHMENT_SUFFIXES = frozenset(
     {
         ".bmp",
@@ -887,6 +915,46 @@ def _discussion_llm_by_id(config_id: str | None):
     return _create_llm_from_api_config(config)
 
 
+def _agent_context_window_tokens(config_id: str | None) -> int | None:
+    """读取当前模型声明的上下文窗口，用于推导滚动压缩阈值。
+
+    取值顺序：API 配置中的 ``contextWindow`` → 环境变量 ``DAAGENT_CONTEXT_WINDOW``。
+    未声明时返回 None，由滚动记忆使用保守的默认窗口。
+
+    Args:
+        config_id: 前端选择的 API 配置 id；缺省时使用当前激活配置。
+
+    Returns:
+        可用的上下文窗口 token 数；无法确定时返回 None。
+    """
+    settings = _read_api_settings() or {}
+    configs = settings.get("configs")
+    active_id = settings.get("active_id")
+    selected: dict[str, Any] | None = None
+    if isinstance(configs, list):
+        wanted = config_id if isinstance(config_id, str) and config_id else active_id
+        selected = next(
+            (
+                item
+                for item in configs
+                if isinstance(item, dict) and item.get("id") == wanted
+            ),
+            None,
+        )
+    candidates: list[Any] = [
+        selected.get("contextWindow") if isinstance(selected, dict) else None,
+        os.environ.get("DAAGENT_CONTEXT_WINDOW"),
+    ]
+    for value in candidates:
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, int) and value > 0:
+            return value
+        if isinstance(value, str) and value.strip().isdigit() and int(value) > 0:
+            return int(value)
+    return None
+
+
 async def _prepare_agent_data_files(
     files: list[UploadFile] | None,
     discussion_id: str,
@@ -933,16 +1001,72 @@ async def _prepare_agent_data_files(
         used_names.add(candidate.casefold())
         prepared.append((candidate, content))
 
-    input_dir = (_agent_session_root(discussion_id) / ".runs" / run_id / "input").resolve()
-    input_dir.mkdir(parents=True, exist_ok=False)
+    if re.fullmatch(r"[A-Za-z0-9_-]{1,128}", discussion_id) is None:
+        raise HTTPException(status_code=400, detail="Agent 会话标识无效")
+    if re.fullmatch(r"[A-Za-z0-9_-]{1,128}", run_id) is None:
+        raise HTTPException(status_code=400, detail="Agent 运行标识无效")
+    input_dir = (AGENT_RUNTIME_ROOT / run_id / "input").resolve()
+    runtime_root = AGENT_RUNTIME_ROOT.resolve()
+    if runtime_root not in input_dir.parents:
+        raise HTTPException(status_code=400, detail="附件运行目录越界")
+    runtime_dir = input_dir.parent
     saved_paths: list[Path] = []
-    for name, content in prepared:
-        target = (input_dir / name).resolve()
-        if input_dir not in target.parents:
-            raise HTTPException(status_code=400, detail="附件路径无效")
-        await asyncio.to_thread(target.write_bytes, content)
-        saved_paths.append(target)
+    try:
+        input_dir.mkdir(parents=True, exist_ok=False)
+        for name, content in prepared:
+            target = (input_dir / name).resolve()
+            if input_dir not in target.parents:
+                raise HTTPException(status_code=400, detail="附件路径无效")
+            await asyncio.to_thread(target.write_bytes, content)
+            saved_paths.append(target)
+    except Exception:
+        await asyncio.to_thread(_cleanup_agent_runtime_dir, runtime_dir)
+        raise
     return saved_paths
+
+
+def _compile_uploaded_attachment_context(paths: list[Path], llm: object) -> str:
+    """提取本轮附件文本，并编译为可持久化的上下文。"""
+    attachments: list[AttachmentText] = []
+    supported_documents = frozenset(supported_extensions())
+    for path in paths:
+        suffix = path.suffix.casefold()
+        try:
+            if suffix in AGENT_PREVIEW_TEXT_SUFFIXES:
+                text = path.read_text(encoding="utf-8-sig", errors="replace")
+            elif suffix in supported_documents:
+                text = to_markdown(path, max_bytes=MAX_AGENT_ATTACHMENT_BYTES)
+            else:
+                text = (
+                    f"[非文本附件：{path.name}。本轮运行可使用附件工具检查其内容，"
+                    "该文件不计入字符型上下文。]"
+                )
+        except (OSError, ValueError, DocumentConversionError) as exc:
+            text = f"[附件 {path.name} 无法提取文本：{exc}]"
+        attachments.append(AttachmentText(name=path.name, text=text))
+    return compile_attachment_context(attachments, llm)
+
+
+def _attachment_metadata(paths: list[Path]) -> list[dict[str, str]]:
+    """生成不含临时磁盘路径的附件展示元数据。"""
+    return [
+        {
+            "kind": "data" if supports_data_profile(path) else "file",
+            "name": path.name,
+            "content": "已加载到会话上下文",
+        }
+        for path in paths
+    ]
+
+
+def _cleanup_agent_runtime_dir(runtime_dir: Path) -> None:
+    """只清理受控运行根目录下的本轮临时附件。"""
+    root = AGENT_RUNTIME_ROOT.resolve()
+    target = runtime_dir.resolve(strict=False)
+    if root not in target.parents:
+        logger.error("拒绝清理越界的 Agent 临时目录: %s", target)
+        return
+    shutil.rmtree(target, ignore_errors=True)
 
 
 def _load_agent_system_prompt(workspace_root: Path | None = None) -> str:
@@ -1029,14 +1153,16 @@ def _agent_event_payload(
         }
         if event.reasoning.strip():
             payload["model_reasoning"] = event.reasoning
-        # 只保留路径类参数，供跨轮工作轨迹提取；完整 arguments 可能含大段正文。
-        path_args = {
-            key: value.strip()
-            for key in ("file_path", "relative_path", "path")
+        # 只保留摘要类短参数：它们是「读取 · path」「运行命令 · command」这类
+        # 单行轨迹摘要的唯一来源；完整 arguments 可能含大段正文（content、
+        # old_text、new_text 等），既不适合公开展示也会撑大持久化体积。
+        summary_args = {
+            key: value.strip()[:SUMMARY_ARGUMENT_MAX_LENGTH]
+            for key in SUMMARY_ARGUMENT_KEYS
             if isinstance((value := event.arguments.get(key)), str) and value.strip()
         }
-        if path_args:
-            payload["arguments"] = path_args
+        if summary_args:
+            payload["arguments"] = summary_args
         code = event.arguments.get("code")
         if event.tool_name == "execute_python" and isinstance(code, str):
             payload["code"] = code
@@ -1165,64 +1291,6 @@ def _resolve_agent_project(
     if requested_project_id:
         return require_project(requested_project_id)
     return None
-
-
-def _restore_agent_data_files(
-    session_entries: list[dict[str, object]],
-    discussion_id: str,
-) -> list[Path]:
-    """恢复同一会话中仍然有效的历史输入附件。"""
-    session_root = _agent_session_root(discussion_id)
-    restored_by_name: dict[str, Path] = {}
-    for entry in reversed(session_entries):
-        if entry.get("role") != store.ROLE_USER:
-            continue
-        metadata = entry.get("metadata")
-        if not isinstance(metadata, dict):
-            continue
-        attachments = metadata.get("attachments")
-        if not isinstance(attachments, list):
-            continue
-        for attachment in reversed(attachments):
-            if not isinstance(attachment, dict):
-                continue
-            if attachment.get("kind") not in {"data", "file"}:
-                continue
-            raw_path = attachment.get("content")
-            if not isinstance(raw_path, str) or not raw_path.strip():
-                continue
-            relative_path = Path(raw_path)
-            if relative_path.is_absolute() or ".." in relative_path.parts:
-                continue
-            candidate = (PROJECT_ROOT / relative_path).resolve()
-            try:
-                session_relative = candidate.relative_to(session_root)
-            except ValueError:
-                continue
-            parts = session_relative.parts
-            if (
-                len(parts) != 4
-                or parts[0].casefold() != ".runs"
-                or parts[2].casefold() != "input"
-                or candidate.suffix.casefold() not in AGENT_ATTACHMENT_SUFFIXES
-                or not candidate.is_file()
-            ):
-                continue
-            restored_by_name.setdefault(candidate.name.casefold(), candidate)
-    return list(reversed(restored_by_name.values()))
-
-
-def _merge_agent_data_files(
-    restored_paths: list[Path],
-    uploaded_paths: list[Path],
-) -> list[Path]:
-    """合并历史和本轮附件；同名时优先使用本轮上传版本。"""
-    uploaded_names = {path.name.casefold() for path in uploaded_paths}
-    merged_paths = [
-        *(path for path in restored_paths if path.name.casefold() not in uploaded_names),
-        *uploaded_paths,
-    ]
-    return merged_paths[-MAX_AGENT_ATTACHMENTS:]
 
 
 def _open_local_folder(target: Path) -> None:
@@ -1551,10 +1619,12 @@ async def agent_profile_stream_endpoint(
             cwd=str(workspace_root) if workspace_root else None,
         )
     session_entries = stored_session.get("messages", []) if stored_session else []
+    context_window_tokens = _agent_context_window_tokens(config_id)
     rolling_context = await asyncio.to_thread(
         compile_rolling_context,
         session_entries,
         llm,
+        context_window_tokens=context_window_tokens,
     )
     if rolling_context.compaction_error:
         logger.warning(
@@ -1569,16 +1639,11 @@ async def agent_profile_stream_endpoint(
             rolling_context.compaction.summary,
             rolling_context.compaction.metadata(),
         )
-    uploaded_paths = await _prepare_agent_data_files(files, active_discussion_id, run_id)
-    restored_paths = _restore_agent_data_files(session_entries, active_discussion_id)
-    data_paths = _merge_agent_data_files(restored_paths, uploaded_paths)
     history = [
         AgentMessage(role=str(item["role"]), content=str(item.get("content") or ""))
         for item in rolling_context.recent_messages
     ]
     prior_trajectory = collect_work_trajectory_from_session(session_entries)
-    for artifact_path in data_paths:
-        prior_trajectory.add_read(str(artifact_path))
     output_dir = _agent_output_root(active_discussion_id, workspace_root)
     try:
         python_environment = (
@@ -1588,6 +1653,20 @@ async def agent_profile_stream_endpoint(
         )
     except ProjectWorkspaceError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    uploaded_paths = await _prepare_agent_data_files(files, active_discussion_id, run_id)
+    runtime_dir = uploaded_paths[0].parents[1] if uploaded_paths else None
+    try:
+        attachment_context = await asyncio.to_thread(
+            _compile_uploaded_attachment_context,
+            uploaded_paths,
+            llm,
+        )
+    except Exception:
+        # 摘要或文本提取在后台任务启动前失败时，也必须回收本轮临时附件。
+        if runtime_dir is not None:
+            await asyncio.to_thread(_cleanup_agent_runtime_dir, runtime_dir)
+        raise
+    data_paths = uploaded_paths
     api_settings = _read_api_settings() or {}
     tavily_settings = api_settings.get("external_services", {}).get("tavily", {})
     tavily_api_key = (
@@ -1595,40 +1674,48 @@ async def agent_profile_stream_endpoint(
         if isinstance(tavily_settings, dict)
         else None
     )
-    registry = create_agent_tool_registry(
-        data_paths,
-        output_dir,
-        vision_llm=llm,
-        knowledge_base_ids=selected_base_ids,
-        web_search_api_key=tavily_api_key,
-        workspace_root=workspace_root,
-        python_executable=python_environment.executable,
-        python_environment_source=python_environment.source,
-        python_environment_name=python_environment.name,
-    )
-    state = AgentState(
-        user_query=message,
-        memory_summary=rolling_context.memory_summary,
-        data_paths=[str(path.resolve(strict=True)) for path in data_paths],
-        output_dir=str(output_dir),
-        workspace_root=str(workspace_root) if workspace_root else None,
-        available_artifacts=prior_trajectory.enrich_artifacts(
-            discover_artifacts(output_dir)
-        ),
-        project_id=str(project["id"]) if project else None,
-        messages=history,
-        work_trajectory=prior_trajectory,
-    )
-    system_prompt = _load_agent_system_prompt(workspace_root)
-    if workspace_root is not None and python_environment.source == "host":
-        system_prompt += (
-            "\n\n当前项目未扫描到 Python 环境。Agent 自身的 Python 仅可用于创建项目环境，"
-            "不能代表当前项目环境，也不能默认用于 execute_python 或项目依赖安装。"
-            "若已确认项目中有环境目录（包括项目根目录本身），请显式传入"
-            " python_environment；否则先创建环境或向用户说明。"
+    try:
+        registry = create_agent_tool_registry(
+            data_paths,
+            output_dir,
+            vision_llm=llm,
+            knowledge_base_ids=selected_base_ids,
+            web_search_api_key=tavily_api_key,
+            workspace_root=workspace_root,
+            python_executable=python_environment.executable,
+            python_environment_source=python_environment.source,
+            python_environment_name=python_environment.name,
         )
-    chat_run = AgentChatRun(active_discussion_id, message)
-    _agent_chat_runs[run_id] = chat_run
+        state = AgentState(
+            user_query=compose_user_message(message, attachment_context),
+            memory_summary=rolling_context.memory_summary,
+            data_paths=[str(path.resolve(strict=True)) for path in data_paths],
+            output_dir=str(output_dir),
+            workspace_root=str(workspace_root) if workspace_root else None,
+            available_artifacts=prior_trajectory.enrich_artifacts(
+                discover_artifacts(output_dir)
+            ),
+            project_id=str(project["id"]) if project else None,
+            messages=history,
+            work_trajectory=prior_trajectory,
+        )
+        system_prompt = _load_agent_system_prompt(workspace_root)
+        if workspace_root is not None and python_environment.source == "host":
+            system_prompt += (
+                "\n\n当前项目未扫描到 Python 环境。Agent 自身的 Python 仅可用于创建项目环境，"
+                "不能代表当前项目环境，也不能默认用于 execute_python 或项目依赖安装。"
+                "若已确认项目中有环境目录（包括项目根目录本身），请显式传入"
+                " python_environment；否则先创建环境或向用户说明。"
+            )
+    except Exception:
+        if runtime_dir is not None:
+            await asyncio.to_thread(_cleanup_agent_runtime_dir, runtime_dir)
+        raise
+    chat_run = AgentChatRun(
+        active_discussion_id,
+        message,
+        runtime_dir=runtime_dir,
+    )
 
     def _agent_cancel_check() -> bool:
         return chat_run.cancel_requested
@@ -1637,7 +1724,7 @@ async def agent_profile_stream_endpoint(
         llm,
         registry.specs(),
         system_prompt,
-        max_iterations=60,
+        max_iterations=AGENT_MAX_DECISIONS,
         decision_retries=8,
         cancel_check=_agent_cancel_check,
     )
@@ -1667,6 +1754,7 @@ async def agent_profile_stream_endpoint(
         execution_context=execution_context,
         cancel_check=_agent_cancel_check,
     )
+    _agent_chat_runs[run_id] = chat_run
 
     async def event_stream():
         started_event: dict[str, object] = {
@@ -1685,14 +1773,7 @@ async def agent_profile_stream_endpoint(
 
         async def save_stopped_run(content: str) -> str:
             """保存未完成结果，使任务切换后仍能在历史对话中看到。"""
-            attachments = [
-                {
-                    "kind": "data" if supports_data_profile(path) else "file",
-                    "name": path.name,
-                    "content": path.relative_to(PROJECT_ROOT).as_posix(),
-                }
-                for path in uploaded_paths
-            ]
+            attachments = _attachment_metadata(uploaded_paths)
             state.work_trajectory.absorb_completed_todos(state.analysis_plan)
             return await asyncio.to_thread(
                 save_discussion_message,
@@ -1702,6 +1783,7 @@ async def agent_profile_stream_endpoint(
                 knowledge_sources,
                 title,
                 attachments,
+                attachment_context=attachment_context,
                 knowledge_base_ids=selected_base_ids,
                 mode="agent",
                 assistant_metadata={
@@ -1819,19 +1901,13 @@ async def agent_profile_stream_endpoint(
         except OSError:
             logger.exception("Failed to list Agent artifacts")
             artifacts = []
-        attachments = [
-            {
-                "kind": "data" if supports_data_profile(path) else "file",
-                "name": path.name,
-                "content": path.relative_to(PROJECT_ROOT).as_posix(),
-            }
-            for path in uploaded_paths
-        ]
+        attachments = _attachment_metadata(uploaded_paths)
         context_usage = estimate_context_usage_after_turn(
             rolling_context.memory_summary,
             rolling_context.recent_messages,
-            message,
+            state.user_query,
             answer,
+            context_window_tokens=context_window_tokens,
         )
         state.work_trajectory.absorb_completed_todos(state.analysis_plan)
         saved_discussion_id = await asyncio.to_thread(
@@ -1842,6 +1918,7 @@ async def agent_profile_stream_endpoint(
             knowledge_sources,
             title,
             attachments,
+            attachment_context=attachment_context,
             knowledge_base_ids=selected_base_ids,
             mode="agent",
             assistant_metadata={

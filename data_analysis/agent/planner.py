@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any, Sequence
 
 from pydantic import ValidationError
@@ -13,9 +13,23 @@ from pydantic import ValidationError
 from ..tools.registry import ToolSpec
 from ..cancellation import invoke_cancellable, raise_if_cancelled
 from .loop import LlmClient, extract_model_reasoning
-from .state import AgentState, AnalysisPlan
+from .state import AgentState, AnalysisPlan, clip_text
 
 _PLANNER_PROMPT_PATH = Path(__file__).resolve().parents[1] / "prompts" / "planner.md"
+
+# Planner 会话原文视野：短会话时滚动摘要为空，必须补上最近轮次以免误规划
+MAX_PLANNER_HISTORY_MESSAGES = 8          # 注入的最近对话条数
+MAX_PLANNER_HISTORY_ITEM_CHARS = 1_500    # 单条对话字符上限
+MAX_PLANNER_HISTORY_CHARS = 6_000         # 最近对话总字符预算
+
+# Planner 可见的工作轨迹上限（每次规划只调用一次，可比内层 ReAct 宽松）
+PLANNER_TRAJECTORY_PATHS = 80
+PLANNER_TRAJECTORY_DECISIONS = 30
+PLANNER_TRAJECTORY_NOTES = 25
+PLANNER_TRAJECTORY_FAILURES = 15
+PLANNER_TRAJECTORY_ITEM_CHARS = 600
+
+MAX_RECOVERY_RESULT_CHARS = 1_000         # 重规划时单条已完成结果的字符上限
 
 
 class PlannerError(RuntimeError):
@@ -97,7 +111,7 @@ class Planner:
             {
                 "id": todo.id,
                 "objective": todo.objective,
-                "result_summary": todo.result_summary,
+                "result_summary": clip_text(todo.result_summary or "", MAX_RECOVERY_RESULT_CHARS),
             }
             for todo in plan.todos
             if todo.status == "completed"
@@ -129,6 +143,7 @@ class Planner:
             available_artifacts=list(state.available_artifacts),
             messages=list(state.messages),
             work_trajectory=state.work_trajectory.model_copy(deep=True),
+            run_budget=state.run_budget,
         )
         return self.create_plan(recovery_state)
 
@@ -140,6 +155,16 @@ class Planner:
         ]
         trajectory = state.work_trajectory
         enriched_artifacts = trajectory.enrich_artifacts(state.available_artifacts)
+        trajectory_view = trajectory.prompt_view(
+            max_paths=PLANNER_TRAJECTORY_PATHS,
+            max_decisions=PLANNER_TRAJECTORY_DECISIONS,
+            max_notes=PLANNER_TRAJECTORY_NOTES,
+            max_failures=PLANNER_TRAJECTORY_FAILURES,
+            max_item_chars=PLANNER_TRAJECTORY_ITEM_CHARS,
+        )
+        trajectory_view["artifact_descriptions"] = dict(
+            trajectory.artifact_descriptions
+        )
         context = {
             "user_query": state.user_query,
             "available_data_files": [
@@ -160,19 +185,54 @@ class Planner:
             "workspace_enabled": bool(state.workspace_root),
             "available_tools": tools,
             "session_memory": state.memory_summary,
-            "work_trajectory": {
-                "files_read": list(trajectory.files_read),
-                "files_modified": list(trajectory.files_modified),
-                "key_decisions": list(trajectory.key_decisions),
-                "notes": list(trajectory.notes),
-                "artifact_descriptions": dict(trajectory.artifact_descriptions),
-            },
+            "recent_conversation": _recent_conversation(state),
+            "work_trajectory": trajectory_view,
         }
         prompt = _render_planner_prompt(context, self._max_todos)
         return [
             ("system", "你是执行计划编译器，只生成简洁、可执行、可验证的 Todo List。"),
             ("user", prompt),
         ]
+
+
+def _recent_conversation(state: AgentState) -> list[dict[str, str]]:
+    """取最近若干轮对话原文，供 Planner 理解追问所指。
+
+    滚动摘要只在历史很长时存在；短会话下 Planner 若无原文视野，
+    会看不到上一轮的口径与结论，因此这里始终补上最近轮次。
+
+    Args:
+        state: 当前运行状态。
+
+    Returns:
+        不含空白内容、按时间升序、总长度受限的最近对话列表。
+    """
+    selected: list[dict[str, str]] = []
+    used = 0
+    for message in reversed(list(state.messages)):
+        role, content = _message_role_and_content(message)
+        if role not in {"user", "assistant"} or not isinstance(content, str):
+            continue
+        text = clip_text(content.strip(), MAX_PLANNER_HISTORY_ITEM_CHARS)
+        if not text:
+            continue
+        if len(selected) >= MAX_PLANNER_HISTORY_MESSAGES:
+            break
+        if selected and used + len(text) > MAX_PLANNER_HISTORY_CHARS:
+            break
+        selected.append({"role": role, "content": text})
+        used += len(text)
+    selected.reverse()
+    return selected
+
+
+def _message_role_and_content(message: Any) -> tuple[str, Any]:
+    """兼容模型对象与字典两种消息形态。"""
+    if isinstance(message, Mapping):
+        role = str(message.get("role") or "").strip().lower()
+        return role, message.get("content")
+    role = str(getattr(message, "role", "") or "").strip().lower()
+    return role, getattr(message, "content", None)
 
 
 def _render_planner_prompt(context: dict[str, Any], max_todos: int) -> str:

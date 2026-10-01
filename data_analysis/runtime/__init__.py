@@ -10,6 +10,7 @@ from ..cancellation import (
 from .harness import Harness
 from .execution_context import ExecutionContext
 from .failure_tracker import FailureCircuitOpen, FailureTracker, RepeatedToolFailureError
+from .repeat_guard import MUTATING_TOOLS, RepeatGuard, RepeatNotice
 from ..python_environment import (
     PythonEnvironment,
     PythonEnvironmentError,
@@ -29,8 +30,11 @@ __all__ = [
     "ExecutionContext",
     "FailureCircuitOpen",
     "FailureTracker",
+    "MUTATING_TOOLS",
     "PythonEnvironment",
     "PythonEnvironmentError",
+    "RepeatGuard",
+    "RepeatNotice",
     "RepeatedToolFailureError",
     "SandboxConfigurationError",
     "SandboxError",

@@ -8,10 +8,15 @@ from pydantic import ValidationError
 
 from data_analysis.agent.loop import AgentLoop
 from data_analysis.agent.state import (
+    MAX_TRAJECTORY_DECISIONS,
+    MAX_TRAJECTORY_PATHS,
     AgentMessage,
     AgentState,
     ArtifactReference,
     Observation,
+    RunBudget,
+    WorkTrajectory,
+    clip_text,
     discover_artifacts,
 )
 
@@ -228,3 +233,103 @@ def test_loop_context_contains_absolute_input_path_and_reusable_artifact(
     assert json.dumps(str(input_file.resolve()), ensure_ascii=False) in context_text
     assert '"artifact_reuse_status": "已有产物可直接复用"' in context_text
     assert '"relative_path": "summary.md"' in context_text
+
+
+def test_record_observation_keeps_failure_evidence_in_trajectory() -> None:
+    """失败的调用不能记为已读文件，但必须留下失败要点。"""
+    state = AgentState(user_query="运行代码")
+
+    state.record_observation(Observation(
+        tool_name="execute_python",
+        success=False,
+        error="SyntaxError: invalid syntax",
+    ))
+
+    assert state.work_trajectory.failures == [
+        "execute_python: SyntaxError: invalid syntax"
+    ]
+    assert state.work_trajectory.files_read == []
+    assert state.work_trajectory.notes == []
+
+
+def test_absorb_observation_updates_trajectory_without_counting() -> None:
+    """运行级聚合只更新轨迹与产物，不保留结果、不推进决策轮次。"""
+    state = AgentState(user_query="生成数据画像")
+
+    state.absorb_observation(
+        Observation(
+            tool_name="profile_data",
+            success=True,
+            result={"summary": {"rows": 10}},
+        )
+    )
+
+    assert state.observations == []
+    assert state.iteration == 0
+    assert state.run_budget.iterations == 0
+    assert state.work_trajectory.notes == ["profile_data: rows=10"]
+
+
+def test_run_budget_is_shared_between_todo_states() -> None:
+    """同一运行的多个 Todo 状态必须共享一个决策预算对象。"""
+    shared = RunBudget()
+    first = AgentState(user_query="第一个 Todo", run_budget=shared)
+    second = AgentState(user_query="第二个 Todo", run_budget=shared)
+    observation = Observation(tool_name="noop", success=True, result={})
+
+    first.record_observation(observation)
+    second.record_observation(observation)
+
+    assert first.run_budget is second.run_budget
+    assert shared.iterations == 2
+    assert (first.iteration, second.iteration) == (1, 1)
+
+
+def test_work_trajectory_caps_unbounded_fields() -> None:
+    """路径与关键决定必须按上限保留最近条目。"""
+    trajectory = WorkTrajectory()
+
+    for index in range(MAX_TRAJECTORY_PATHS + 20):
+        trajectory.add_read(f"data/file_{index}.csv")
+    for index in range(MAX_TRAJECTORY_DECISIONS + 20):
+        trajectory.add_decision(f"决定 {index}")
+
+    assert len(trajectory.files_read) == MAX_TRAJECTORY_PATHS
+    assert trajectory.files_read[-1].endswith(f"file_{MAX_TRAJECTORY_PATHS + 19}.csv")
+    assert len(trajectory.key_decisions) == MAX_TRAJECTORY_DECISIONS
+    assert trajectory.key_decisions[-1] == f"决定 {MAX_TRAJECTORY_DECISIONS + 19}"
+
+
+def test_work_trajectory_prompt_view_clips_and_keeps_recent() -> None:
+    """给 LLM 的轨迹视图只保留最近条目并裁剪单条长度。"""
+    trajectory = WorkTrajectory()
+    trajectory.add_note("要点" + "长" * 800)
+    trajectory.add_failure("execute_python a.py: boom")
+    for index in range(30):
+        trajectory.add_decision(f"决定 {index}")
+
+    view = trajectory.prompt_view(
+        max_paths=1,
+        max_decisions=2,
+        max_notes=1,
+        max_failures=1,
+        max_item_chars=50,
+    )
+
+    assert view["failures"] == ["execute_python a.py: boom"]
+    assert len(view["notes"]) == 1
+    assert len(view["notes"][0]) == 50
+    assert view["key_decisions"] == ["决定 28", "决定 29"]
+    assert view["files_read"] == []
+
+
+def test_clip_text_marks_truncation() -> None:
+    """裁剪必须带统一标记，且上限非法时报错。"""
+    assert clip_text("短文本", 10) == "短文本"
+
+    clipped = clip_text("甲" * 50, 20)
+
+    assert len(clipped) == 20
+    assert clipped.endswith("（已截断）")
+    with pytest.raises(ValueError, match="必须大于 0"):
+        clip_text("x", 0)

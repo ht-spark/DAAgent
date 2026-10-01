@@ -88,6 +88,8 @@ h1, h2, h3 {
     background-size: 26px 26px;
     z-index: -3;
     opacity: 0.55;
+    /* 三块氛围背景都是纯装饰的独立图层，声明隔离避免拖累整页重绘 */
+    contain: layout paint;
 }
 
 .bg-glow {
@@ -99,6 +101,7 @@ h1, h2, h3 {
         radial-gradient(60% 50% at 50% 110%, rgba(184, 137, 45, 0.10) 0%, transparent 64%),
         linear-gradient(180deg, #faf6e8 0%, #f6f0dc 100%);
     z-index: -2;
+    contain: layout paint;
     animation: glowShift 12s ease-in-out infinite;
 }
 
@@ -114,6 +117,7 @@ h1, h2, h3 {
     pointer-events: none;
     z-index: -1;
     overflow: hidden;
+    contain: layout paint;
 }
 
 .floating-symbols span {
@@ -124,6 +128,20 @@ h1, h2, h3 {
     font-weight: 300;
     animation: floatSymbol 20s linear infinite;
     user-select: none;
+}
+
+/* 弹窗打开时暂停氛围动画：遮罩盖住了它们，动画继续跑只会白白占用合成器，
+   而遮罩之下的每一次重绘都会连带放大交互延迟（滚动、输入、切换分类）。 */
+body.is-modal-open .bg-glow,
+body.is-modal-open .floating-symbols span {
+    animation-play-state: paused;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .bg-glow,
+    .floating-symbols span {
+        animation: none;
+    }
 }
 
 .floating-symbols span:nth-child(1) { left: 5%; top: 20%; animation-delay: 0s; animation-duration: 25s; }

@@ -1,7 +1,17 @@
 from __future__ import annotations
 
+import pytest
+
 from data_analysis.agent import AgentLoop, AgentMessage, AgentState
-from data_analysis.context import compile_rolling_context, estimate_context_usage_after_turn
+from data_analysis.context import (
+    COMPACTION_TRIGGER_TOKENS,
+    KEEP_RECENT_TOKENS,
+    compile_rolling_context,
+    estimate_context_usage_after_turn,
+    resolve_compaction_trigger,
+    resolve_keep_recent_tokens,
+)
+from data_analysis.context import rolling_memory
 
 NL = chr(10)
 
@@ -80,6 +90,17 @@ def test_short_session_keeps_all_raw_messages_without_summary_call() -> None:
     assert [item["seq"] for item in context.recent_messages] == [1, 2]
     assert context.compaction is None
     assert llm.calls == []
+
+
+def test_recent_message_restores_persisted_attachment_context() -> None:
+    """附件上下文应随用户消息进入后续轮次，而不是依赖原文件。"""
+    entry = _message(1, "user", "分析附件")
+    entry["metadata"] = {"attachment_context": "附件字段：sales、amount"}
+
+    context = compile_rolling_context([entry], SummaryLlm(), trigger_tokens=100)
+
+    assert len(context.recent_messages) == 1
+    assert "附件字段：sales、amount" in context.recent_messages[0]["content"]
 
 
 def test_long_session_compacts_old_turns_and_keeps_recent_raw_turn() -> None:
@@ -190,3 +211,107 @@ def test_agent_context_contains_summary_before_recent_raw_messages() -> None:
         ("assistant", "最近回答"),
         messages[-1],
     ]
+
+
+def test_resolve_compaction_trigger_derives_from_context_window() -> None:
+    """阈值应按模型窗口减去输出与固定开销推导，并受上下限约束。"""
+    # 128k 窗口：128000 - 32000 - 24000 = 72000
+    assert resolve_compaction_trigger(128_000) == 72_000
+    # 超大窗口仍受既有阈值上限约束
+    assert resolve_compaction_trigger(1_000_000) == COMPACTION_TRIGGER_TOKENS
+    # 极小窗口回落到下限，避免每轮都压缩
+    assert resolve_compaction_trigger(1_000) == 16_000
+    # 未配置时使用保守默认窗口
+    assert resolve_compaction_trigger(None) == resolve_compaction_trigger(
+        rolling_memory.DEFAULT_MODEL_CONTEXT_TOKENS
+    )
+    assert resolve_compaction_trigger(0) == resolve_compaction_trigger(None)
+
+
+def test_default_compaction_window_is_300k() -> None:
+    """未配置模型窗口时，界面与滚动记忆都应使用 300K 压缩阈值。"""
+    assert COMPACTION_TRIGGER_TOKENS == 300_000
+    assert resolve_compaction_trigger(None) == 300_000
+
+
+def test_resolve_keep_recent_tokens_scales_with_trigger() -> None:
+    """保留最近原文的预算应随阈值缩放，并在默认阈值下保持既有取值。"""
+    assert resolve_keep_recent_tokens(200_000) == KEEP_RECENT_TOKENS
+    assert resolve_keep_recent_tokens(72_000) == 14_400
+    assert resolve_keep_recent_tokens(10_000) == 8_000
+    with pytest.raises(ValueError, match="必须大于 0"):
+        resolve_keep_recent_tokens(0)
+
+
+def test_estimate_context_usage_uses_derived_trigger() -> None:
+    """未显式给出阈值时应与编译滚动上下文使用同一推导口径。"""
+    usage = estimate_context_usage_after_turn(
+        None,
+        [],
+        "问",
+        "答",
+        context_window_tokens=128_000,
+    )
+
+    assert usage["threshold_tokens"] == 72_000
+
+
+def test_long_history_is_summarized_in_batches_without_truncation(monkeypatch) -> None:
+    """待压缩原文超单批上限时应分批递归摘要，而不是截断丢弃早期内容。"""
+    monkeypatch.setattr(rolling_memory, "_MAX_COMPACTION_INPUT_CHARS", 120)
+    entries = [
+        _message(index, "user" if index % 2 else "assistant", f"第{index}段内容" + "甲" * 40)
+        for index in range(1, 9)
+    ]
+    llm = SummaryLlm([f"## Goal{NL}第{index}批" for index in range(1, 9)])
+
+    context = compile_rolling_context(
+        entries,
+        llm,
+        trigger_tokens=10,
+        keep_recent_tokens=10,
+    )
+
+    assert context.compaction is not None
+    assert context.compaction.covered_through_seq == 8
+    assert context.memory_summary == "## Goal" + NL + "第8批"
+    # 每批一次调用，且后续批次把上一批摘要递归带上
+    assert len(llm.calls) > 1
+    assert "第1批" in llm.calls[1][1][1]
+    # 最早的原文只出现在第一批，不会被整段截断丢弃
+    assert "第1段内容" in llm.calls[0][1][1]
+
+
+def test_single_long_attachment_context_is_split_without_data_loss(monkeypatch) -> None:
+    """单条附件上下文超过摘要批次上限时，中间内容也必须进入模型输入。"""
+    monkeypatch.setattr(rolling_memory, "_MAX_COMPACTION_INPUT_CHARS", 120)
+    attachment_context = (
+        "附件开头标记"
+        + "甲" * 100
+        + "附件中间标记"
+        + "乙" * 100
+        + "附件结尾标记"
+    )
+    entries = [
+        {
+            "seq": 1,
+            "role": "user",
+            "content": "分析附件",
+            "metadata": {"attachment_context": attachment_context},
+        }
+    ]
+    llm = SummaryLlm([f"## Goal{NL}第{index}批" for index in range(1, 20)])
+
+    context = compile_rolling_context(
+        entries,
+        llm,
+        trigger_tokens=10,
+        keep_recent_tokens=10,
+    )
+
+    prompts = "\n".join(call[1][1] for call in llm.calls)
+    assert context.compaction is not None
+    assert len(llm.calls) > 1
+    assert "附件开头标记" in prompts
+    assert "附件中间标记" in prompts
+    assert "附件结尾标记" in prompts

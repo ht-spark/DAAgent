@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ApiConfig,
   loadConfigs,
@@ -13,6 +13,7 @@ import {
 } from '../apiConfigs'
 import { persistApiSettings, syncApiSettingsCache } from '../api'
 import ConfirmDialog from '../components/ConfirmDialog'
+import { pushModalLayer } from '../modalLayer'
 
 const EMPTY: Omit<ApiConfig, 'id' | 'createdAt'> = {
   name: '',
@@ -45,39 +46,68 @@ const SERVICE_META: Record<ExternalService, { name: string; keyLabel: string; hi
   },
 }
 
-export default function ApiManager({ embedded = false }: { embedded?: boolean }) {
+export default function ApiManager({
+  embedded = false,
+  active = true,
+}: {
+  embedded?: boolean
+  /** 作为设置弹窗内嵌面板时，表示当前分类是否可见 */
+  active?: boolean
+}) {
   const [configs, setConfigs] = useState<ApiConfig[]>([])
   const [editing, setEditing] = useState<Partial<ApiConfig>>(EMPTY)
   const [isNew, setIsNew] = useState(false)
   const [serviceConfigs, setServiceConfigs] = useState<Record<ExternalService, ExternalServiceConfig>>(
     loadExternalServiceConfigs,
   )
-  const persistDebounceRef = useRef<number | null>(null)
+  const persistTimerRef = useRef<number | null>(null)
+  // 待落盘快照：扩展服务输入期间只更新内存，停止输入后再写缓存与后端
+  const pendingPersistRef = useRef<Parameters<typeof persistApiSettings>[0] | null>(null)
   const editorOpen = isNew || Boolean(editing.id)
   // 编辑弹窗内联校验错误（替代浏览器 alert）
   const [formError, setFormError] = useState('')
   // 删除配置时的确认弹窗
   const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null)
 
-  // 弹窗打开时锁定页面滚动，关闭后恢复
-  useEffect(() => {
-    if (!editorOpen) return
-    const prev = document.body.style.overflow
-    document.body.style.overflow = 'hidden'
-    return () => {
-      document.body.style.overflow = prev
-    }
-  }, [editorOpen])
+  const cancelEdit = useCallback(() => {
+    setEditing({ ...EMPTY })
+    setIsNew(false)
+    setFormError('')
+  }, [])
 
-  // Esc 关闭编辑弹窗
+  /** 立即把待落盘快照写入浏览器缓存与后端文件 */
+  const flushPersist = useCallback(() => {
+    const snapshot = pendingPersistRef.current
+    pendingPersistRef.current = null
+    if (!snapshot) return
+    saveExternalServiceConfigs(snapshot.externalServices)
+    void persistApiSettings(snapshot)
+  }, [])
+
+  // 关闭设置弹窗会卸载本组件：清掉未触发的定时器并补一次落盘，避免丢失防抖窗口内的输入
+  useEffect(
+    () => () => {
+      if (persistTimerRef.current !== null) {
+        window.clearTimeout(persistTimerRef.current)
+        persistTimerRef.current = null
+      }
+      flushPersist()
+    },
+    [flushPersist],
+  )
+
+  // 编辑弹窗压入模态层：统一处理页面滚动锁，且 Esc 只关闭最上层弹窗
   useEffect(() => {
     if (!editorOpen) return
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') cancelEdit()
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [editorOpen])
+    return pushModalLayer(cancelEdit)
+  }, [editorOpen, cancelEdit])
+
+  // 切走分类（面板被隐藏）时收起内联弹窗与确认框，避免隐藏状态下仍占用滚动锁与 Esc
+  useEffect(() => {
+    if (active) return
+    cancelEdit()
+    setPendingDeleteId(null)
+  }, [active, cancelEdit])
 
   useEffect(() => {
     setConfigs(loadConfigs())
@@ -97,30 +127,26 @@ export default function ApiManager({ embedded = false }: { embedded?: boolean })
   function persist(next: ApiConfig[]) {
     setConfigs(next)
     saveConfigs(next)
+    // 扩展服务可能还有正在防抖的编辑，优先用最新快照，避免把旧值写回去
+    const externalServices = pendingPersistRef.current?.externalServices ?? serviceConfigs
     void persistApiSettings({
       configs: next,
       activeId: null,
-      externalServices: serviceConfigs,
+      externalServices,
     })
   }
 
-  function startNew() {
+  const startNew = useCallback(() => {
     setEditing({ ...EMPTY })
     setIsNew(true)
     setFormError('')
-  }
+  }, [])
 
-  function startEdit(c: ApiConfig) {
+  const startEdit = useCallback((c: ApiConfig) => {
     setEditing({ ...c })
     setIsNew(false)
     setFormError('')
-  }
-
-  function cancelEdit() {
-    setEditing({ ...EMPTY })
-    setIsNew(false)
-    setFormError('')
-  }
+  }, [])
 
   function save() {
     const name = (editing.name ?? '').trim() || '未命名配置'
@@ -178,13 +204,15 @@ export default function ApiManager({ embedded = false }: { embedded?: boolean })
   }
 
 
-  /** 扩展服务输入防抖：停止输入 400ms 后才写后端文件 */
+  /** 扩展服务输入防抖：停止输入 300ms 后才写浏览器缓存与后端文件。
+   *  逐字符同步写 localStorage 会阻塞主线程，是输入卡顿的直接原因。 */
   function schedulePersist(snapshot: Parameters<typeof persistApiSettings>[0]) {
-    if (persistDebounceRef.current !== null) window.clearTimeout(persistDebounceRef.current)
-    persistDebounceRef.current = window.setTimeout(() => {
-      persistDebounceRef.current = null
-      void persistApiSettings(snapshot)
-    }, 400)
+    pendingPersistRef.current = snapshot
+    if (persistTimerRef.current !== null) window.clearTimeout(persistTimerRef.current)
+    persistTimerRef.current = window.setTimeout(() => {
+      persistTimerRef.current = null
+      flushPersist()
+    }, 300)
   }
 
   function updateService(
@@ -197,9 +225,42 @@ export default function ApiManager({ embedded = false }: { embedded?: boolean })
       [service]: { ...serviceConfigs[service], [field]: value },
     }
     setServiceConfigs(next)
-    saveExternalServiceConfigs(next)
     schedulePersist({ configs, activeId: null, externalServices: next })
   }
+
+  // 模型列表只在配置变化时重建：在扩展服务输入框里打字不会连带重渲染这些行
+  const modelRows = useMemo(
+    () =>
+      configs.map((c) => (
+        <div className="api-model-row" key={c.id}>
+          <div className="api-model-identity">
+            <span className="api-model-mark" aria-hidden="true">{(c.model || c.name || 'M').slice(0, 1).toUpperCase()}</span>
+            <div className="api-model-copy">
+              <strong title={c.model || c.name}>{c.model || c.name || '未命名模型'}</strong>
+              <span>{PROVIDER_LABELS[c.provider] ?? c.provider}</span>
+            </div>
+          </div>
+          <div className="api-model-actions">
+            <button
+              type="button"
+              onClick={() => startEdit(c)}
+              aria-label={`编辑 ${c.model || c.name || '模型'}`}
+            >
+              编辑
+            </button>
+            <button
+              type="button"
+              className="danger"
+              onClick={() => setPendingDeleteId(c.id)}
+              aria-label={`删除 ${c.model || c.name || '模型'}`}
+            >
+              删除
+            </button>
+          </div>
+        </div>
+      )),
+    [configs, startEdit],
+  )
 
   return (
     <div className={`api-page ${embedded ? 'api-page--embedded' : ''}`}>
@@ -395,34 +456,7 @@ export default function ApiManager({ embedded = false }: { embedded?: boolean })
           </div>
         ) : (
           <div className="api-model-list">
-            {configs.map((c) => (
-              <div className="api-model-row" key={c.id}>
-                <div className="api-model-identity">
-                  <span className="api-model-mark" aria-hidden="true">{(c.model || c.name || 'M').slice(0, 1).toUpperCase()}</span>
-                  <div className="api-model-copy">
-                    <strong title={c.model || c.name}>{c.model || c.name || '未命名模型'}</strong>
-                    <span>{PROVIDER_LABELS[c.provider] ?? c.provider}</span>
-                  </div>
-                </div>
-                <div className="api-model-actions">
-                  <button
-                    type="button"
-                    onClick={() => startEdit(c)}
-                    aria-label={`编辑 ${c.model || c.name || '模型'}`}
-                  >
-                    编辑
-                  </button>
-                  <button
-                    type="button"
-                    className="danger"
-                    onClick={() => setPendingDeleteId(c.id)}
-                    aria-label={`删除 ${c.model || c.name || '模型'}`}
-                  >
-                    删除
-                  </button>
-                </div>
-              </div>
-            ))}
+            {modelRows}
           </div>
         )}
       </section>
