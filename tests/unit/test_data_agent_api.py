@@ -13,7 +13,7 @@ from data_analysis.agent.loop import Action, Finish
 from data_analysis.agent.state import Observation
 from server import main
 from server.schemas import AgentCommandDecisionBody
-from scr.math_modeling_agent import llm
+from data_analysis import llm
 
 
 def _upload(name: str, content: bytes = b"x,y\n1,2\n") -> UploadFile:
@@ -370,6 +370,17 @@ def test_agent_finish_exposes_public_reasoning_summary():
         "type": "agent_reasoning",
         "summary": "数据画像已经足以支撑结论",
     }
+
+
+def test_final_answer_is_split_into_streaming_chunks_without_content_loss():
+    """最终回答应分块推送，且拼接后与模型原文完全一致。"""
+    answer = "第一段分析结论。\n\n第二段包含 **Markdown** 与中文内容。" * 4
+
+    chunks = main._final_answer_chunks(answer)
+
+    assert len(chunks) > 1
+    assert all(0 < len(chunk) <= main.FINAL_ANSWER_CHUNK_CHARS for chunk in chunks)
+    assert "".join(chunks) == answer
 
 
 def test_agent_events_expose_model_reasoning_when_present():

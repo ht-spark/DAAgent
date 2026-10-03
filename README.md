@@ -278,7 +278,7 @@ cd web && npm run build
 **2.启动后端：**
 
 ```bash
-# 开发模式：只监听 server/ 和 scr/ 源码，建模产物写入 artifacts/ 不会中断任务
+# 开发模式：只监听 server/ 和 data_analysis/ 源码，运行产物不会触发服务重载
 uv run python -m server.dev
 
 # 如不使用 uv，可使用等效命令（不要省略 reload-dir 与 reload-exclude）

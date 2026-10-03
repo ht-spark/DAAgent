@@ -2,18 +2,67 @@
 
 from __future__ import annotations
 
+import logging
+import os
 from collections.abc import Mapping
+from dataclasses import dataclass, field
+from typing import Any
 
 from dotenv import load_dotenv
 from pydantic import JsonValue
-
-from scr.tools.tavily_search import TavilySearchTool, create_search_tool
 
 from .errors import ToolArgumentsError
 
 __all__ = ["MAX_WEB_SEARCH_QUERY_CHARS", "search_web"]
 
 MAX_WEB_SEARCH_QUERY_CHARS = 5_000
+LOGGER = logging.getLogger(__name__)
+
+
+@dataclass
+class TavilySearchTool:
+    """惰性创建 Tavily 客户端并执行通用网络检索。"""
+
+    api_key: str | None = None
+    max_results: int = 5
+    search_depth: str = "advanced"
+    _client: Any = field(default=None, repr=False)
+
+    @classmethod
+    def from_env(cls) -> "TavilySearchTool":
+        """从兼容的环境变量读取 Tavily 密钥。"""
+        return cls(
+            api_key=(
+                os.getenv("TAVILY_API_KEY")
+                or os.getenv("Tavily_API_KEY")
+                or os.getenv("tavily_api_key")
+            )
+        )
+
+    def search(self, query: str) -> dict[str, Any]:
+        """执行搜索；缺少密钥、依赖或网络失败时返回可诊断的空结果。"""
+        if not self.api_key:
+            return {"results": [], "answer": "", "error": "API key not configured"}
+        try:
+            if self._client is None:
+                from tavily import TavilyClient
+
+                self._client = TavilyClient(api_key=self.api_key)
+            return self._client.search(
+                query=query,
+                max_results=self.max_results,
+                search_depth=self.search_depth,
+                include_answer=True,
+                include_raw_content=False,
+            )
+        except (ImportError, OSError, RuntimeError, ValueError) as exc:
+            LOGGER.warning("Tavily 搜索不可用: %s", exc)
+            return {"results": [], "answer": "", "error": str(exc)}
+
+
+def create_search_tool() -> TavilySearchTool:
+    """使用环境变量创建 Tavily 搜索工具。"""
+    return TavilySearchTool.from_env()
 
 
 def search_web(

@@ -1,8 +1,8 @@
 // 本地保存的 API 配置（localStorage）
 // 一次填写，多次复用；并标记一个当前激活的供 Submit 默认填入。
 
-// 思考程度：off 表示不传给模型；其余透传给支持 reasoning_effort 的端点
-export type ReasoningEffort = 'off' | 'low' | 'medium' | 'high' | 'max'
+// 思考程度：close 表示不传给模型；其余透传给支持 reasoning_effort 的端点
+export type ReasoningEffort = 'close' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 
 export type ApiConfig = {
   id: string
@@ -19,19 +19,20 @@ export type ApiConfig = {
 
 /** 思考程度下拉选项（值 → 展示名） */
 export const REASONING_EFFORT_OPTIONS: { value: ReasoningEffort; label: string }[] = [
-  { value: 'off', label: '关闭' },
-  { value: 'low', label: '低' },
-  { value: 'medium', label: '中' },
-  { value: 'high', label: '高' },
-  { value: 'max', label: '最高' },
+  { value: 'close', label: 'close' },
+  { value: 'low', label: 'low' },
+  { value: 'medium', label: 'medium' },
+  { value: 'high', label: 'high' },
+  { value: 'xhigh', label: 'xhigh' },
+  { value: 'max', label: 'max' },
 ]
 
 export function isReasoningEffort(v: unknown): v is ReasoningEffort {
-  return v === 'off' || v === 'low' || v === 'medium' || v === 'high' || v === 'max'
+  return v === 'close' || v === 'low' || v === 'medium' || v === 'high' || v === 'xhigh' || v === 'max'
 }
 
 export function reasoningEffortLabel(v: ReasoningEffort | undefined): string {
-  if (!v || v === 'off') return '关闭'
+  if (!v) return 'close'
   return REASONING_EFFORT_OPTIONS.find((o) => o.value === v)?.label ?? v
 }
 
@@ -62,7 +63,13 @@ export function loadConfigs(): ApiConfig[] {
     const raw = localStorage.getItem(KEY_CONFIGS)
     if (!raw) return []
     const arr = JSON.parse(raw)
-    return Array.isArray(arr) ? arr : []
+    if (!Array.isArray(arr)) return []
+    return arr.map((config) => ({
+      ...config,
+      reasoningEffort: config.reasoningEffort === 'off'
+        ? 'close'
+        : isReasoningEffort(config.reasoningEffort) ? config.reasoningEffort : 'close',
+    }))
   } catch {
     return []
   }

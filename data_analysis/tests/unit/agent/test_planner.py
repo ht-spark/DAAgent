@@ -13,7 +13,7 @@ from data_analysis.agent.graph import (
     iter_plan_graph,
     run_plan_graph,
 )
-from data_analysis.agent.loop import AgentLoop, IterationLimitError
+from data_analysis.agent.loop import AgentLoop, Finish, IterationLimitError
 from data_analysis.agent.planner import (
     MAX_PLANNER_HISTORY_CHARS,
     MAX_PLANNER_HISTORY_ITEM_CHARS,
@@ -77,7 +77,7 @@ def test_planner_creates_valid_todo_list() -> None:
     assert [todo.id for todo in plan.todos] == ["todo_1", "todo_2"]
     assert plan.todos[1].depends_on == ["todo_1"]
     assert plan.reasoning_summary == "先核对数据质量，再基于可靠数据形成结论。"
-    assert "只生成简洁" in llm.calls[0][0][1]
+    assert "简单请求直接回答" in llm.calls[0][0][1]
     assert "Todo 之间职责不得重叠" in llm.calls[0][1][1]
     assert "优先检查并复用 `available_artifacts`" in llm.calls[0][1][1]
     assert "最多生成 8 个必要 Todo" in llm.calls[0][1][1]
@@ -86,7 +86,33 @@ def test_planner_creates_valid_todo_list() -> None:
     assert "不超过 30 个中文字符" in llm.calls[0][1][1]
     assert "不得把数据质量问题直接解释为业务变化" in llm.calls[0][1][1]
     assert "不能直接表述为因果关系" in llm.calls[0][1][1]
+    assert "问候或寒暄" in llm.calls[0][1][1]
+    assert "如果计划只会包含“回答用户”这一个 Todo" in llm.calls[0][1][1]
     assert "{{CONTEXT_JSON}}" not in llm.calls[0][1][1]
+
+
+def test_simple_greeting_returns_direct_answer_without_plan() -> None:
+    """问候类请求应由 Planner 直接回答，不产生 Todo 事件。"""
+    response = json.dumps({
+        "type": "finish",
+        "answer": "你好！有什么可以帮你？",
+    }, ensure_ascii=False)
+    llm = ScriptedLlm([response])
+    state = AgentState(user_query="你好")
+
+    events = list(iter_plan_graph(
+        state,
+        Planner(llm, []),
+        AgentLoop(llm, [], "依据当前 Todo 工作"),
+        Harness(ToolRegistry()),
+    ))
+
+    assert len(events) == 1
+    assert isinstance(events[0], Finish)
+    assert events[0].answer == "你好！有什么可以帮你？"
+    assert events[0].thought == ""
+    assert state.analysis_plan is None
+    assert [message.role for message in state.messages] == ["user", "assistant"]
 
 
 def test_planner_context_includes_memory_and_work_trajectory() -> None:

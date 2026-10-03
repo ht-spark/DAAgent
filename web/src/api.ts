@@ -440,8 +440,18 @@ export async function openProjectFolder(projectId: string): Promise<void> {
 
 /** 打开系统文件夹选择框；用户取消时返回 null。 */
 export async function selectSystemFolder(): Promise<string | null> {
-  const res = await fetch('/api/system/select-folder', { method: 'POST' })
-  if (!res.ok) throw new Error(await extractDetail(res, '无法打开系统文件夹选择框'))
+  let res: Response
+  try {
+    res = await fetch('/api/system/select-folder', { method: 'POST' })
+  } catch {
+    throw new Error('后端服务未启动，无法打开系统文件夹选择器')
+  }
+  if (!res.ok) {
+    if (res.status >= 500 && !(await checkBackendOnline())) {
+      throw new Error('后端服务未启动，无法打开系统文件夹选择器')
+    }
+    throw new Error(await extractDetail(res, '无法打开系统文件夹选择框'))
+  }
   const data = (await res.json()) as { path: string | null }
   return data.path ?? null
 }
@@ -449,6 +459,7 @@ export type BrainstormDiscussionSummary = {
   id: string
   title: string
   project_id?: string | null
+  model_config_id?: string | null
   updated_at: string
 }
 
@@ -712,6 +723,18 @@ export async function renameBrainstormDiscussion(discussionId: string, title: st
     body: JSON.stringify({ title }),
   })
   if (!res.ok) throw new Error(await extractDetail(res, '修改讨论名称失败'))
+}
+
+export async function updateBrainstormDiscussionModel(
+  discussionId: string,
+  configId: string,
+): Promise<void> {
+  const res = await fetch(`/api/knowledge/discussions/${encodeURIComponent(discussionId)}/model`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ config_id: configId }),
+  })
+  if (!res.ok) throw new Error(await extractDetail(res, '保存会话模型失败'))
 }
 
 /**

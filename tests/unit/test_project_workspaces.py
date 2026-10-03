@@ -109,6 +109,31 @@ def test_project_api_registers_existing_folder(tmp_path):
     assert result.root_path == str(tmp_path.resolve())
 
 
+def test_project_sessions_endpoint_keeps_sessions_isolated(tmp_path):
+    """项目会话接口只能返回绑定到指定项目的聊天。"""
+    first_dir = tmp_path / "first"
+    second_dir = tmp_path / "second"
+    first_dir.mkdir()
+    second_dir.mkdir()
+    first = create_project(str(first_dir), "项目一")
+    second = create_project(str(second_dir), "项目二")
+    first_session = store.create_session(
+        "项目一会话",
+        project_id=first["id"],
+        cwd=first["root_path"],
+    )
+    store.create_session(
+        "项目二会话",
+        project_id=second["id"],
+        cwd=second["root_path"],
+    )
+
+    sessions = asyncio.run(main.list_project_sessions_endpoint(first["id"]))
+
+    assert [item.id for item in sessions] == [first_session]
+    assert all(item.project_id == first["id"] for item in sessions)
+
+
 def test_select_folder_endpoint_returns_path(tmp_path, monkeypatch):
     """系统文件夹选择接口应把对话框结果原样返回。"""
     monkeypatch.setattr(main, "_open_native_folder_dialog", lambda initial_dir=None: str(tmp_path))
@@ -116,6 +141,40 @@ def test_select_folder_endpoint_returns_path(tmp_path, monkeypatch):
     result = asyncio.run(main.select_system_folder_endpoint())
 
     assert result == {"path": str(tmp_path)}
+
+
+def test_native_folder_dialog_uses_windows_picker(tmp_path, monkeypatch):
+    """Windows 应使用独立 Shell 选择器，避免 tkinter 工作线程弹窗失败。"""
+    monkeypatch.setattr(main.sys, "platform", "win32")
+    monkeypatch.setattr(
+        main,
+        "_open_windows_folder_dialog",
+        lambda initial_dir=None: str(tmp_path),
+    )
+
+    assert main._open_native_folder_dialog() == str(tmp_path)
+
+
+def test_windows_folder_dialog_passes_initial_directory(tmp_path, monkeypatch):
+    """Windows 选择器应以参数传递初始目录，并返回选中的路径。"""
+    captured = {}
+
+    def fake_run(command, **options):
+        captured["command"] = command
+        captured["environment"] = options["env"]
+        return type(
+            "Result",
+            (),
+            {"returncode": 0, "stdout": str(tmp_path), "stderr": ""},
+        )()
+
+    monkeypatch.setattr(main.subprocess, "run", fake_run)
+
+    selected = main._open_windows_folder_dialog(str(tmp_path))
+
+    assert selected == str(tmp_path.resolve())
+    assert "-STA" in captured["command"]
+    assert captured["environment"]["DAAGENT_INITIAL_FOLDER"] == str(tmp_path)
 
 
 def test_select_folder_endpoint_cancel_returns_null(monkeypatch):
@@ -128,7 +187,7 @@ def test_select_folder_endpoint_cancel_returns_null(monkeypatch):
 
 
 def test_select_folder_endpoint_maps_gui_failure(monkeypatch):
-    """GUI 不可用时映射为 503，便于前端回退手输路径。"""
+    """GUI 不可用时映射为 503，由前端展示错误且不再要求手输路径。"""
     def _boom(initial_dir=None):
         raise RuntimeError("当前环境缺少 tkinter，无法打开系统文件夹选择框")
 

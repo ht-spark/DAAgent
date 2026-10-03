@@ -53,9 +53,7 @@ type Props = {
   onConverter: () => void
   onTaskExpert: () => void
   onSkills: () => void
-  onTemplates: () => void
   onOpenDiscussion: (id: string, projectId: string | null) => void
-  onDocs: () => void
   onSettings: () => void
   onDiscussionDeleted?: (id: string) => void
 }
@@ -63,22 +61,6 @@ type Props = {
 const LOGO = (
   <img className="sidebar-logo-img" src="/logo.png" alt="" aria-hidden="true" />
 )
-
-const CHAT_ICON = (
-  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
-    <path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z" />
-  </svg>
-)
-
-function formatRelativeTime(iso: string) {
-  const time = new Date(iso).getTime()
-  if (Number.isNaN(time)) return ''
-  const diff = Date.now() - time
-  if (diff < 60_000) return '刚刚'
-  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m`
-  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h`
-  return `${Math.floor(diff / 86_400_000)}d`
-}
 
 export default function Sidebar({
   section,
@@ -92,9 +74,7 @@ export default function Sidebar({
   onConverter,
   onTaskExpert,
   onSkills,
-  onTemplates,
   onOpenDiscussion,
-  onDocs,
   onSettings,
   onDiscussionDeleted,
 }: Props) {
@@ -115,29 +95,43 @@ export default function Sidebar({
   const [pendingDelete, setPendingDelete] = useState<BrainstormDiscussionSummary | null>(null)
   const [busy, setBusy] = useState(false)
   const [projectsExpanded, setProjectsExpanded] = useState(true)
+  const [expandedProjectIds, setExpandedProjectIds] = useState<Set<string>>(new Set())
 
   useEffect(() => {
     void fetchProjects()
       .then((items) => {
         setProjects(items)
-        if (!activeProjectId && items.length) onProjectChange(items[0].id)
+        if (!activeProjectId && items.length) {
+          setExpandedProjectIds(new Set([items[0].id]))
+          onProjectChange(items[0].id)
+        }
       })
       .catch(() => setProjects([]))
   }, [])
 
   useEffect(() => {
-    void fetchBrainstormDiscussions(activeProjectId)
+    void fetchBrainstormDiscussions()
       .then(setDiscussions)
       .catch(() => setDiscussions([]))
-  }, [section, activeDiscussionId, activeProjectId])
+  }, [section, activeDiscussionId])
+
+  useEffect(() => {
+    if (!activeProjectId) return
+    setExpandedProjectIds((current) => {
+      if (current.has(activeProjectId)) return current
+      const next = new Set(current)
+      next.add(activeProjectId)
+      return next
+    })
+  }, [activeProjectId])
 
   useEffect(() => {
     if (section !== 'modeling') return
     const timer = window.setInterval(() => {
-      void fetchBrainstormDiscussions(activeProjectId).then(setDiscussions).catch(() => {})
+      void fetchBrainstormDiscussions().then(setDiscussions).catch(() => {})
     }, 5000)
     return () => window.clearInterval(timer)
-  }, [section, activeProjectId])
+  }, [section])
 
   useEffect(() => {
     if (!menuState) return
@@ -163,18 +157,18 @@ export default function Sidebar({
 
   async function handleAddProject() {
     setProjectError('')
-    let rootPath: string | null = null
+    let rootPath: string | null
     try {
-      // 优先弹出系统原生文件夹选择框（与资源管理器一致）
       rootPath = await selectSystemFolder()
-    } catch {
-      // 后端无法弹出 GUI 时退回手输路径，保证远程/无桌面场景仍可用
-      rootPath = window.prompt('无法打开系统选择框，请输入项目文件夹的绝对路径，例如 D:\\Projects\\DataProject')?.trim() || null
+    } catch (error) {
+      setProjectError(error instanceof Error ? error.message : '无法打开系统文件夹选择器')
+      return
     }
     if (!rootPath) return
     try {
       const project = await createProject(rootPath)
       setProjects(await fetchProjects())
+      setExpandedProjectIds((current) => new Set(current).add(project.id))
       onProjectChange(project.id)
     } catch (error) {
       setProjectError(error instanceof Error ? error.message : '添加项目失败')
@@ -196,6 +190,12 @@ export default function Sidebar({
       await deleteProject(project.id)
       const remaining = await fetchProjects()
       setProjects(remaining)
+      setDiscussions(await fetchBrainstormDiscussions())
+      setExpandedProjectIds((current) => {
+        const next = new Set(current)
+        next.delete(project.id)
+        return next
+      })
       onProjectChange(remaining[0]?.id ?? null)
     } catch (error) {
       setProjectError(error instanceof Error ? error.message : '移除项目失败')
@@ -204,10 +204,20 @@ export default function Sidebar({
 
   async function refresh() {
     try {
-      setDiscussions(await fetchBrainstormDiscussions(activeProjectId))
+      setDiscussions(await fetchBrainstormDiscussions())
     } catch {
       /* keep current list on failure */
     }
+  }
+
+  function toggleProject(project: ProjectSummary) {
+    setExpandedProjectIds((current) => {
+      const next = new Set(current)
+      if (next.has(project.id)) next.delete(project.id)
+      else next.add(project.id)
+      return next
+    })
+    if (project.id !== activeProjectId) onProjectChange(project.id)
   }
 
   async function handleRenameSubmit(item: BrainstormDiscussionSummary) {
@@ -442,24 +452,6 @@ export default function Sidebar({
           </svg>
           <span className="nav-text sidebar-collapse-hide">技能</span>
         </button>
-        <button
-          className={`nav-item ${section === 'templates' ? 'active' : ''}`}
-          onClick={onTemplates}
-          title={collapsed ? '模版' : undefined}
-        >
-          <svg
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="1.8"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          >
-            <rect x="4" y="3" width="16" height="18" rx="2" />
-            <path d="M8 7h8M8 12h8M8 17h5" />
-          </svg>
-          <span className="nav-text sidebar-collapse-hide">模版</span>
-        </button>
       </div>
 
       {/* 项目入口：分组列表形态，底层仍走 onProjectChange / add / remove */}
@@ -497,106 +489,117 @@ export default function Sidebar({
             ) : (
               projects.map((project) => {
                 const isActive = project.id === activeProjectId
+                const isExpanded = expandedProjectIds.has(project.id)
+                const projectDiscussions = discussions.filter(
+                  (item) => item.project_id === project.id,
+                )
                 return (
-                  <button
-                    key={project.id}
-                    type="button"
-                    role="listitem"
-                    className={`project-item ${isActive ? 'active' : ''}`}
-                    onClick={() => {
-                      if (!isActive) onProjectChange(project.id)
-                    }}
-                    title={collapsed ? project.title : undefined}
-                    aria-current={isActive ? 'true' : undefined}
-                  >
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true">
-                      <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z" />
-                    </svg>
-                    <span className="nav-text sidebar-collapse-hide">{project.title}</span>
-                  </button>
+                  <div key={project.id} role="listitem" className="project-node">
+                    <button
+                      type="button"
+                      className={`project-item ${isActive ? 'active' : ''}`}
+                      onClick={() => toggleProject(project)}
+                      title={collapsed ? project.title : undefined}
+                      aria-current={isActive ? 'true' : undefined}
+                      aria-expanded={isExpanded}
+                    >
+                      <svg
+                        className={`project-node-chevron sidebar-collapse-hide ${isExpanded ? 'is-open' : ''}`}
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        aria-hidden="true"
+                      >
+                        <path d="M9 6l6 6-6 6" />
+                      </svg>
+                      <svg className="project-folder-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true">
+                        <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z" />
+                      </svg>
+                      <span className="nav-text sidebar-collapse-hide">{project.title}</span>
+                    </button>
+                    {isExpanded && !collapsed && (
+                      <div className="project-session-list" role="list" aria-label={`${project.title}的聊天会话`}>
+                        {projectDiscussions.length === 0 ? (
+                          <p className="project-session-empty">暂无聊天会话</p>
+                        ) : (
+                          projectDiscussions.map((item) => {
+                            const isMenuOpen = menuState?.id === item.id
+                            const isRenaming = renamingId === item.id
+                            return (
+                              <div
+                                key={item.id}
+                                role="listitem"
+                                className={`session-item project-session-item ${activeDiscussionId === item.id ? 'active' : ''}`}
+                              >
+                                {isRenaming ? (
+                                  <form
+                                    className="session-rename-form"
+                                    onSubmit={(e) => {
+                                      e.preventDefault()
+                                      void handleRenameSubmit(item)
+                                    }}
+                                  >
+                                    <input
+                                      className="session-rename-input"
+                                      value={renameDraft}
+                                      autoFocus
+                                      maxLength={80}
+                                      disabled={busy}
+                                      onChange={(e) => setRenameDraft(e.target.value)}
+                                      onBlur={() => setRenamingId(null)}
+                                      onKeyDown={(e) => {
+                                        if (e.key === 'Escape') {
+                                          e.preventDefault()
+                                          setRenamingId(null)
+                                        }
+                                      }}
+                                    />
+                                  </form>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    className="session-open"
+                                    onClick={() => onOpenDiscussion(item.id, project.id)}
+                                    title={item.title}
+                                  >
+                                    <span className="session-text">
+                                      {item.title || '未命名讨论'}
+                                    </span>
+                                  </button>
+                                )}
+                                {!isRenaming && (
+                                  <div className="session-actions">
+                                    <button
+                                      type="button"
+                                      className={`session-more ${isMenuOpen ? 'is-open' : ''}`}
+                                      aria-label="会话操作"
+                                      aria-expanded={isMenuOpen}
+                                      onClick={(e) => openSessionMenu(e, item)}
+                                    >
+                                      <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                                        <circle cx="5" cy="12" r="1.6" />
+                                        <circle cx="12" cy="12" r="1.6" />
+                                        <circle cx="19" cy="12" r="1.6" />
+                                      </svg>
+                                    </button>
+                                  </div>
+                                )}
+                              </div>
+                            )
+                          })
+                        )}
+                      </div>
+                    )}
+                  </div>
                 )
               })
             )}
           </div>
         )}
         {projectError && <p className="project-switcher-error sidebar-collapse-hide">{projectError}</p>}
-      </div>
-
-      <div className="rail-section rail-recent">
-        <div className="rail-label sidebar-collapse-hide">最近</div>
-        {discussions.length === 0 ? (
-          <p className="rail-recent-empty sidebar-collapse-hide">暂无聊天记录</p>
-        ) : (
-          discussions.map((item) => {
-            const isMenuOpen = menuState?.id === item.id
-            const isRenaming = renamingId === item.id
-            return (
-              <div
-                key={item.id}
-                className={`session-item ${activeDiscussionId === item.id ? 'active' : ''}`}
-              >
-                {isRenaming ? (
-                  <form
-                    className="session-rename-form sidebar-collapse-hide"
-                    onSubmit={(e) => {
-                      e.preventDefault()
-                      void handleRenameSubmit(item)
-                    }}
-                  >
-                    <input
-                      className="session-rename-input"
-                      value={renameDraft}
-                      autoFocus
-                      maxLength={80}
-                      disabled={busy}
-                      onChange={(e) => setRenameDraft(e.target.value)}
-                      onBlur={() => setRenamingId(null)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Escape') {
-                          e.preventDefault()
-                          setRenamingId(null)
-                        }
-                      }}
-                    />
-                  </form>
-                ) : (
-                  <button
-                    type="button"
-                    className="session-open"
-                    onClick={() => onOpenDiscussion(item.id, item.project_id ?? null)}
-                    title={item.title}
-                  >
-                    {CHAT_ICON}
-                    <span className="session-text sidebar-collapse-hide">
-                      {item.title || '未命名讨论'}
-                    </span>
-                    <small className="sidebar-collapse-hide">
-                      {formatRelativeTime(item.updated_at)}
-                    </small>
-                  </button>
-                )}
-
-                {!isRenaming && !collapsed && (
-                  <div className="session-actions">
-                    <button
-                      type="button"
-                      className={`session-more ${isMenuOpen ? 'is-open' : ''}`}
-                      aria-label="会话操作"
-                      aria-expanded={isMenuOpen}
-                      onClick={(e) => openSessionMenu(e, item)}
-                    >
-                      <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-                        <circle cx="5" cy="12" r="1.6" />
-                        <circle cx="12" cy="12" r="1.6" />
-                        <circle cx="19" cy="12" r="1.6" />
-                      </svg>
-                    </button>
-                  </div>
-                )}
-              </div>
-            )
-          })
-        )}
       </div>
 
       <div className="rail-section rail-secondary">
@@ -610,18 +613,6 @@ export default function Sidebar({
             <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3h.1a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8v.1a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z" strokeLinecap="round" strokeLinejoin="round" />
           </svg>
           <span className="nav-text sidebar-collapse-hide">设置</span>
-        </button>
-        <button
-          className={`nav-item ${section === 'docs' ? 'active' : ''}`}
-          onClick={onDocs}
-          title={collapsed ? '项目文档' : undefined}
-        >
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
-            <path d="M4 4h11l5 5v11a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1z" />
-            <path d="M14 4v5h5" strokeLinecap="round" strokeLinejoin="round" />
-            <path d="M8 13h8M8 17h8" strokeLinecap="round" />
-          </svg>
-          <span className="nav-text sidebar-collapse-hide">项目文档</span>
         </button>
       </div>
 

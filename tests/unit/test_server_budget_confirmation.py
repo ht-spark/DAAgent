@@ -1,37 +1,15 @@
-"""预算确认接口的回归测试。"""
-from __future__ import annotations
+"""旧建模运行接口移除后的兼容行为回归测试。"""
 
-import asyncio
+from fastapi.testclient import TestClient
 
 from server import main
-from server.schemas import BudgetConfirmBody
 
 
-def test_initial_budget_confirmation_accepts_only_g0_field(monkeypatch):
-    """确认 G0 预算时接口可用，并将校验后的决定交给运行线程。"""
-    submitted: dict[str, object] = {}
+def test_removed_legacy_run_endpoint_returns_gone() -> None:
+    """删除 scr 后，旧运行接口应明确返回 410，而不是导致服务导入失败。"""
+    client = TestClient(main.app)
 
-    monkeypatch.setattr(main, "get_pending_budget", lambda run_id: {"question_id": ""})
+    response = client.post("/api/runs", json={})
 
-    def _submit(run_id: str, decision: dict | None) -> bool:
-        submitted["run_id"] = run_id
-        submitted["decision"] = decision
-        return True
-
-    monkeypatch.setattr(main, "submit_budget_decision", _submit)
-
-    result = asyncio.run(
-        main.confirm_budget_endpoint(
-            "run-g0",
-            BudgetConfirmBody(
-                use_defaults=False,
-                limits={"intake_retry": 3, "unexpected": 99},
-            ),
-        )
-    )
-
-    assert result["ok"] is True
-    assert submitted == {
-        "run_id": "run-g0",
-        "decision": {"intake_retry": 3},
-    }
+    assert response.status_code == 410
+    assert "统一 Agent" in response.json()["detail"]

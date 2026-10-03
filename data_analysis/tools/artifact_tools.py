@@ -212,7 +212,7 @@ def _write_by_suffix(
     if suffix == ".docx":
         if not isinstance(content, str):
             raise TypeError(".docx 产物的 content 必须是 Markdown 字符串")
-        from scr.tools.md2docx import markdown_to_docx
+        from .docx_writer import markdown_to_docx
 
         with redirect_stdout(io.StringIO()):
             markdown_to_docx(

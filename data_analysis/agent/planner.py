@@ -12,7 +12,7 @@ from pydantic import ValidationError
 
 from ..tools.registry import ToolSpec
 from ..cancellation import invoke_cancellable, raise_if_cancelled
-from .loop import LlmClient, extract_model_reasoning
+from .loop import Finish, LlmClient, extract_model_reasoning
 from .state import AgentState, AnalysisPlan, clip_text
 
 _PLANNER_PROMPT_PATH = Path(__file__).resolve().parents[1] / "prompts" / "planner.md"
@@ -58,8 +58,21 @@ class Planner:
         self._retries = retries
         self._cancel_check = cancel_check
 
-    def create_plan(self, state: AgentState) -> AnalysisPlan:
-        """根据用户目标、附件与工具生成经过校验的执行计划。"""
+    def create_plan(
+        self,
+        state: AgentState,
+        *,
+        allow_direct: bool = True,
+    ) -> AnalysisPlan | Finish:
+        """根据请求复杂度直接回答，或生成经过校验的执行计划。
+
+        Args:
+            state: 当前 Agent 状态。
+            allow_direct: 是否允许无需规划时直接返回最终回答。
+
+        Returns:
+            直接回答或结构化执行计划。
+        """
         messages = self.build_messages(state)
         last_error: Exception | None = None
         for attempt in range(self._retries + 1):
@@ -72,19 +85,25 @@ class Planner:
             # 抽取模型真实思考过程，挂到计划上供前端展示
             model_reasoning = extract_model_reasoning(response, raw)
             try:
-                plan = _parse_plan(raw)
+                decision = _parse_planner_decision(raw)
+                if isinstance(decision, Finish):
+                    if not allow_direct:
+                        raise PlannerError("当前请求必须返回可执行计划，不能直接回答")
+                    if model_reasoning:
+                        decision = decision.model_copy(update={"reasoning": model_reasoning})
+                    return decision
                 if model_reasoning:
-                    plan.model_reasoning = model_reasoning
-                if len(plan.todos) > self._max_todos:
+                    decision.model_reasoning = model_reasoning
+                if len(decision.todos) > self._max_todos:
                     raise PlannerError(
-                        f"Todo 数量 {len(plan.todos)} 超过上限 {self._max_todos}"
+                        f"Todo 数量 {len(decision.todos)} 超过上限 {self._max_todos}"
                     )
                 if any(
                     todo.status != "pending" or todo.result_summary is not None
-                    for todo in plan.todos
+                    for todo in decision.todos
                 ):
                     raise PlannerError("Planner 生成的 Todo 必须从 pending 状态开始且不能预填结果")
-                return plan
+                return decision
             except (PlannerError, ValidationError) as exc:
                 last_error = exc
                 if attempt >= self._retries:
@@ -145,10 +164,13 @@ class Planner:
             work_trajectory=state.work_trajectory.model_copy(deep=True),
             run_budget=state.run_budget,
         )
-        return self.create_plan(recovery_state)
+        recovery = self.create_plan(recovery_state, allow_direct=False)
+        if isinstance(recovery, Finish):  # pragma: no cover - allow_direct=False 已拦截
+            raise PlannerError("失败恢复必须返回可执行计划")
+        return recovery
 
     def build_messages(self, state: AgentState) -> list[tuple[str, str]]:
-        """构造只负责规划、不执行工具的 Planner 消息。"""
+        """构造负责请求分流与规划、不执行工具的 Planner 消息。"""
         tools = [
             {"name": tool.name, "description": tool.description}
             for tool in self._tools
@@ -190,7 +212,7 @@ class Planner:
         }
         prompt = _render_planner_prompt(context, self._max_todos)
         return [
-            ("system", "你是执行计划编译器，只生成简洁、可执行、可验证的 Todo List。"),
+            ("system", "你是请求路由器与执行计划编译器：简单请求直接回答，复杂请求才生成 Todo List。"),
             ("user", prompt),
         ]
 
@@ -251,8 +273,8 @@ def _render_planner_prompt(context: dict[str, Any], max_todos: int) -> str:
     )
 
 
-def _parse_plan(raw: str) -> AnalysisPlan:
-    """从常见文本包装中提取并校验唯一计划对象。"""
+def _parse_planner_decision(raw: str) -> AnalysisPlan | Finish:
+    """从常见文本包装中提取并校验直接回答或计划对象。"""
     text = re.sub(
         r"^\s*<think>.*?</think>\s*",
         "",
@@ -276,14 +298,18 @@ def _parse_plan(raw: str) -> AnalysisPlan:
                 candidate, _ = decoder.raw_decode(text, index)
             except json.JSONDecodeError:
                 continue
-            if isinstance(candidate, dict) and "todos" in candidate:
+            if isinstance(candidate, dict) and (
+                "todos" in candidate or candidate.get("type") == "finish"
+            ):
                 candidates.append(candidate)
         if len(candidates) != 1:
-            raise PlannerError("Planner 响应必须包含唯一计划 JSON 对象") from exc
+            raise PlannerError("Planner 响应必须包含唯一的直接回答或计划 JSON 对象") from exc
         payload = candidates[0]
     if not isinstance(payload, dict):
         raise PlannerError("Planner 响应必须是 JSON 对象")
     try:
+        if payload.get("type") == "finish":
+            return Finish.model_validate(payload)
         return AnalysisPlan.model_validate(payload)
     except ValidationError as exc:
         raise PlannerError(f"计划字段无效: {exc.errors()}") from exc

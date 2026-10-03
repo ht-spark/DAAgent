@@ -14,6 +14,7 @@ import {
   reconnectAgentChatRun,
   streamDataAgentMessage,
   syncApiSettingsCache,
+  updateBrainstormDiscussionModel,
   type AgentTraceEvent,
   type AgentChatHandlers,
   type ContextUsage,
@@ -998,6 +999,7 @@ export default function NewChat({
   const [projectSidebarWidth, setProjectSidebarWidth] = useState(loadProjectSidebarWidth)
   const [apiConfigs, setApiConfigs] = useState<ApiConfig[]>([])
   const [selectedConfigId, setSelectedConfigId] = useState<string>('')
+  const apiConfigsRef = useRef<ApiConfig[]>([])
   const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBaseSummary[]>([])
   // 不预选知识库，用户可以选择零个或多个
   const [knowledgeBaseIds, setKnowledgeBaseIds] = useState<string[]>([])
@@ -1189,6 +1191,7 @@ export default function NewChat({
   }
 
   function applyApiConfigs(configs: ApiConfig[]) {
+    apiConfigsRef.current = configs
     setApiConfigs(configs)
     setSelectedConfigId((current) =>
       configs.some((config) => config.id === current) ? current : (configs[0]?.id ?? ''),
@@ -1231,6 +1234,7 @@ export default function NewChat({
       setMessages([])
       setTitle('新讨论')
       setAgentTrace([])
+      setSelectedConfigId(apiConfigsRef.current[0]?.id ?? '')
       return
     }
     let cancelled = false
@@ -1273,6 +1277,16 @@ export default function NewChat({
           ? [...savedMessages, { role: 'user', content: activeRun.message }, { role: 'assistant', content: '' }]
           : savedMessages)
         setTitle(discussion.title)
+        const availableConfigs = apiConfigsRef.current
+        setSelectedConfigId(
+          discussion.model_config_id
+          && (
+            !availableConfigs.length
+            || availableConfigs.some((config) => config.id === discussion.model_config_id)
+          )
+            ? discussion.model_config_id
+            : (availableConfigs[0]?.id ?? ''),
+        )
         if (activeRun) {
           const controller = new AbortController()
           streamControllerRef.current = controller
@@ -1392,6 +1406,17 @@ export default function NewChat({
     const normalizedTitle = title.trim() || '新讨论'
     setTitle(normalizedTitle)
     if (discussionId) await renameBrainstormDiscussion(discussionId, normalizedTitle)
+  }
+
+  async function selectModel(configId: string) {
+    const previousConfigId = selectedConfigId
+    setSelectedConfigId(configId)
+    if (!discussionId) return
+    try {
+      await updateBrainstormDiscussionModel(discussionId, configId)
+    } catch {
+      setSelectedConfigId((current) => current === configId ? previousConfigId : current)
+    }
   }
 
   if (mode === 'modeling') {
@@ -1634,14 +1659,14 @@ export default function NewChat({
                               className={`rag-model-option${isActive ? ' is-active' : ''}`}
                               disabled={isSubmitting}
                               onClick={(event) => {
-                                setSelectedConfigId(config.id)
+                                void selectModel(config.id)
                                 const details = event.currentTarget.closest('details')
                                 if (details instanceof HTMLDetailsElement) details.open = false
                               }}
                             >
                               <span className="rag-model-option-main">
                                 <span className="rag-model-option-name">{label}</span>
-                                {config.reasoningEffort && config.reasoningEffort !== 'off' ? (
+                                {config.reasoningEffort && config.reasoningEffort !== 'close' ? (
                                   <span className="rag-model-effort">思考 {config.reasoningEffort}</span>
                                 ) : null}
                               </span>

@@ -1,6 +1,8 @@
 """本地开发服务器重载范围测试。"""
 from __future__ import annotations
 
+import importlib
+
 from server import dev
 
 
@@ -17,9 +19,14 @@ def test_dev_server_watches_only_source_directories(monkeypatch):
 
     reload_dirs = captured["kwargs"]["reload_dirs"]
     assert str(dev.PROJECT_ROOT / "server") in reload_dirs
-    assert str(dev.PROJECT_ROOT / "scr") in reload_dirs
     assert str(dev.PROJECT_ROOT / "data_analysis") in reload_dirs
+    assert str(dev.PROJECT_ROOT / "scr") not in reload_dirs
     assert str(dev.PROJECT_ROOT / "artifacts") not in reload_dirs
-    assert captured["kwargs"]["reload_excludes"] == [
-        str(dev.PROJECT_ROOT / "artifacts")
-    ]
+    assert "reload_excludes" not in captured["kwargs"]
+
+
+def test_server_entrypoint_imports_without_legacy_scr_package() -> None:
+    """删除旧 scr 包后，统一 Agent 服务入口仍应可完整导入。"""
+    module = importlib.import_module("server.main")
+
+    assert module.app is not None

@@ -15,7 +15,7 @@
 
 ## Coding Style & Naming Conventions
 
-Use Python 3.11+, four-space indentation, `snake_case` for modules/functions/variables, `PascalCase` for classes, and `UPPER_CASE` for constants. Add type annotations and Google-style docstrings to public Python functions. Keep imports ordered: standard library, third-party, then project modules. Prefer `logging` over `print`, catch specific exceptions, and keep prompts under `scr/prompts/` rather than embedding large prompt strings in code.
+Use Python 3.11+, four-space indentation, `snake_case` for modules/functions/variables, `PascalCase` for classes, and `UPPER_CASE` for constants. Add type annotations and Google-style docstrings to public Python functions. Keep imports ordered: standard library, third-party, then project modules. Prefer `logging` over `print`, catch specific exceptions, and keep prompts under `data_analysis/prompts/` rather than embedding large prompt strings in code.
 
 Use TypeScript/React components in `PascalCase`; keep page-specific styles in `web/src/forms.css` and avoid unrelated CSS rewrites. Follow existing formatting; this repository does not currently enforce Black, isort, or ESLint through scripts.
 

@@ -163,6 +163,11 @@ def iter_plan_graph(
     if max_todo_steps < 1:
         raise ValueError("max_todo_steps 必须大于 0")
     plan = planner.create_plan(state)
+    if isinstance(plan, Finish):
+        state.append_message("user", state.user_query)
+        state.append_message("assistant", plan.answer)
+        yield plan
+        return
     state.analysis_plan = plan
     replan_count = 0
     yield PlanCreated(plan=plan)

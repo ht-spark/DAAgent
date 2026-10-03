@@ -1,13 +1,10 @@
 """LLM 生成参数传递测试（无网络）。"""
 from __future__ import annotations
 
-import asyncio
 import sys
-import threading
 from types import ModuleType
 
-from scr.math_modeling_agent.llm import create_llm
-from server import runs
+from data_analysis.llm import create_llm
 
 
 def test_create_llm_uses_explicit_generation_settings(monkeypatch):
@@ -29,17 +26,17 @@ def test_create_llm_uses_explicit_generation_settings(monkeypatch):
         model="test-model",
         max_tokens=3072,
         temperature=0.0,
-        reasoning_effort="high",
+        reasoning_effort="xhigh",
         fallback_env=False,
     )
 
     assert isinstance(llm, FakeChatOpenAI)
     assert captured["max_tokens"] == 3072
     assert captured["temperature"] == 0.0
-    assert captured["reasoning_effort"] == "high"
+    assert captured["reasoning_effort"] == "xhigh"
 
 
-def test_create_llm_omits_reasoning_effort_when_off(monkeypatch):
+def test_create_llm_omits_reasoning_effort_when_close(monkeypatch):
     """关闭思考程度时不得向端点透传 reasoning_effort。"""
     captured: dict[str, object] = {}
 
@@ -56,65 +53,9 @@ def test_create_llm_omits_reasoning_effort_when_off(monkeypatch):
         api_key="test-key",
         base_url="https://example.invalid/v1",
         model="test-model",
-        reasoning_effort="off",
+        reasoning_effort="close",
         fallback_env=False,
     )
 
     assert isinstance(llm, FakeChatOpenAI)
     assert "reasoning_effort" not in captured
-
-
-def test_modeling_run_forwards_generation_settings(monkeypatch, tmp_path):
-    """建模执行器必须把表单已校验的生成参数传给 LLM 工厂。"""
-    captured: dict[str, object] = {}
-    retrieval_kwargs: dict[str, object] = {}
-    graph_kwargs: dict[str, object] = {}
-    budget_event = threading.Event()
-    budget_event.set()
-
-    def fake_create_llm(**kwargs):
-        captured.update(kwargs)
-        return "modeling-llm"
-
-    monkeypatch.setattr(runs, "create_llm", fake_create_llm)
-    monkeypatch.setattr(runs, "mark_running", lambda _run_id: None)
-    monkeypatch.setattr(runs, "append_progress", lambda _run_id, _event: None)
-    monkeypatch.setattr(runs, "request_budget_confirmation", lambda *_args: budget_event)
-    monkeypatch.setattr(runs, "take_budget_decision", lambda _run_id: None)
-    monkeypatch.setattr(runs, "clear_budget_pending", lambda _run_id: None)
-    monkeypatch.setattr(
-        runs,
-        "retrieve_knowledge",
-        lambda *_args, **kwargs: retrieval_kwargs.update(kwargs) or [],
-    )
-    monkeypatch.setattr(
-        runs,
-        "run_graph",
-        lambda **kwargs: graph_kwargs.update(kwargs) or {},
-    )
-    monkeypatch.setattr(runs, "set_result", lambda *_args: None)
-
-    asyncio.run(
-        runs.execute_run(
-            run_id="run-test",
-            problem_text="test problem",
-            data_paths=[],
-            output_dir=str(tmp_path),
-            model_config={
-                "provider": "custom",
-                "api_key": "test-key",
-                "base_url": "https://example.invalid/v1",
-                "model": "test-model",
-                "max_tokens": 4096,
-                "temperature": 0.25,
-                "reasoning_effort": "medium",
-            },
-            knowledge_base_ids=["market-kb", "metric-kb"],
-        )
-    )
-
-    assert captured["max_tokens"] == 4096
-    assert captured["temperature"] == 0.25
-    assert captured["reasoning_effort"] == "medium"
-    assert retrieval_kwargs["knowledge_base_ids"] == ["market-kb", "metric-kb"]
-    assert graph_kwargs["problem_text"] == "test problem"

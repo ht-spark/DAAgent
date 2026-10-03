@@ -51,6 +51,10 @@ from data_analysis.context import (
     estimate_context_usage_after_turn,
 )
 from data_analysis.cancellation import TaskCancelledError
+from data_analysis.llm import (
+    LLM_CALL_TIMEOUT_SECONDS as AGENT_LLM_TIMEOUT_SECONDS,
+    create_llm,
+)
 from data_analysis.runtime import (
     ExecutionContext,
     Harness,
@@ -60,7 +64,6 @@ from data_analysis.runtime import (
 from data_analysis.tools import create_agent_tool_registry, supports_data_profile
 from server import store
 from server import converter_store
-from server.files import list_figures, resolve_artifact
 from server.project_workspaces import (
     ProjectWorkspaceError,
     create_project as register_project,
@@ -94,26 +97,6 @@ from KnowledgeBase.upload_file import (
     reconcile_conversion_records,
     update_embedding_status,
 )
-from server.runs import (
-    cancel_run,
-    cleanup_stale_runs,
-    create_run,
-    delete_run,
-    execute_run,
-    get_pending_budget,
-    get_pending_clarification,
-    get_run,
-    get_run_monitor,
-    list_runs,
-    rename_run,
-    submit_budget_decision,
-    submit_clarification_decision,
-)
-from scr.runtime.budget import BudgetType
-from scr.math_modeling_agent.llm import (
-    LLM_CALL_TIMEOUT_SECONDS as AGENT_LLM_TIMEOUT_SECONDS,
-    create_llm,
-)
 from server.document_tools import (
     MAX_DOCUMENT_BYTES,
     DocumentConversionError,
@@ -123,11 +106,9 @@ from server.document_tools import (
 )
 from server.schemas import (
     AgentCommandDecisionBody,
-    BudgetConfirmBody,
     BrainstormDiscussion,
     BrainstormDiscussionSummary,
     BrainstormDiscussionMessage,
-    CreateRunResponse,
     DocumentSaveBody,
     KnowledgeDocument,
     KnowledgeBaseCreateBody,
@@ -138,13 +119,9 @@ from server.schemas import (
     KnowledgeChunkEmbedProgress,
     KnowledgeDocumentsDeleteBody,
     KnowledgeStatus,
-    ModelConfig,
     ProjectCreateBody,
     ProjectSummary,
     ProjectUpdateBody,
-    RunDetail,
-    RunMonitor,
-    RunSummary,
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -236,6 +213,8 @@ SUMMARY_ARGUMENT_KEYS = (
     "file_name",
 )
 SUMMARY_ARGUMENT_MAX_LENGTH = 200
+FINAL_ANSWER_CHUNK_CHARS = 16                   # 最终回答每个流事件的最大字符数
+FINAL_ANSWER_CHUNK_DELAY_SECONDS = 0.016        # 让浏览器逐帧渲染，避免网络层合并成整段
 AGENT_ATTACHMENT_SUFFIXES = frozenset(
     {
         ".bmp",
@@ -395,11 +374,8 @@ def _list_knowledge_documents(
 
 @app.on_event("startup")
 async def _on_startup() -> None:
-    """启动时清理因服务重启而留下的\"僵尸\"运行（status=running 但无对应后台线程）。"""
+    """启动时完成统一 Agent 所需的数据迁移。"""
     migrate_legacy_document_ids()
-    cleaned = cleanup_stale_runs(max_age_seconds=120)
-    if cleaned:
-        print(f"[startup] cleaned {cleaned} stale running run(s)")
 
 
 def _read_api_settings() -> dict | None:
@@ -493,8 +469,68 @@ async def open_project_folder_endpoint(project_id: str) -> dict[str, bool]:
     return {"opened": True}
 
 
+_WINDOWS_FOLDER_DIALOG_SCRIPT = r"""
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$initial = [Environment]::GetEnvironmentVariable('DAAGENT_INITIAL_FOLDER')
+if (-not $initial -or -not (Test-Path -LiteralPath $initial -PathType Container)) {
+    $initial = 0
+}
+$shell = New-Object -ComObject Shell.Application
+try {
+    $folder = $shell.BrowseForFolder(0, '选择项目文件夹', 65, $initial)
+    if ($null -ne $folder) {
+        [Console]::Out.Write($folder.Self.Path)
+    }
+} finally {
+    if ($null -ne $folder) {
+        [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($folder)
+    }
+    [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($shell)
+}
+"""
+
+
+def _open_windows_folder_dialog(initial_dir: str | None = None) -> str | None:
+    """通过 Windows Shell COM 打开资源管理器文件夹选择器。"""
+    environment = os.environ.copy()
+    environment["DAAGENT_INITIAL_FOLDER"] = initial_dir or str(Path.home())
+    try:
+        result = subprocess.run(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-STA",
+                "-WindowStyle",
+                "Hidden",
+                "-Command",
+                _WINDOWS_FOLDER_DIALOG_SCRIPT,
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=environment,
+            timeout=300,
+            check=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError("系统缺少 PowerShell，无法打开文件夹选择器") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("文件夹选择器等待超时") from exc
+    if result.returncode != 0:
+        detail = result.stderr.strip() or "未知错误"
+        raise RuntimeError(f"无法打开 Windows 文件夹选择器：{detail}")
+    selected = result.stdout.strip()
+    if not selected:
+        return None
+    return str(Path(selected).expanduser().resolve())
+
+
 def _open_native_folder_dialog(initial_dir: str | None = None) -> str | None:
     """打开系统文件夹选择框，返回绝对路径；用户取消时返回 None。"""
+    if sys.platform == "win32":
+        return _open_windows_folder_dialog(initial_dir)
     try:
         import tkinter as tk
         from tkinter import filedialog
@@ -1097,6 +1133,14 @@ def _next_agent_event(iterator: object) -> object | None:
         return None
 
 
+def _final_answer_chunks(answer: str) -> list[str]:
+    """把最终回答切成可逐步下发的小块，并保证拼接后内容不变。"""
+    return [
+        answer[index:index + FINAL_ANSWER_CHUNK_CHARS]
+        for index in range(0, len(answer), FINAL_ANSWER_CHUNK_CHARS)
+    ]
+
+
 def _agent_event_payload(
     event: Action | Observation | Finish | PlanCreated | TodoStarted | TodoCompleted | TodoFailed,
 ) -> dict[str, object]:
@@ -1574,7 +1618,16 @@ async def agent_profile_stream_endpoint(
 ) -> StreamingResponse:
     """启动自主决策 Agent，并流式返回回答及工具运行轨迹。"""
     message = message.strip() or "请对上传的数据生成基础画像"
-    llm = _discussion_llm_by_id(config_id)
+    active_discussion_id = discussion_id or uuid.uuid4().hex
+    stored_session = (
+        await asyncio.to_thread(store.get_session, active_discussion_id)
+        if discussion_id
+        else None
+    )
+    effective_config_id = config_id or (
+        stored_session.get("model_config_id") if stored_session else None
+    )
+    llm = _discussion_llm_by_id(effective_config_id)
     if llm is None:
         raise HTTPException(status_code=400, detail="尚未配置可用的当前 API 模型")
     try:
@@ -1588,7 +1641,6 @@ async def agent_profile_stream_endpoint(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     selected_base_ids = [base.id for base in bases]
     run_id = uuid.uuid4().hex
-    active_discussion_id = discussion_id or uuid.uuid4().hex
 
     if any(
         run.discussion_id == active_discussion_id and not run.done
@@ -1596,11 +1648,6 @@ async def agent_profile_stream_endpoint(
     ):
         raise HTTPException(status_code=409, detail="当前对话已有运行中的 Agent 任务")
 
-    stored_session = (
-        await asyncio.to_thread(store.get_session, active_discussion_id)
-        if discussion_id
-        else None
-    )
     try:
         project = await asyncio.to_thread(
             _resolve_agent_project,
@@ -1617,9 +1664,16 @@ async def agent_profile_stream_endpoint(
             active_discussion_id,
             project_id=str(project["id"]) if project else None,
             cwd=str(workspace_root) if workspace_root else None,
+            model_config_id=effective_config_id,
+        )
+    elif config_id:
+        await asyncio.to_thread(
+            store.set_session_model_config,
+            active_discussion_id,
+            config_id,
         )
     session_entries = stored_session.get("messages", []) if stored_session else []
-    context_window_tokens = _agent_context_window_tokens(config_id)
+    context_window_tokens = _agent_context_window_tokens(effective_config_id)
     rolling_context = await asyncio.to_thread(
         compile_rolling_context,
         session_entries,
@@ -1817,7 +1871,19 @@ async def agent_profile_stream_endpoint(
                             trace.append(payload)
                             yield json.dumps(payload, ensure_ascii=False) + "\n"
                         answer = event.answer
-                        yield json.dumps({"type": "token", "content": answer}, ensure_ascii=False) + "\n"
+                        for chunk in _final_answer_chunks(answer):
+                            if chat_run.cancel_requested:
+                                await save_stopped_run("任务已终止。")
+                                yield json.dumps(
+                                    {"type": "cancelled", "run_id": run_id},
+                                    ensure_ascii=False,
+                                ) + "\n"
+                                return
+                            yield json.dumps(
+                                {"type": "token", "content": chunk},
+                                ensure_ascii=False,
+                            ) + "\n"
+                            await asyncio.sleep(FINAL_ANSWER_CHUNK_DELAY_SECONDS)
                         break
                     payload = _agent_event_payload(event)
                     trace.append(payload)
@@ -2027,6 +2093,7 @@ async def get_brainstorm_discussion_endpoint(
         id=discussion["id"],
         title=discussion["title"],
         project_id=discussion.get("project_id"),
+        model_config_id=discussion.get("model_config_id"),
         updated_at=discussion["updated_at"],
         messages=messages,
     )
@@ -2064,352 +2131,32 @@ async def rename_brainstorm_discussion_endpoint(discussion_id: str, body: dict) 
     return {"renamed": True}
 
 
-@app.post("/api/runs", response_model=CreateRunResponse)
-async def create_run_endpoint(
-    problem_text: str | None = Form(None, description="任务文本"),
-    problem_file: UploadFile | None = File(None, description="任务文件(.md/.txt)"),
-    data_files: list[UploadFile] | None = File(None, description="数据附件(可多个)"),
-    llm_config: str = Form(
-        "{}",
-        description="JSON: provider/api_key/base_url/model/max_tokens/temperature/reasoning_effort",
-    ),
-    task_name: str | None = Form(None, description="任务名称（用户自定义）"),
-    knowledge_base_id: str | None = Form(None, description="任务检索使用的知识库 ID"),
-    knowledge_base_ids: list[str] | None = Form(
-        None,
-        description="任务检索使用的一个或多个知识库 ID",
-    ),
-):
-    """提交一次解题任务（后台异步执行）。"""
-    try:
-        # 解析模型配置
-        try:
-                cfg = json.loads(llm_config) if llm_config else {}
-                cfg = ModelConfig(**cfg).model_dump(exclude_none=True)
-        except Exception as exc:  # noqa: BLE001
-            raise HTTPException(status_code=400, detail=f"llm_config 解析失败: {exc}")
-
-        try:
-            requested_base_ids = (
-                knowledge_base_ids
-                if isinstance(knowledge_base_ids, list)
-                else [knowledge_base_id] if isinstance(knowledge_base_id, str) else None
-            )
-            bases = require_knowledge_bases(requested_base_ids)
-        except KnowledgeBaseCatalogError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
-        selected_base_ids = [base.id for base in bases]
-
-        # 任务：文本优先；其次读取文本文件
-        problem = problem_text
-        run_id = uuid.uuid4().hex[:8]
-        output_dir = ARTIFACTS_ROOT / run_id
-        input_dir = output_dir / "input"
-        input_dir.mkdir(parents=True, exist_ok=True)
-
-        if problem_file is not None and not problem:
-            raw = await problem_file.read()
-            try:
-                problem = raw.decode("utf-8")
-            except UnicodeDecodeError:
-                raise HTTPException(
-                    status_code=400,
-                    detail="任务文件暂仅支持 UTF-8 文本(.md/.txt)；二进制请改用 problem_text 粘贴或后续版本接入解析。",
-                )
-            # 存档任务文件
-            dest = input_dir / (problem_file.filename or "problem.txt")
-            dest.write_bytes(raw)
-
-        if not problem or not problem.strip():
-            raise HTTPException(status_code=400, detail="必须提供 problem_text 或 problem_file")
-
-        # 数据附件存档
-        data_paths: list[str] = []
-        if data_files:
-            for uf in data_files:
-                if uf is None:
-                    continue
-                content = await uf.read()
-                if not content:
-                    continue
-                dest = input_dir / (uf.filename or f"data_{len(data_paths)}.bin")
-                dest.write_bytes(content)
-                data_paths.append(str(dest))
-
-        preview = problem.strip()[:200].replace("\n", " ")
-        create_run(
-            run_id,
-            preview,
-            cfg,
-            task_name=task_name,
-            knowledge_base_ids=selected_base_ids,
-        )
-
-        task = asyncio.create_task(
-            execute_run(
-                run_id=run_id,
-                problem_text=problem,
-                data_paths=data_paths,
-                output_dir=str(output_dir),
-                model_config=cfg,
-                knowledge_base_ids=selected_base_ids,
-            )
-        )
-        _BACKGROUND_TASKS.add(task)
-        task.add_done_callback(_BACKGROUND_TASKS.discard)
-
-        return {"run_id": run_id, "status": "queued", "output_dir": str(output_dir)}
-    except HTTPException:
-        # 已显式构造的 4xx 错误，原样返回
-        raise
-    except Exception as exc:  # noqa: BLE001
-        # 未捕获异常：把完整堆栈打到 stderr，并把异常类型/消息作为 detail 返回，
-        # 便于前端和本地终端直接看到根因（仅本地开发用，生产请收敛为通用提示）。
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(
-            status_code=500,
-            detail=f"server error: {type(exc).__name__}: {exc}",
-        )
-
-
-@app.get("/api/runs", response_model=list[RunSummary])
-async def list_runs_endpoint():
-    """运行历史列表。"""
-    return [RunSummary.from_row(r) for r in list_runs()]
-
-
-@app.post("/api/runs/cleanup-stale")
-async def cleanup_stale_endpoint(max_age_seconds: int = 300):
-    """手动把因服务重启而卡在 running/queued 的僵尸任务转为 failed。
-
-    正常情况启动时已自动清理；此接口用于运行中手动触发（无需重启）。
-    """
-    cleaned = cleanup_stale_runs(max_age_seconds=max_age_seconds)
-    return {"cleaned": cleaned}
-
-
-@app.get("/api/runs/{run_id}", response_model=RunDetail)
-async def get_run_endpoint(run_id: str):
-    """运行详情（含进度事件与产物清单）。"""
-    row = get_run(run_id)
-    if row is None:
-        raise HTTPException(status_code=404, detail="run 不存在")
-    return RunDetail.from_row(row)
-
-
-@app.get("/api/runs/{run_id}/monitor", response_model=RunMonitor)
-async def get_run_monitor_endpoint(run_id: str):
-    """返回实时 token / LLM 耗时；结束任务回退到最终预算汇总。"""
-    row = get_run(run_id)
-    if row is None:
-        raise HTTPException(status_code=404, detail="run 不存在")
-
-    live = get_run_monitor(run_id)
-    if live is not None:
-        return RunMonitor(active=True, **live)
-
-    summary = next(
-        (
-            event
-            for event in reversed(row.get("progress") or [])
-            if event.get("type") == "budget_summary"
-        ),
-        None,
+@app.patch("/api/knowledge/discussions/{discussion_id}/model")
+async def update_brainstorm_discussion_model_endpoint(
+    discussion_id: str,
+    body: dict,
+) -> dict[str, bool]:
+    """保存当前会话默认使用的 API 模型配置。"""
+    config_id = body.get("config_id")
+    if not isinstance(config_id, str) or not config_id.strip():
+        raise HTTPException(status_code=400, detail="模型配置标识不能为空")
+    if len(config_id.strip()) > 200:
+        raise HTTPException(status_code=400, detail="模型配置标识过长")
+    updated = await asyncio.to_thread(
+        store.set_session_model_config,
+        discussion_id,
+        config_id,
     )
-    if summary is None:
-        return RunMonitor()
-    return RunMonitor(
-        time_total=int(summary.get("time_total", 0)),
-        token_total=int(summary.get("token_total", 0)),
-    )
+    if not updated:
+        raise HTTPException(status_code=404, detail="未找到该讨论记录")
+    return {"updated": True}
 
 
-@app.delete("/api/runs/{run_id}")
-async def delete_run_endpoint(run_id: str):
-    """删除一条运行记录（DB 行 + 产物目录）。"""
-    result = delete_run(run_id)
-    if not result["deleted"]:
-        if result["reason"] == "not_found":
-            raise HTTPException(status_code=404, detail="run 不存在")
-        raise HTTPException(status_code=409, detail=result["reason"])
-    return {"ok": True, "run_id": run_id}
-
-
-@app.patch("/api/runs/{run_id}/name")
-async def rename_run_endpoint(run_id: str, name: str = Form(...)):
-    """更新任务名称。"""
-    if not rename_run(run_id, name):
-        raise HTTPException(status_code=404, detail="run 不存在")
-    return {"ok": True, "run_id": run_id, "task_name": name}
-
-
-@app.post("/api/runs/{run_id}/cancel")
-async def cancel_run_endpoint(run_id: str):
-    """中断一个正在执行（queued/running）的任务。
-
-    若任务已结束（succeeded/failed/cancelled）则返回 409；
-    若仍在执行则设置取消标志，后台线程在下一个节点边界退出并标记 cancelled。
-    """
-    result = cancel_run(run_id)
-    if not result["cancelled"]:
-        if result["reason"] == "not_found":
-            raise HTTPException(status_code=404, detail="run 不存在")
-        raise HTTPException(status_code=409, detail=result["reason"])
-    return {"ok": True, "run_id": run_id, "status": "cancelled"}
-
-
-_TERMINAL_STATUSES = {"succeeded", "failed", "cancelled"}
-
-
-@app.get("/api/runs/{run_id}/progress/stream")
-async def stream_run_progress(run_id: str, after: int = 0):
-    """以 SSE 实时推送某个 run 的进度事件（节点级）。
-
-    前端用原生 EventSource 订阅（GET，无 body）。服务端周期性读取注册表，
-    把「新增」的 progress 事件逐条推给客户端；run 进入终态后发送 done 并关闭连接。
-    相比前端 2s 轮询，这里延迟更低、体验更接近"实时输出建模进度"。
-
-    after 参数：跳过前 N 条已加载的事件，用于断线重连/恢复模式时避免重复。
-    """
-    if get_run(run_id) is None:
-        raise HTTPException(status_code=404, detail="run 不存在")
-
-    async def gen():
-        sent = max(0, after)
-        # 连接建立即回执，便于前端确认订阅成功
-        yield f'data: {json.dumps({"type": "subscribed", "run_id": run_id}, ensure_ascii=False)}\n\n'
-        while True:
-            row = get_run(run_id)
-            if row is None:
-                yield 'data: {"type":"error","message":"run 不存在"}\n\n'
-                return
-            events = row.get("progress") or []
-            status = row.get("status")
-            for ev in events[sent:]:
-                yield f"data: {json.dumps({'type': 'event', 'event': ev}, ensure_ascii=False)}\n\n"
-            sent = len(events)
-            if status in _TERMINAL_STATUSES:
-                done = {"type": "done", "status": status, "error": row.get("error")}
-                yield f"data: {json.dumps(done, ensure_ascii=False)}\n\n"
-                return
-            # SSE 注释行：保持连接活跃，避免代理/浏览器因空闲断开
-            yield ": keep-alive\n\n"
-            await asyncio.sleep(0.15)
-
-    return StreamingResponse(
-        gen(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            # 关闭反向代理缓冲，确保事件即时下发
-            "X-Accel-Buffering": "no",
-        },
-    )
-
-
-@app.post("/api/runs/{run_id}/budget-confirm")
-async def confirm_budget_endpoint(run_id: str, body: BudgetConfirmBody):
-    """确认某小问的预算覆盖。
-
-    当 run 暂停在 configure_question_budget 节点等待用户确认时，前端弹窗提交：
-      - use_defaults=true：沿用默认预算；
-      - limits：覆盖当前预算阶段允许调整的项目。
-    无待确认请求时返回 409。
-    """
-    pending = get_pending_budget(run_id)
-    if not pending:
-        raise HTTPException(status_code=409, detail="当前没有待确认的预算请求")
-    decision = None if body.use_defaults else (body.limits or None)
-    # 仅保留已定义的、值为正整数的预算项；当前阶段会在后台回调中决定实际采用哪些项。
-    if decision:
-        decision = {
-            key: value
-            for key, value in decision.items()
-            if key in {
-                BudgetType.SEARCH.value,
-                BudgetType.CODE_REPAIR.value,
-                BudgetType.VALIDATION_ITERATION.value,
-                BudgetType.INTAKE_RETRY.value,
-                BudgetType.PAPER_REVISION.value,
-            }
-            and isinstance(value, int)
-            and value > 0
-        }
-    ok = submit_budget_decision(run_id, decision)
-    if not ok:
-        raise HTTPException(status_code=409, detail="预算请求已被取消或已确认")
-    return {"ok": True, "run_id": run_id, "use_defaults": body.use_defaults, "limits": decision}
-
-
-@app.post("/api/runs/{run_id}/clarification")
-async def submit_clarification_endpoint(
-    run_id: str,
-    action: str = Form(..., description="terminate 或 continue"),
-    data_files: list[UploadFile] | None = File(None, description="补充材料(可多个)"),
-):
-    """G0 硬失败时用户选择终止或上传补充材料继续建模。
-
-    - action=terminate：立即终止本次建模任务。
-    - action=continue：上传补充材料后重跑输入摄入。
-    无待确认请求时返回 409。
-    """
-    pending = get_pending_clarification(run_id)
-    if not pending:
-        raise HTTPException(status_code=409, detail="当前没有待确认的澄清请求")
-
-    new_data_paths: list[str] = []
-    if action == "continue" and data_files:
-        input_dir = ARTIFACTS_ROOT / run_id / "input"
-        input_dir.mkdir(parents=True, exist_ok=True)
-        for uf in data_files:
-            if uf is None:
-                continue
-            content = await uf.read()
-            if not content:
-                continue
-            dest = input_dir / (uf.filename or f"supplement_{len(new_data_paths)}.bin")
-            dest.write_bytes(content)
-            new_data_paths.append(str(dest))
-
-    decision = {"action": action, "new_data_paths": new_data_paths}
-    ok = submit_clarification_decision(run_id, decision)
-    if not ok:
-        raise HTTPException(status_code=409, detail="澄清请求已被取消或已确认")
-    return {"ok": True, "run_id": run_id, "action": action, "new_files": len(new_data_paths)}
-
-
-@app.get("/api/runs/{run_id}/paper")
-async def get_paper_endpoint(run_id: str):
-    """报告 Markdown 文本。"""
-    try:
-        path = resolve_artifact(run_id, "paper.md")
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc))
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    return PlainTextResponse(path.read_text(encoding="utf-8"))
-
-
-@app.get("/api/runs/{run_id}/figures")
-async def get_figures_endpoint(run_id: str):
-    """图表文件清单。"""
-    if not get_run(run_id):
-        raise HTTPException(status_code=404, detail="run 不存在")
-    return {"figures": list_figures(run_id)}
-
-
-@app.get("/api/runs/{run_id}/files/{file_path:path}")
-async def download_file_endpoint(run_id: str, file_path: str):
-    """下载任意产物文件（安全限制在 artifacts/<run_id>/ 内）。"""
-    try:
-        target = resolve_artifact(run_id, file_path)
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc))
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    return FileResponse(target)
+@app.api_route("/api/runs", methods=["GET", "POST", "DELETE", "PATCH"])
+@app.api_route("/api/runs/{legacy_path:path}", methods=["GET", "POST", "DELETE", "PATCH"])
+async def removed_legacy_runs_endpoint(legacy_path: str = "") -> None:
+    """旧建模运行器已随 scr 删除；统一 Agent 使用 /api/agent/chat/stream。"""
+    raise HTTPException(status_code=410, detail="旧建模接口已移除，请使用统一 Agent 对话。")
 
 
 # ---------------------------------------------------------------------------

@@ -1046,7 +1046,7 @@ export default function ChatModeling({
     if (typeof activeCfg.temperature === 'number' && activeCfg.temperature >= 0 && activeCfg.temperature <= 2) {
       cfg.temperature = activeCfg.temperature
     }
-    if (activeCfg.reasoningEffort && activeCfg.reasoningEffort !== 'off') {
+    if (activeCfg.reasoningEffort && activeCfg.reasoningEffort !== 'close') {
       cfg.reasoning_effort = activeCfg.reasoningEffort
     }
     fd.append('llm_config', JSON.stringify(cfg))

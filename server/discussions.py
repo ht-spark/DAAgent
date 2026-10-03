@@ -18,6 +18,7 @@ def list_discussions(project_id: str | None = None) -> list[dict[str, Any]]:
             "id": item["id"],
             "title": item["title"],
             "project_id": item.get("project_id"),
+            "model_config_id": item.get("model_config_id"),
             "updated_at": item["updated_at"],
         }
         for item in store.list_sessions(project_id=project_id)
@@ -49,6 +50,7 @@ def get_discussion(discussion_id: str) -> dict[str, Any] | None:
         "title": session["title"],
         "project_id": session.get("project_id"),
         "cwd": session.get("cwd"),
+        "model_config_id": session.get("model_config_id"),
         "created_at": session.get("created_at"),
         "updated_at": session["updated_at"],
         "messages": messages,

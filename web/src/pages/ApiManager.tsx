@@ -23,7 +23,7 @@ const EMPTY: Omit<ApiConfig, 'id' | 'createdAt'> = {
   model: '',
   maxTokens: 20000,
   temperature: 0.3,
-  reasoningEffort: 'off',
+  reasoningEffort: 'close',
 }
 
 /** 服务商展示名，卡片与弹窗共用 */
@@ -158,7 +158,7 @@ export default function ApiManager({
     const temperature = Number(editing.temperature)
     const reasoningEffort = isReasoningEffort(editing.reasoningEffort)
       ? editing.reasoningEffort
-      : 'off'
+      : 'close'
 
     if (!Number.isInteger(maxTokens) || maxTokens < 1 || maxTokens > 200000) {
       setFormError('最大输出 Token 必须是 1 到 200000 之间的整数。')
@@ -405,7 +405,7 @@ export default function ApiManager({
                 <label htmlFor="api-reasoning-effort">思考程度</label>
                 <select
                   id="api-reasoning-effort"
-                  value={isReasoningEffort(editing.reasoningEffort) ? editing.reasoningEffort : 'off'}
+                  value={isReasoningEffort(editing.reasoningEffort) ? editing.reasoningEffort : 'close'}
                   onChange={(e) => {
                     const v = e.target.value
                     if (isReasoningEffort(v)) setEditing({ ...editing, reasoningEffort: v })
@@ -418,7 +418,7 @@ export default function ApiManager({
                   ))}
                 </select>
                 <p className="api-field-hint">
-                  仅对支持 reasoning_effort 的模型生效；关闭时不传该参数。
+                  仅对支持 reasoning_effort 的模型生效；close 时不传该参数。
                 </p>
               </div>
             </div>
