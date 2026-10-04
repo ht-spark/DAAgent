@@ -329,6 +329,7 @@ def test_agent_registry_combines_data_and_code_tools(tmp_path) -> None:
         "inspect_data_rows",
         "explore_math_models",
         "read_attachment_file",
+        "edit_attachment_file",
         "search_web",
         "write_artifact",
         "execute_python",

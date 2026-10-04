@@ -16,7 +16,11 @@ from ..python_environment import (
     resolve_python_environment,
 )
 from .artifact_tools import MAX_ARTIFACT_CONTENT_BYTES, write_artifact
-from .attachment_tools import TEXT_ATTACHMENT_SUFFIXES, read_attachment_file
+from .attachment_tools import (
+    TEXT_ATTACHMENT_SUFFIXES,
+    edit_attachment_file,
+    read_attachment_file,
+)
 from .markitdown import (
     CONVERTIBLE_DOCUMENT_SUFFIXES,
     DEFAULT_PAGE_LINES,
@@ -25,6 +29,7 @@ from .markitdown import (
 )
 from .code_tools import execute_python_code
 from .project_edit_tools import (
+    MAX_FILE_EDITS,
     run_create_workspace_file,
     run_edit_workspace_file,
     run_project_command_tool,
@@ -393,6 +398,10 @@ def create_agent_tool_registry(
         if Path(path).suffix.lower() in TEXT_ATTACHMENT_SUFFIXES
     )
     if text_attachment_paths:
+        attachment_context = {
+            "authorized_paths": [str(path) for path in text_attachment_paths],
+            "output_dir": str(output_dir),
+        }
         registry.register(
             ToolSpec(
                 name="read_attachment_file",
@@ -413,7 +422,47 @@ def create_agent_tool_registry(
                 },
             ),
             read_attachment_file,
-            context={"authorized_paths": [str(path) for path in text_attachment_paths]},
+            context=attachment_context,
+        )
+        registry.register(
+            ToolSpec(
+                name="edit_attachment_file",
+                description=(
+                    "按 Pi 风格 edits 精确修改用户上传的 UTF-8 文本附件，并只以原文件名"
+                    "输出一个更新副本。每个 old_text 必须在原附件中唯一匹配，各修改范围"
+                    "不得重叠；保留 UTF-8 BOM 和原始换行格式。仅当用户明确要求修改上传"
+                    "附件时使用；不要同时生成独立章节、改名合并稿或其他替代文件。浏览器"
+                    "上传无法取得并覆盖用户电脑上的原文件。"
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "file_path": {
+                            "type": "string",
+                            "minLength": 1,
+                            "description": "available_data_files 中的附件绝对路径",
+                        },
+                        "edits": {
+                            "type": "array",
+                            "minItems": 1,
+                            "maxItems": MAX_FILE_EDITS,
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "old_text": {"type": "string", "minLength": 1},
+                                    "new_text": {"type": "string"},
+                                },
+                                "required": ["old_text", "new_text"],
+                                "additionalProperties": False,
+                            },
+                        },
+                    },
+                    "required": ["file_path", "edits"],
+                    "additionalProperties": False,
+                },
+            ),
+            edit_attachment_file,
+            context=attachment_context,
         )
     # 非 Markdown 文档附件：先转换成 Markdown 才能阅读
     document_attachment_paths = tuple(
@@ -787,10 +836,15 @@ def create_agent_tool_registry(
             ("create_workspace_file", "在当前项目指定位置创建 UTF-8 文本或代码文件，不覆盖已有文件。路径可为项目相对路径或项目内绝对路径。",
              {"relative_path": {"type": "string", "description": "项目相对路径或项目内绝对路径"}, "content": {"type": "string"}},
              ["relative_path", "content"], run_create_workspace_file),
-            ("edit_workspace_file", "精确修改已有项目文本文件，old_text 必须唯一匹配，返回 diff。路径可为项目相对路径或项目内绝对路径。",
-             {"relative_path": {"type": "string", "description": "项目相对路径或项目内绝对路径"}, "old_text": {"type": "string"},
-              "new_text": {"type": "string"}},
-             ["relative_path", "old_text", "new_text"], run_edit_workspace_file),
+            ("edit_workspace_file", "一次精确修改已有项目文本文件的一处或多处内容；每个 old_text 必须在原文件中唯一匹配，各修改范围不得重叠。保留 UTF-8 BOM 和原始换行格式，并返回 diff。路径可为项目相对路径或项目内绝对路径。",
+             {"relative_path": {"type": "string", "description": "项目相对路径或项目内绝对路径"},
+              "edits": {"type": "array", "minItems": 1, "maxItems": MAX_FILE_EDITS, "items": {
+                  "type": "object", "properties": {
+                      "old_text": {"type": "string", "minLength": 1},
+                      "new_text": {"type": "string"},
+                  }, "required": ["old_text", "new_text"], "additionalProperties": False,
+              }}},
+             ["relative_path", "edits"], run_edit_workspace_file),
             ("run_project_command", "需人工逐条批准的项目命令。支持 Git 状态/差异、测试、构建，python -m venv、uv venv、conda create -p 创建项目内环境，以及 pip、uv pip、conda install、uv sync 安装依赖。命令独立运行；用 python_environment 指定后续命令的环境，不要使用无效的 shell activate。",
              {"command": {"type": "string", "maxLength": 1000},
               "python_environment": {"type": "string", "description": "可选，项目内已有环境目录或 Python 路径；每条命令单独指定"}},

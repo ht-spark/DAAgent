@@ -485,7 +485,12 @@ class WorkTrajectory(BaseModel):
             self.add_read(_first_str(args, result_map, "file_path", "path"))
         elif name in {"read_workspace_file", "inspect_artifact", "inspect_generated_image"}:
             self.add_read(_first_str(args, result_map, "relative_path", "path"))
-        elif name in {"write_artifact", "create_workspace_file", "edit_workspace_file"}:
+        elif name in {
+            "write_artifact",
+            "edit_attachment_file",
+            "create_workspace_file",
+            "edit_workspace_file",
+        }:
             self.add_modified(_first_str(args, result_map, "relative_path", "path"))
         elif name == "execute_python":
             artifacts = result_map.get("artifacts")
@@ -827,7 +832,9 @@ def _observation_artifacts(
                 if isinstance(raw_path, str):
                     candidates.setdefault(raw_path, {})
 
-    if observation.tool_name == "write_artifact" and isinstance(result.get("path"), str):
+    if observation.tool_name in {"write_artifact", "edit_attachment_file"} and isinstance(
+        result.get("path"), str
+    ):
         candidates.setdefault(result["path"], result)
 
     root = Path(output_dir).expanduser().resolve(strict=False)

@@ -26,7 +26,8 @@ def test_project_change_tools_are_available_when_project_is_selected(tmp_path):
     target = tmp_path / "existing.txt"
     target.write_text("before", encoding="utf-8")
     registry.resolve("edit_workspace_file").invoke({
-        "relative_path": "existing.txt", "old_text": "before", "new_text": "after",
+        "relative_path": "existing.txt",
+        "edits": [{"old_text": "before", "new_text": "after"}],
     })
     assert target.read_text(encoding="utf-8") == "after"
     assert not output.exists()
@@ -36,10 +37,38 @@ def test_project_change_tools_are_available_when_project_is_selected(tmp_path):
     }
 
 
+@pytest.mark.parametrize(
+    "edits",
+    [
+        [],
+        [{"old_text": "before"}],
+        [{"old_text": "before", "new_text": "after", "extra": True}],
+        [{"old_text": 1, "new_text": "after"}],
+    ],
+)
+def test_edit_tool_rejects_malformed_edits(tmp_path, edits):
+    target = tmp_path / "existing.txt"
+    target.write_text("before", encoding="utf-8")
+    registry = create_agent_tool_registry([], tmp_path / "outputs", workspace_root=tmp_path)
+
+    with pytest.raises(ValueError, match="参数无效"):
+        registry.resolve("edit_workspace_file").invoke({
+            "relative_path": "existing.txt",
+            "edits": edits,
+        })
+
+    assert target.read_text(encoding="utf-8") == "before"
+
+
 def test_create_and_edit_project_file_returns_diff(tmp_path):
     created = create_workspace_file(tmp_path, "src/calculator.py", "return a - b\n")
-    edited = edit_workspace_file(tmp_path, "src/calculator.py", "return a - b", "return a + b")
+    edited = edit_workspace_file(
+        tmp_path,
+        "src/calculator.py",
+        [{"old_text": "return a - b", "new_text": "return a + b"}],
+    )
     assert created["created"] is True
+    assert edited["edit_count"] == 1
     assert "-return a - b" in edited["diff"]
     assert "+return a + b" in edited["diff"]
     assert (tmp_path / "src/calculator.py").read_text(encoding="utf-8") == "return a + b\n"
@@ -50,7 +79,11 @@ def test_create_and_edit_project_file_returns_diff(tmp_path):
 def test_edit_rejects_ambiguous_and_outside_paths(tmp_path):
     (tmp_path / "repeat.py").write_text("pass\npass\n", encoding="utf-8")
     with pytest.raises(ValueError, match="匹配 2 次"):
-        edit_workspace_file(tmp_path, "repeat.py", "pass", "return")
+        edit_workspace_file(
+            tmp_path,
+            "repeat.py",
+            [{"old_text": "pass", "new_text": "return"}],
+        )
     with pytest.raises(WorkspacePathError):
         create_workspace_file(tmp_path, "../escape.py", "x")
     with pytest.raises(WorkspacePathError):
@@ -60,7 +93,11 @@ def test_edit_rejects_ambiguous_and_outside_paths(tmp_path):
 def test_create_and_edit_accept_absolute_path_inside_project(tmp_path):
     target = tmp_path / "nested" / "result.md"
     created = create_workspace_file(tmp_path, str(target), "before\n")
-    edited = edit_workspace_file(tmp_path, str(target), "before", "after")
+    edited = edit_workspace_file(
+        tmp_path,
+        str(target),
+        [{"old_text": "before", "new_text": "after"}],
+    )
     assert created["created"] is True
     assert "+after" in edited["diff"]
     assert target.read_text(encoding="utf-8") == "after\n"
@@ -80,7 +117,11 @@ def test_edit_falls_back_to_direct_write_when_windows_replace_is_denied(
         deny_replace,
     )
 
-    result = edit_workspace_file(tmp_path, "locked.md", "before", "after")
+    result = edit_workspace_file(
+        tmp_path,
+        "locked.md",
+        [{"old_text": "before", "new_text": "after"}],
+    )
 
     assert "+after" in result["diff"]
     assert target.read_text(encoding="utf-8") == "after\n"
@@ -92,8 +133,97 @@ def test_project_file_tools_reject_absolute_path_outside_project(tmp_path):
     with pytest.raises(WorkspacePathError, match="超出当前项目目录"):
         create_workspace_file(tmp_path, str(outside), "not allowed")
     with pytest.raises(WorkspacePathError, match="超出当前项目目录"):
-        edit_workspace_file(tmp_path, str(outside), "before", "after")
+        edit_workspace_file(
+            tmp_path,
+            str(outside),
+            [{"old_text": "before", "new_text": "after"}],
+        )
     assert not outside.exists()
+
+
+def test_edit_applies_multiple_replacements_against_original_file(tmp_path):
+    target = tmp_path / "settings.py"
+    target.write_text(
+        'host = "localhost"\nport = 3000\ndebug = False\n',
+        encoding="utf-8",
+    )
+
+    result = edit_workspace_file(
+        tmp_path,
+        "settings.py",
+        [
+            {"old_text": 'host = "localhost"', "new_text": 'host = "0.0.0.0"'},
+            {"old_text": "port = 3000", "new_text": "port = 8080"},
+        ],
+    )
+
+    assert result["edit_count"] == 2
+    assert target.read_text(encoding="utf-8") == (
+        'host = "0.0.0.0"\nport = 8080\ndebug = False\n'
+    )
+    assert '-host = "localhost"' in result["diff"]
+    assert "+port = 8080" in result["diff"]
+
+
+def test_edit_is_atomic_when_any_replacement_is_invalid(tmp_path):
+    target = tmp_path / "settings.py"
+    original = "port = 3000\ndebug = False\n"
+    target.write_text(original, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="第 2 项.*匹配 0 次"):
+        edit_workspace_file(
+            tmp_path,
+            "settings.py",
+            [
+                {"old_text": "port = 3000", "new_text": "port = 8080"},
+                {"old_text": "missing = True", "new_text": "missing = False"},
+            ],
+        )
+
+    assert target.read_text(encoding="utf-8") == original
+
+
+def test_edit_rejects_overlapping_replacements(tmp_path):
+    target = tmp_path / "example.txt"
+    target.write_text("alpha beta gamma\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="修改范围重叠"):
+        edit_workspace_file(
+            tmp_path,
+            "example.txt",
+            [
+                {"old_text": "alpha beta", "new_text": "first"},
+                {"old_text": "beta gamma", "new_text": "second"},
+            ],
+        )
+
+    assert target.read_text(encoding="utf-8") == "alpha beta gamma\n"
+
+
+def test_edit_preserves_utf8_bom_and_crlf(tmp_path):
+    target = tmp_path / "windows.txt"
+    target.write_bytes(b"\xef\xbb\xbffirst\r\nsecond\r\n")
+
+    edit_workspace_file(
+        tmp_path,
+        "windows.txt",
+        [{"old_text": "first\nsecond", "new_text": "one\ntwo"}],
+    )
+
+    assert target.read_bytes() == b"\xef\xbb\xbfone\r\ntwo\r\n"
+
+
+def test_edit_preserves_lf_on_windows(tmp_path):
+    target = tmp_path / "unix.txt"
+    target.write_bytes(b"first\nsecond\n")
+
+    edit_workspace_file(
+        tmp_path,
+        "unix.txt",
+        [{"old_text": "first\r\nsecond", "new_text": "one\r\ntwo"}],
+    )
+
+    assert target.read_bytes() == b"one\ntwo\n"
 
 
 def test_command_rejects_shell_and_returns_failure_to_model(tmp_path):

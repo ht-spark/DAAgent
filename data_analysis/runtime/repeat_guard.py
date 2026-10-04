@@ -21,6 +21,7 @@ __all__ = ["MUTATING_TOOLS", "RepeatGuard", "RepeatNotice"]
 MUTATING_TOOLS = frozenset(
     {
         "write_artifact",
+        "edit_attachment_file",
         "create_workspace_file",
         "edit_workspace_file",
         "execute_python",

@@ -64,6 +64,7 @@ const TOOL_PRESENTATION: Record<string, { icon: TraceIconName; action: string; a
   run_project_command: { icon: 'terminal', action: '运行命令', args: ['command'] },
   read_workspace_file: { icon: 'read', action: '读取', args: ['relative_path', 'path', 'file_path'] },
   read_attachment_file: { icon: 'read', action: '读取附件', args: ['file_path', 'relative_path', 'path'] },
+  edit_attachment_file: { icon: 'edit', action: '编辑附件', args: ['file_path', 'path'] },
   list_workspace_directory: { icon: 'folder', action: '列出目录', args: ['relative_dir', 'path'] },
   list_workspace_files: { icon: 'folder', action: '查找文件', args: ['pattern', 'relative_dir'] },
   search_workspace_text: { icon: 'search', action: '搜索文件内容', args: ['query', 'pattern'] },

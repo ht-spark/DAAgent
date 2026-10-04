@@ -136,7 +136,7 @@ DAAgent 是一个以 LLM 为决策核心、以受限工具为执行边界的任�
 | 数学建模   | `explore_math_models`                                               | 对授权表格进行两两函数关系发现，并可对指定目标列做多元线性拟合；返回公式、系数、R²、RMSE、特征重要性、结构结论与适用约束。 |
 | 动态分析   | `execute_python`                                                    | 运行时注入`DATA_FILES`、`DATA_FILE_MAP`、`OUTPUT_DIR`、`ARTIFACTS`；模型将结构化结论写入全局 `result` 回传。      |
 | 产物复核   | `write_artifact`、`inspect_artifact`、`inspect_generated_image` | 产物仅能写入会话输出目录；支持 Markdown、DOCX、CSV、XLSX、JSON 与代码等格式。                                               |
-| 附件与项目 | 读附件、文档转 Markdown、读/搜/创建/精确编辑项目文件                  | 上传附件与项目工作区是两个独立授权边界。                                                                                    |
+| 附件与项目 | 读附件、精确编辑文本附件副本、文档转 Markdown、读/搜/创建/精确编辑项目文件 | 上传附件与项目工作区是两个独立授权边界；附件编辑以原文件名生成更新副本，项目编辑直接修改授权工作区文件。                     |
 | 项目命令   | `run_project_command`                                               | 每条命令在前端获得一次性人工批准后才可执行。                                                                                |
 | 外部资料   | `search_knowledge_base`、`search_web`                             | 知识库仅查用户选择的库；联网来源随工具结果返回。                                                                            |
 

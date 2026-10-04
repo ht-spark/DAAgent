@@ -8,15 +8,73 @@ import shlex
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 
 from ..python_environment import resolve_python_environment
 from .workspace_tools import WorkspacePathError, resolve_workspace_path
 
 MAX_TEXT_BYTES = 500_000
 MAX_COMMAND_OUTPUT_CHARS = 20_000
+MAX_FILE_EDITS = 100
 BLOCKED_PARTS = {".git", ".venv", "node_modules", "__pycache__", "outputs"}
 PACKAGE_SPEC = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+!<>=~,*\[\]-]*$")
+
+
+class FileEdit(TypedDict):
+    """一项基于原始文件内容的精确文本替换。"""
+
+    old_text: str
+    new_text: str
+
+
+def prepare_exact_text_edits(
+    raw_content: bytes,
+    edits: list[FileEdit],
+) -> tuple[bytes, str, str]:
+    """校验并计算一组 Pi 风格的精确文本替换，不执行文件写入。
+
+    Args:
+        raw_content: 原始 UTF-8 文件字节。
+        edits: 基于原始文件内容的一组精确替换。
+
+    Returns:
+        写回字节、规范化后的原文和规范化后的修改文本。
+    """
+    if not edits or len(edits) > MAX_FILE_EDITS:
+        raise ValueError(f"edits 必须包含 1 到 {MAX_FILE_EDITS} 项修改")
+    has_bom = raw_content.startswith(b"\xef\xbb\xbf")
+    original_text = raw_content.decode("utf-8-sig")
+    newline = "\r\n" if "\r\n" in original_text else "\n"
+    original = original_text.replace("\r\n", "\n")
+    replacements: list[tuple[int, int, str, int]] = []
+    for index, edit in enumerate(edits, start=1):
+        old_text = edit["old_text"].replace("\r\n", "\n")
+        new_text = edit["new_text"].replace("\r\n", "\n")
+        if not old_text:
+            raise ValueError(f"第 {index} 项 edit 的 old_text 不能为空")
+        matches = original.count(old_text)
+        if matches != 1:
+            raise ValueError(
+                f"第 {index} 项 edit 的 old_text 匹配 {matches} 次，需要唯一匹配"
+            )
+        start = original.index(old_text)
+        replacements.append((start, start + len(old_text), new_text, index))
+
+    replacements.sort(key=lambda item: item[0])
+    for previous, current in zip(replacements, replacements[1:]):
+        if current[0] < previous[1]:
+            raise ValueError(
+                f"第 {previous[3]} 项和第 {current[3]} 项 edit 的修改范围重叠"
+            )
+
+    updated = original
+    for start, end, new_text, _index in reversed(replacements):
+        updated = f"{updated[:start]}{new_text}{updated[end:]}"
+    restored = updated.replace("\n", newline)
+    encoded = restored.encode("utf-8")
+    if has_bom:
+        encoded = b"\xef\xbb\xbf" + encoded
+    return encoded, original, updated
 
 
 def _editable_path(workspace_root: str | Path, relative_path: str) -> Path:
@@ -52,20 +110,16 @@ def create_workspace_file(workspace_root: str | Path, relative_path: str, conten
 
 
 def edit_workspace_file(
-    workspace_root: str | Path, relative_path: str, old_text: str, new_text: str
+    workspace_root: str | Path,
+    relative_path: str,
+    edits: list[FileEdit],
 ) -> dict[str, Any]:
-    """仅在旧文本唯一匹配时修改文件，并返回实际 diff。"""
+    """一次性校验并应用一组不重叠的精确文本替换，返回实际 diff。"""
     target = _editable_path(workspace_root, relative_path)
-    if not old_text:
-        raise ValueError("old_text 不能为空")
     if not target.is_file() or target.stat().st_size > MAX_TEXT_BYTES:
         raise ValueError("目标文件不存在或超过大小限制")
-    original = target.read_text(encoding="utf-8-sig")
-    matches = original.count(old_text)
-    if matches != 1:
-        raise ValueError(f"old_text 匹配 {matches} 次，需要唯一匹配")
-    updated = original.replace(old_text, new_text, 1)
-    encoded = updated.encode("utf-8")
+
+    encoded, original, updated = prepare_exact_text_edits(target.read_bytes(), edits)
     if len(encoded) > MAX_TEXT_BYTES:
         raise ValueError("修改后的文件超过大小限制")
     diff = "".join(difflib.unified_diff(
@@ -86,7 +140,11 @@ def edit_workspace_file(
                 stream.write(encoded)
     finally:
         temporary.unlink(missing_ok=True)
-    return {"path": relative_path, "diff": diff[:MAX_COMMAND_OUTPUT_CHARS]}
+    return {
+        "path": relative_path,
+        "edit_count": len(edits),
+        "diff": diff[:MAX_COMMAND_OUTPUT_CHARS],
+    }
 
 
 def run_project_command(
@@ -242,13 +300,25 @@ def run_create_workspace_file(arguments: dict[str, Any], context: dict[str, Any]
 
 def run_edit_workspace_file(arguments: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
     """校验工具参数后精确修改项目文件。"""
-    if set(arguments) != {"relative_path", "old_text", "new_text"} or not all(
-        isinstance(arguments[key], str) for key in arguments
+    if set(arguments) != {"relative_path", "edits"} or not isinstance(
+        arguments.get("relative_path"), str
+    ):
+        raise ValueError("edit_workspace_file 参数无效")
+    edits = arguments.get("edits")
+    if not isinstance(edits, list) or not edits or len(edits) > MAX_FILE_EDITS:
+        raise ValueError("edit_workspace_file 参数无效")
+    if not all(
+        isinstance(edit, dict)
+        and set(edit) == {"old_text", "new_text"}
+        and isinstance(edit["old_text"], str)
+        and isinstance(edit["new_text"], str)
+        for edit in edits
     ):
         raise ValueError("edit_workspace_file 参数无效")
     return edit_workspace_file(
-        context["workspace_root"], arguments["relative_path"],
-        arguments["old_text"], arguments["new_text"],
+        context["workspace_root"],
+        arguments["relative_path"],
+        edits,
     )
 
 

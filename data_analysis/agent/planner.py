@@ -16,11 +16,14 @@ from .loop import Finish, LlmClient, extract_model_reasoning
 from .state import AgentState, AnalysisPlan, clip_text
 
 _PLANNER_PROMPT_PATH = Path(__file__).resolve().parents[1] / "prompts" / "planner.md"
+_AGENT_SYSTEM_PROMPT_PATH = (
+    Path(__file__).resolve().parents[1] / "prompts" / "system.md"
+)
 
 # Planner 会话原文视野：短会话时滚动摘要为空，必须补上最近轮次以免误规划
 MAX_PLANNER_HISTORY_MESSAGES = 8          # 注入的最近对话条数
-MAX_PLANNER_HISTORY_ITEM_CHARS = 1_500    # 单条对话字符上限
-MAX_PLANNER_HISTORY_CHARS = 6_000         # 最近对话总字符预算
+MAX_PLANNER_HISTORY_ITEM_CHARS = 8000    # 单条对话字符上限
+MAX_PLANNER_HISTORY_CHARS = 20_000         # 最近对话总字符预算
 
 # Planner 可见的工作轨迹上限（每次规划只调用一次，可比内层 ReAct 宽松）
 PLANNER_TRAJECTORY_PATHS = 80
@@ -212,7 +215,7 @@ class Planner:
         }
         prompt = _render_planner_prompt(context, self._max_todos)
         return [
-            ("system", "你是请求路由器与执行计划编译器：简单请求直接回答，复杂请求才生成 Todo List。"),
+            ("system", _load_agent_system_prompt()),
             ("user", prompt),
         ]
 
@@ -271,6 +274,14 @@ def _render_planner_prompt(context: dict[str, Any], max_todos: int) -> str:
         )
         .strip()
     )
+
+
+def _load_agent_system_prompt() -> str:
+    """加载 Planner 与执行 Agent 共用的系统提示词。"""
+    try:
+        return _AGENT_SYSTEM_PROMPT_PATH.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        raise PlannerError(f"无法读取通用系统提示词: {exc}") from exc
 
 
 def _parse_planner_decision(raw: str) -> AnalysisPlan | Finish:

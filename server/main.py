@@ -1223,7 +1223,7 @@ def _agent_event_payload(
         "error": event.error,
     }
     if isinstance(event.result, dict):
-        if event.tool_name == "edit_workspace_file":
+        if event.tool_name in {"edit_workspace_file", "edit_attachment_file"}:
             payload["details"] = str(event.result.get("diff", ""))[:8000]
         elif event.tool_name == "run_project_command":
             command = str(event.result.get("command", ""))

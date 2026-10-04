@@ -101,6 +101,17 @@ test('工具行按白名单参数与代码注释取摘要', () => {
   assert.equal(rows[3].summary, '计算相关系数')
 })
 
+test('附件编辑显示为编辑操作并使用附件路径摘要', () => {
+  const rows = buildAgentTraceRows([
+    action('edit_attachment_file', { file_path: 'D:/runtime/input/notes.md' }),
+    observation('edit_attachment_file', { details: '@@ -1 +1 @@' }),
+  ])
+
+  assert.equal(rows[1].action, '编辑附件')
+  assert.equal(rows[1].summary, 'D:/runtime/input/notes.md')
+  assert.equal(rows[1].details?.[0].text, '@@ -1 +1 @@')
+})
+
 test('未登记的工具回退到工具名，并保留代码详情', () => {
   const rows = buildAgentTraceRows([
     action('brand_new_tool', {}, { code: 'print(1)' }),

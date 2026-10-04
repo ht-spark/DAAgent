@@ -126,7 +126,7 @@ Planner **看不到** `observations`，也看不到计划执行过程中的工�
 
 - 每个 Todo 用 `_todo_state` **新建隔离状态**：`memory_summary` 共享、`messages` 为会话历史浅拷贝、`available_artifacts` 为列表拷贝（Todo 内继续增长）、`work_trajectory` 为深拷贝（只读视图进 prompt）、`observations` **从空开始**、`run_budget` 传入**同一对象**。
 - 观察记忆按预算投影：预算从最新一条向前分配（最近 8 条以内、合计 ≤16000 字符），**刚拿到的结果原样保留**，更早的折叠为 `earlier_digests`；只有单条结果自身就超预算时才裁剪其超长字段（单字段 ≤8000 字符，保留头尾并写明是运行时截断）。
-- 防重复执行（`runtime/repeat_guard.py`）：按「工具名 + 参数」指纹登记已成功执行的调用；同样的调用再次出现时**不执行**，直接返回说明性观察（含上次结果要点与「改用范围参数」的建议）。成功的写入类工具（`write_artifact` / `create_workspace_file` / `edit_workspace_file` / `execute_python` / `run_project_command`）会清空登记，因此「改完文件再复核」的重新读取仍然允许；失败的调用不登记，修好后可以重试。
+- 防重复执行（`runtime/repeat_guard.py`）：按「工具名 + 参数」指纹登记已成功执行的调用；同样的调用再次出现时**不执行**，直接返回说明性观察（含上次结果要点与「改用范围参数」的建议）。成功的写入类工具（`write_artifact` / `edit_attachment_file` / `create_workspace_file` / `edit_workspace_file` / `execute_python` / `run_project_command`）会清空登记，因此「改完文件再复核」的重新读取仍然允许；失败的调用不登记，修好后可以重试。
 - 单 Todo 步数上限：`iter_plan_graph(max_todo_steps=30)` 达到上限时把该 Todo 标记为失败并交给恢复规划（摘要里带上被拦截的重复调用统计），避免一个 Todo 把整轮预算耗光。
 - 决策门禁：`AgentLoop.step` 读取共享的 `run_budget.iterations`，因此 `max_iterations` 约束的是**整轮 run**（全部 Todo + 最终汇总之和），而不是每个 Todo 各算一份。
 - Todo 结束：`finish.answer` 写入 `todo.result_summary` 与 `work_trajectory.key_decisions`，并通过 `user_query` 投影传给后续 Todo 与最终汇总；该 Todo 的 `observations` 随状态对象一起丢弃。
