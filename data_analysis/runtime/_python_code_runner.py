@@ -29,6 +29,8 @@ class SafeArtifacts:
         candidate = Path(relative_path.strip())
         if candidate.is_absolute() or ".." in candidate.parts:
             raise ValueError("产物路径必须是目录内的相对路径")
+        if any(part.casefold() == ".runtime" for part in candidate.parts):
+            raise ValueError("禁止写入运行时内部目录")
         target = (self.root / candidate).resolve(strict=False)
         if target != self.root and self.root not in target.parents:
             raise ValueError("产物路径超出授权目录")
@@ -161,6 +163,11 @@ def _restrict_writes(output_dir: Path):
         resolved = candidate.resolve(strict=False)
         if resolved != root and root not in resolved.parents:
             raise PermissionError(f"动态代码禁止写入当前运行目录之外: {resolved}")
+        if resolved != root and any(
+            part.casefold() == ".runtime"
+            for part in resolved.relative_to(root).parts
+        ):
+            raise PermissionError("动态代码禁止写入运行时内部目录")
 
     def guarded_open(file: Any, mode: str = "r", *args: Any, **kwargs: Any):
         if any(flag in mode for flag in "wax+"):
@@ -192,7 +199,7 @@ def _restrict_writes(output_dir: Path):
         return guarded
 
     def blocked_process(*_args: Any, **_kwargs: Any):
-        raise PermissionError("动态 Python 禁止启动子进程；请使用受控项目命令工具")
+        raise PermissionError("动态 Python 禁止启动子进程；请使用需人工批准的项目终端工具")
 
     with contextlib.ExitStack() as stack:
         stack.enter_context(contextlib.redirect_stdout(sys.stdout))

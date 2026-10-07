@@ -140,6 +140,42 @@ def test_parse_decision_accepts_unescaped_newlines_in_answer() -> None:
     assert "共 10 行" in decision.answer
 
 
+def test_parse_decision_accepts_python_dict_style_with_trailing_comma() -> None:
+    decision = parse_decision(
+        "{'type': 'action', 'thought': '读取文件', "
+        "'tool_name': 'retrieve', 'arguments': {'query': '报告'},}"
+    )
+
+    assert decision == Action(
+        thought="读取文件",
+        tool_name="retrieve",
+        arguments={"query": "报告"},
+    )
+
+
+def test_step_falls_back_to_plain_text_finish_after_retries() -> None:
+    llm = SequencedLlm(["这是已经完成的最终说明。", "这是已经完成的最终说明。"])
+    loop = AgentLoop(llm, [], "直接回答。", decision_retries=1)
+
+    decision = loop.step(FakeState())
+
+    assert decision == Finish(answer="这是已经完成的最终说明。")
+    assert len(llm.calls) == 2
+
+
+def test_step_never_turns_malformed_action_into_plain_text_finish() -> None:
+    response = '{"type":"action","tool_name":"retrieve","arguments":'
+    loop = AgentLoop(
+        FakeLlm(response),
+        [ToolSpec("retrieve", "检索")],
+        "检索。",
+        decision_retries=0,
+    )
+
+    with pytest.raises(DecisionParseError):
+        loop.step(FakeState())
+
+
 def test_parse_decision_recovers_finish_with_unescaped_quotes() -> None:
     decision = parse_decision(
         '{"type":"finish","thought":"分析完成","answer":"字段 "numclicks" '

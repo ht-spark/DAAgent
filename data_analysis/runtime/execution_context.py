@@ -41,7 +41,7 @@ class ExecutionContext:
         """让 Python 相关工具默认继承 Run 已选定的环境。"""
         environment = self.python_environment
         if (
-            action.tool_name not in {"execute_python", "run_project_command"}
+            action.tool_name != "execute_python"
             or "python_environment" in action.arguments
             or environment is None
             or environment.source == "host"
@@ -57,11 +57,3 @@ class ExecutionContext:
             self.workspace_root,
             configured_path,
         )
-
-    def refresh_project_environment(self) -> None:
-        """环境创建命令成功后重新发现项目环境。"""
-        if self.workspace_root is None:
-            return
-        environment = resolve_python_environment(self.workspace_root)
-        if environment.source != "host":
-            self.python_environment = environment

@@ -488,7 +488,7 @@ class WorkTrajectory(BaseModel):
         elif name in {
             "write_artifact",
             "edit_attachment_file",
-            "create_workspace_file",
+            "write_workspace_file",
             "edit_workspace_file",
         }:
             self.add_modified(_first_str(args, result_map, "relative_path", "path"))
@@ -506,7 +506,7 @@ class WorkTrajectory(BaseModel):
             self.add_note(note)
 
         description = _artifact_description_from_result(name, args, result_map)
-        if description:
+        if description and result_map.get("in_place") is not True:
             path = _first_str(args, result_map, "relative_path", "path", "file_path")
             if path:
                 self.describe_artifact(path, description)
@@ -832,8 +832,10 @@ def _observation_artifacts(
                 if isinstance(raw_path, str):
                     candidates.setdefault(raw_path, {})
 
-    if observation.tool_name in {"write_artifact", "edit_attachment_file"} and isinstance(
-        result.get("path"), str
+    if (
+        observation.tool_name in {"write_artifact", "edit_attachment_file"}
+        and result.get("in_place") is not True
+        and isinstance(result.get("path"), str)
     ):
         candidates.setdefault(result["path"], result)
 

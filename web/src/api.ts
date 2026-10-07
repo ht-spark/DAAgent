@@ -11,6 +11,14 @@ import {
   saveConfigs,
   saveExternalServiceConfigs,
 } from './apiConfigs'
+import {
+  DEFAULT_UI_SETTINGS,
+  isTerminalType,
+  loadUiSettings,
+  saveUiSettings,
+  type TerminalType,
+  type UiSettings,
+} from './settings'
 
 /**
  * 探测后端是否在线（GET /healthz）。
@@ -561,7 +569,8 @@ export type AgentTraceEvent = {
   type: 'agent_command_approval_required'
   approval_id: string
   command: string
-  python_environment?: string | null
+  shell: TerminalType
+  timeout_seconds?: number | null
   workspace_root: string
 } | {
   type: 'agent_command_approval_decision'
@@ -791,6 +800,49 @@ export async function persistApiSettings(snapshot: ApiSettingsSnapshot): Promise
     })
   } catch {
     /* 后端离线时保留 localStorage 缓存即可 */
+  }
+}
+
+/** 从后端读取常规设置；尚未保存时不覆盖浏览器缓存。 */
+export async function fetchGeneralSettings(): Promise<{
+  saved: boolean
+  terminalType: TerminalType
+} | null> {
+  try {
+    const res = await fetch('/api/settings/general', { signal: AbortSignal.timeout(3000) })
+    if (!res.ok) return null
+    const data = await res.json()
+    return {
+      saved: data.saved === true,
+      terminalType: isTerminalType(data.terminal_type)
+        ? data.terminal_type
+        : DEFAULT_UI_SETTINGS.terminalType,
+    }
+  } catch {
+    return null
+  }
+}
+
+/** 把后端终端类型同步到浏览器常规设置缓存。 */
+export async function syncGeneralSettingsCache(): Promise<UiSettings | null> {
+  const snapshot = await fetchGeneralSettings()
+  if (!snapshot?.saved) return null
+  const next = { ...loadUiSettings(), terminalType: snapshot.terminalType }
+  saveUiSettings(next)
+  return next
+}
+
+/** 保存终端类型；后端离线时仍保留浏览器缓存，待用户下次修改时重试。 */
+export async function persistGeneralSettings(terminalType: TerminalType): Promise<void> {
+  try {
+    await fetch('/api/settings/general', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ terminal_type: terminalType }),
+      signal: AbortSignal.timeout(5000),
+    })
+  } catch {
+    /* 后端离线时保留 localStorage 缓存 */
   }
 }
 

@@ -170,34 +170,48 @@ def test_sandbox_runs_workspace_tool_from_external_project_directory(tmp_path) -
     assert result["files"][0]["path"] == "notes.txt"
 
 
-def test_harness_returns_nonzero_project_command_for_rethinking(tmp_path) -> None:
+def test_harness_returns_nonzero_terminal_command_for_rethinking(tmp_path) -> None:
     workspace = tmp_path / "project"
     workspace.mkdir()
     registry = create_agent_tool_registry(
         [], workspace / "outputs", workspace_root=workspace,
-        python_executable=sys.executable, python_environment_source="project",
     )
     observation = Harness(
         registry, sandbox=SubprocessSandbox(working_directory=workspace),
-        command_approval=lambda _action: True,
+        terminal_approval=lambda _action: True,
     ).execute(Action(
-        tool_name="run_project_command", arguments={"command": "python -m pytest"},
+        tool_name="run_terminal_command", arguments={"command": "exit 7"},
     ))
     assert observation.success is False
     assert observation.result["exit_code"] != 0
     assert "命令退出码" in observation.error
 
 
-def test_harness_rejects_project_command_without_approval(tmp_path) -> None:
+def test_harness_rejects_terminal_command_without_approval(tmp_path) -> None:
     registry = create_agent_tool_registry(
         [], tmp_path / "outputs", workspace_root=tmp_path,
-        python_executable=sys.executable,
     )
     observation = Harness(registry).execute(Action(
-        tool_name="run_project_command", arguments={"command": "python -m pytest"},
+        tool_name="run_terminal_command", arguments={"command": "echo blocked"},
     ))
     assert observation.success is False
     assert observation.result is None
+    assert "未获人工批准" in observation.error
+
+
+def test_terminal_approval_is_consumed_before_tool_resolution(tmp_path) -> None:
+    """即使注册表配置错误，终端动作也必须先经过人工审批门禁。"""
+    requested: list[str] = []
+    observation = Harness(
+        ToolRegistry(),
+        terminal_approval=lambda action: requested.append(action.tool_name) or False,
+    ).execute(Action(
+        tool_name="run_terminal_command",
+        arguments={"command": "echo blocked"},
+    ))
+
+    assert requested == ["run_terminal_command"]
+    assert observation.success is False
     assert "未获人工批准" in observation.error
 
 

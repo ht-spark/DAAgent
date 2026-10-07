@@ -6,7 +6,7 @@ import type { AgentTraceEvent } from './api'
 export type AgentPlan = Extract<AgentTraceEvent, { type: 'agent_plan' }>
 
 /** 单个任务的执行状态 */
-export type TodoStatus = 'pending' | 'in_progress' | 'completed' | 'failed'
+export type TodoStatus = 'pending' | 'in_progress' | 'completed' | 'failed' | 'terminated'
 
 /** 任务状态映射：任务 ID -> 执行状态 */
 export type TodoStateMap = Record<string, TodoStatus>
@@ -17,6 +17,7 @@ export const TODO_STATUS_LABELS: Record<TodoStatus, string> = {
   in_progress: '进行中',
   completed: '已完成',
   failed: '失败',
+  terminated: '已终止',
 }
 
 const DEFAULT_TODO_SUMMARY_LENGTH = 34
@@ -61,6 +62,7 @@ export function latestAgentPlan(trace: AgentTraceEvent[]): AgentPlan | undefined
 export function deriveTodoStates(
   plan: AgentPlan | undefined,
   trace: AgentTraceEvent[],
+  runTerminated = false,
 ): TodoStateMap {
   const states: TodoStateMap = {}
   if (!plan) return states
@@ -76,6 +78,11 @@ export function deriveTodoStates(
     if (event.type === 'agent_todo_completed') states[event.todo_id] = 'completed'
     if (event.type === 'agent_todo_failed') states[event.todo_id] = 'failed'
   })
+  if (runTerminated) {
+    Object.entries(states).forEach(([todoId, status]) => {
+      if (status === 'pending' || status === 'in_progress') states[todoId] = 'terminated'
+    })
+  }
   return states
 }
 
@@ -83,12 +90,13 @@ export function deriveTodoStates(
 export function countTodoStates(
   plan: AgentPlan | undefined,
   states: TodoStateMap,
-): { pending: number; inProgress: number; completed: number; failed: number } {
-  const counts = { pending: 0, inProgress: 0, completed: 0, failed: 0 }
+): { pending: number; inProgress: number; completed: number; failed: number; terminated: number } {
+  const counts = { pending: 0, inProgress: 0, completed: 0, failed: 0, terminated: 0 }
   plan?.todos.forEach((todo) => {
     const status = states[todo.id]
     if (status === 'completed') counts.completed += 1
     else if (status === 'failed') counts.failed += 1
+    else if (status === 'terminated') counts.terminated += 1
     else if (status === 'in_progress') counts.inProgress += 1
     else counts.pending += 1
   })

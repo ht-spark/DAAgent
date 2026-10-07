@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 
 
 class AgentCommandDecisionBody(BaseModel):
-    """用户对单条 Agent 项目命令的批准决定。"""
+    """用户对单次 Agent 终端命令的批准决定。"""
 
     approved: bool
 

@@ -24,6 +24,7 @@ import {
   type ProjectFileNode,
 } from '../api'
 import { loadConfigs, type ApiConfig } from '../apiConfigs'
+import type { TerminalType } from '../settings'
 import {
   TODO_STATUS_LABELS,
   countTodoStates,
@@ -71,12 +72,13 @@ function loadProjectSidebarWidth(): number {
   return PROJECT_SIDEBAR_DEFAULT_WIDTH
 }
 
-/** 待人工批准的项目命令请求（对话流内弹窗，不再使用浏览器 confirm）。 */
+/** 待人工批准的终端命令请求（对话流内弹窗，不再使用浏览器 confirm）。 */
 type ApprovalRequest = {
   approval_id: string
   command: string
   workspace_root: string
-  python_environment?: string | null
+  shell: TerminalType
+  timeout_seconds?: number | null
 }
 
 type Message = {
@@ -756,14 +758,14 @@ const AgentTaskCard = memo(function AgentTaskCard({
   /** Agent 是否仍在推进计划，用于标题栏的“进行中”文案与状态点动画 */
   working: boolean
 }) {
-  const [collapsed, setCollapsed] = useState(false)
-  // 每次重新规划（新任务/新计划）时自动展开，让用户看到最新任务列表
+  const [collapsed, setCollapsed] = useState(true)
+  // 每次重新规划（新任务/新计划）时恢复默认收起状态，避免任务列表挤占对话空间
   const planKeyRef = useRef('')
   const planKey = `${plan.objective}|${plan.todos.map((todo) => todo.id).join('|')}`
   useEffect(() => {
     if (planKeyRef.current === planKey) return
     planKeyRef.current = planKey
-    setCollapsed(false)
+    setCollapsed(true)
   }, [planKey])
 
   const items = plan.todos.map((todo) => ({
@@ -774,6 +776,7 @@ const AgentTaskCard = memo(function AgentTaskCard({
   const total = items.length
   const completedCount = items.filter((item) => item.status === 'completed').length
   const failedCount = items.filter((item) => item.status === 'failed').length
+  const terminatedCount = items.filter((item) => item.status === 'terminated').length
   const runningCount = items.filter((item) => item.status === 'in_progress').length
   const pendingCount = items.filter((item) => item.status === 'pending').length
   const progress = total ? Math.round((completedCount / total) * 100) : 0
@@ -790,9 +793,11 @@ const AgentTaskCard = memo(function AgentTaskCard({
     ? ''
     : failedCount > 0
       ? `· ${failedCount} 失败`
-      : runningCount > 0
-        ? `· ${runningCount} 进行中`
-        : ''
+      : terminatedCount > 0
+        ? `· ${terminatedCount} 已终止`
+        : runningCount > 0
+          ? `· ${runningCount} 进行中`
+          : ''
 
   return (
     <section
@@ -984,11 +989,12 @@ export default function NewChat({
   const [files, setFiles] = useState<File[]>([])
   const [title, setTitle] = useState('新讨论')
   const [agentTrace, setAgentTrace] = useState<AgentTraceEvent[]>([])
+  const [agentRunTerminated, setAgentRunTerminated] = useState(false)
   // 当前讨论的执行计划与任务状态：驱动输入框上方的任务卡片
   const agentPlan = useMemo(() => latestAgentPlan(agentTrace), [agentTrace])
   const agentTodoState = useMemo(
-    () => deriveTodoStates(agentPlan, agentTrace),
-    [agentPlan, agentTrace],
+    () => deriveTodoStates(agentPlan, agentTrace, agentRunTerminated),
+    [agentPlan, agentTrace, agentRunTerminated],
   )
   const agentPlanCounts = useMemo(
     () => countTodoStates(agentPlan, agentTodoState),
@@ -1118,6 +1124,7 @@ export default function NewChat({
         }
         if (!active()) return
         setActiveRunId(runId)
+        setAgentRunTerminated(false)
         if (savedDiscussionId) {
           runningDiscussionRef.current = savedDiscussionId
           onDiscussionId(savedDiscussionId)
@@ -1140,7 +1147,8 @@ export default function NewChat({
             approval_id: event.approval_id,
             command: event.command,
             workspace_root: event.workspace_root,
-            python_environment: event.python_environment,
+            shell: event.shell,
+            timeout_seconds: event.timeout_seconds,
           })
         })
         approvalResolveRef.current = null
@@ -1161,6 +1169,7 @@ export default function NewChat({
         setActiveRunId(null)
         setIsSubmitting(false)
         setIsStopping(false)
+        setAgentRunTerminated(false)
         runningDiscussionRef.current = null
       },
       onCancelled: () => {
@@ -1171,6 +1180,7 @@ export default function NewChat({
         setActiveRunId(null)
         setIsSubmitting(false)
         setIsStopping(false)
+        setAgentRunTerminated(true)
         runningDiscussionRef.current = null
       },
     }
@@ -1230,6 +1240,7 @@ export default function NewChat({
     setActiveRunId(null)
     setIsSubmitting(false)
     setIsStopping(false)
+    setAgentRunTerminated(false)
     if (!discussionId) {
       setMessages([])
       setTitle('新讨论')
@@ -1293,9 +1304,11 @@ export default function NewChat({
           runningDiscussionRef.current = discussionId
           setActiveRunId(activeRun.run_id)
           setIsSubmitting(true)
+          setAgentRunTerminated(false)
           void reconnectAgentChatRun(activeRun.run_id, createStreamHandlers(controller), controller.signal)
             .catch((error) => {
               if (controller.signal.aborted) return
+              setAgentRunTerminated(true)
               setMessages((current) => current.map((item, index) => index === current.length - 1
                 ? { ...item, content: error instanceof Error ? error.message : '任务连接中断。' }
                 : item))
@@ -1347,6 +1360,7 @@ export default function NewChat({
     setDraft('')
     setIsSubmitting(true)
     setIsStopping(false)
+    setAgentRunTerminated(false)
     const attachedFiles = files
     setFiles([])
     if (fileInputRef.current) fileInputRef.current.value = ''
@@ -1372,6 +1386,7 @@ export default function NewChat({
       )
     } catch (error) {
       if (controller.signal.aborted || detachedRef.current) return
+      setAgentRunTerminated(true)
       setMessages((current) => current.map(
         (item, index) => index === current.length - 1
           ? {
@@ -1524,7 +1539,8 @@ export default function NewChat({
               <CommandApprovalDialog
                 command={approval.command}
                 workspaceRoot={approval.workspace_root}
-                pythonEnvironment={approval.python_environment}
+                shell={approval.shell}
+                timeoutSeconds={approval.timeout_seconds}
                 onApprove={() => settleApproval(true)}
                 onReject={() => settleApproval(false)}
               />

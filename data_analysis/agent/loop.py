@@ -6,6 +6,7 @@ state object before calling :meth:`AgentLoop.step` again.
 """
 from __future__ import annotations
 
+import ast
 import json
 import re
 from pathlib import Path
@@ -231,6 +232,11 @@ class AgentLoop:
             except DecisionParseError as exc:
                 last_error = exc
                 if attempt >= self._decision_retries:
+                    fallback = _recover_plain_text_finish(response_text)
+                    if fallback is not None:
+                        if reasoning:
+                            fallback = fallback.model_copy(update={"reasoning": reasoning})
+                        return fallback
                     raise
                 messages.extend(
                     [
@@ -634,10 +640,66 @@ def _extract_decision_payload(text: str) -> Any:
             return candidates[0]
         if len(candidates) > 1:
             raise DecisionParseError("LLM 响应包含多个决策对象，无法确定执行顺序")
+        literal_payload = _extract_literal_decision(text)
+        if literal_payload is not None:
+            return literal_payload
         recovered = _recover_finish_payload(text)
         if recovered is not None:
             return recovered
         raise DecisionParseError("LLM 决策不是合法的单个 JSON 对象") from original_error
+
+
+def _extract_literal_decision(text: str) -> dict[str, Any] | None:
+    """兼容 Python 字典式决策，例如单引号和末尾逗号。
+
+    ``ast.literal_eval`` 只解析字面量，不执行表达式。解析结果仍需通过 Pydantic
+    决策模型校验；因此该兼容不会放宽字段、类型或工具名约束。
+    """
+    snippets = [text.strip()]
+    snippets.extend(
+        match.group(1).strip()
+        for match in re.finditer(
+            r"```(?:json|python)?\s*(.*?)```",
+            text,
+            re.DOTALL | re.IGNORECASE,
+        )
+    )
+    candidates: list[dict[str, Any]] = []
+    for snippet in snippets:
+        if not snippet:
+            continue
+        try:
+            candidate = ast.literal_eval(snippet)
+        except (SyntaxError, ValueError):
+            continue
+        if isinstance(candidate, dict) and candidate.get("type") in {"action", "finish"}:
+            if candidate not in candidates:
+                candidates.append(candidate)
+    if len(candidates) > 1:
+        raise DecisionParseError("LLM 响应包含多个决策对象，无法确定执行顺序")
+    return candidates[0] if candidates else None
+
+
+def _recover_plain_text_finish(text: str) -> Finish | None:
+    """在全部格式纠错失败后，把普通回答安全降级为 finish。
+
+    该路径只接受不含结构化工具调用迹象的非空文本，因此最多提前结束当前步骤，
+    绝不会把损坏参数交给工具执行。
+    """
+    _, cleaned = split_think_blocks(text)
+    cleaned = cleaned.strip()
+    if not cleaned or cleaned.startswith(("{", "[")):
+        return None
+    if re.search(r'["\']?(?:type|tool_name)["\']?\s*:', cleaned, re.IGNORECASE):
+        return None
+    fenced = re.fullmatch(
+        r"```(?:markdown|md|text)?\s*(.*?)```",
+        cleaned,
+        re.DOTALL | re.IGNORECASE,
+    )
+    if fenced is not None:
+        cleaned = fenced.group(1).strip()
+    return Finish(answer=cleaned) if cleaned else None
 
 
 def _recover_finish_payload(text: str) -> dict[str, str] | None:

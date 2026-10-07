@@ -97,8 +97,11 @@ class ArtifactWorkspace:
         raw_path = Path(relative_path)
         if raw_path.is_absolute() or not raw_path.parts or ".." in raw_path.parts:
             raise ArtifactPathError("产物路径必须是无 '..' 的非空相对路径")
-        if raw_path.parts[0].casefold() in {"input", ".runs"}:
-            raise ArtifactPathError("禁止写入或覆盖输入附件目录")
+        if (
+            raw_path.parts[0].casefold() in {"input", ".runs"}
+            or any(part.casefold() == ".runtime" for part in raw_path.parts)
+        ):
+            raise ArtifactPathError("禁止写入输入附件目录或运行时内部目录")
         target = (self.root / raw_path).resolve(strict=False)
         if target == self.root or self.root not in target.parents:
             raise ArtifactPathError("产物路径超出当前会话产物目录")
@@ -116,7 +119,13 @@ class ArtifactWorkspace:
             if not path.is_file():
                 continue
             relative_path = path.relative_to(self.root)
-            if relative_path.parts[0].casefold() in {"input", ".runs"}:
+            if (
+                relative_path.parts[0].casefold() in {"input", ".runs"}
+                or any(
+                    part.casefold() == ".runtime"
+                    for part in relative_path.parts
+                )
+            ):
                 continue
             artifacts.append(relative_path.as_posix())
         return artifacts

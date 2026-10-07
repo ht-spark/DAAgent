@@ -6051,6 +6051,16 @@
   color: var(--danger, #b91c1c);
 }
 
+.agent-task-item.is-terminated .agent-task-dot {
+  border-color: var(--rag-text-muted);
+  background: var(--rag-text-muted);
+}
+
+.agent-task-item.is-terminated .agent-task-objective,
+.agent-task-item.is-terminated .agent-task-status {
+  color: var(--rag-text-muted);
+}
+
 /* 轨迹行尾的当前任务提示（执行计划详情已收归输入框上方的任务卡片） */
 .agent-trace-task {
   margin: 6px 0 0;

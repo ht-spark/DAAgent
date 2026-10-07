@@ -62,6 +62,11 @@ from data_analysis.runtime import (
     resolve_python_environment,
 )
 from data_analysis.tools import create_agent_tool_registry, supports_data_profile
+from data_analysis.tools.terminal_tools import (
+    DEFAULT_TERMINAL_SHELL,
+    TERMINAL_SHELLS,
+    TERMINAL_TOOL_NAMES,
+)
 from server import store
 from server import converter_store
 from server.project_workspaces import (
@@ -127,12 +132,14 @@ from server.schemas import (
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 ARTIFACTS_ROOT = PROJECT_ROOT / "artifacts"
 AGENT_RUNTIME_ROOT = PROJECT_ROOT / ".runtime" / "agent_uploads"
+# 启动时只清理超过 24 小时的附件运行目录，避免误删另一个仍在运行的服务实例。
+AGENT_RUNTIME_MAX_AGE_SECONDS = 24 * 60 * 60
 WEB_DIST = PROJECT_ROOT / "web" / "dist"
 API_SETTINGS_PATH = Path(__file__).resolve().parent / "api_settings.json"
 AGENT_TOOL_TIMEOUT_SECONDS = 2 * 60 * 60          # Agent 单次工具执行超时时间（2 小时）
 AGENT_RUN_TIMEOUT_SECONDS = 3 * 60 * 60           # Agent 整轮运行硬超时时间（3 小时）
 AGENT_MAX_DECISIONS = 160                         # 整轮运行共享的决策轮数上限（含全部 Todo 与最终汇总）
-AGENT_COMMAND_APPROVAL_TIMEOUT_SECONDS = 300      # 单条项目命令等待人工批准的上限
+AGENT_COMMAND_APPROVAL_TIMEOUT_SECONDS = 300      # 单次终端命令等待人工批准的上限
 _pending_agent_commands: dict[str, asyncio.Future[bool]] = {}
 
 
@@ -376,6 +383,7 @@ def _list_knowledge_documents(
 async def _on_startup() -> None:
     """启动时完成统一 Agent 所需的数据迁移。"""
     migrate_legacy_document_ids()
+    await asyncio.to_thread(_cleanup_stale_agent_runtime_dirs)
 
 
 def _read_api_settings() -> dict | None:
@@ -387,6 +395,24 @@ def _read_api_settings() -> dict | None:
     except (OSError, json.JSONDecodeError):
         return None
     return data if isinstance(data, dict) else None
+
+
+def _write_api_settings(data: dict) -> None:
+    """以同目录原子替换方式写入本机设置文件。"""
+    tmp_path = API_SETTINGS_PATH.with_suffix(".json.tmp")
+    tmp_path.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    tmp_path.replace(API_SETTINGS_PATH)
+
+
+def _configured_terminal_shell(settings: dict | None = None) -> str:
+    """读取已保存终端类型，缺失或非法时使用 PowerShell。"""
+    data = settings if settings is not None else (_read_api_settings() or {})
+    general = data.get("general")
+    value = general.get("terminal_type") if isinstance(general, dict) else None
+    return value if value in TERMINAL_SHELLS else DEFAULT_TERMINAL_SHELL
 
 
 @app.get("/api/projects", response_model=list[ProjectSummary])
@@ -625,16 +651,49 @@ async def save_api_settings_endpoint(body: dict) -> dict:
     """Persist the API settings snapshot to a local file (atomic replace)."""
     if not isinstance(body.get("configs"), list):
         raise HTTPException(status_code=422, detail="configs must be a list")
+    existing = _read_api_settings() or {}
     payload = {
         "configs": body.get("configs", []),
         "active_id": body.get("active_id") if isinstance(body.get("active_id"), str) else None,
         "external_services": body.get("external_services")
         if isinstance(body.get("external_services"), dict)
         else {},
+        "general": existing.get("general", {}),
     }
-    tmp_path = API_SETTINGS_PATH.with_suffix(".json.tmp")
-    tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp_path.replace(API_SETTINGS_PATH)
+    _write_api_settings(payload)
+    return {"ok": True}
+
+
+@app.get("/api/settings/general")
+async def get_general_settings_endpoint() -> dict:
+    """返回终端类型等本机常规设置。"""
+    data = _read_api_settings() or {}
+    general = data.get("general")
+    saved = (
+        isinstance(general, dict)
+        and general.get("terminal_type") in TERMINAL_SHELLS
+    )
+    return {
+        "saved": saved,
+        "terminal_type": _configured_terminal_shell(data),
+    }
+
+
+@app.put("/api/settings/general")
+async def save_general_settings_endpoint(body: dict) -> dict:
+    """校验并保存本机常规设置，同时保留 API 配置。"""
+    terminal_type = body.get("terminal_type")
+    if terminal_type not in TERMINAL_SHELLS:
+        raise HTTPException(
+            status_code=422,
+            detail="terminal_type 只支持 powershell、bash 或 git-bash",
+        )
+    payload = _read_api_settings() or {}
+    general = payload.get("general")
+    preserved = dict(general) if isinstance(general, dict) else {}
+    preserved["terminal_type"] = terminal_type
+    payload["general"] = preserved
+    _write_api_settings(payload)
     return {"ok": True}
 
 
@@ -1027,7 +1086,11 @@ async def _prepare_agent_data_files(
             )
         content = await file.read()
         if len(content) > MAX_AGENT_ATTACHMENT_BYTES:
-            raise HTTPException(status_code=400, detail=f"附件 {original_name} 超过 20 MB 限制")
+            size_limit_mb = MAX_AGENT_ATTACHMENT_BYTES // (1024 * 1024)
+            raise HTTPException(
+                status_code=400,
+                detail=f"附件 {original_name} 超过 {size_limit_mb} MB 限制",
+            )
 
         candidate = original_name
         serial = 2
@@ -1102,7 +1165,42 @@ def _cleanup_agent_runtime_dir(runtime_dir: Path) -> None:
     if root not in target.parents:
         logger.error("拒绝清理越界的 Agent 临时目录: %s", target)
         return
-    shutil.rmtree(target, ignore_errors=True)
+    try:
+        shutil.rmtree(target)
+    except FileNotFoundError:
+        return
+    except OSError:
+        logger.warning("清理 Agent 临时目录失败: %s", target, exc_info=True)
+
+
+def _cleanup_stale_agent_runtime_dirs(*, now: float | None = None) -> list[Path]:
+    """清理服务异常退出后遗留的过期附件目录，并返回成功删除的路径。"""
+    root = AGENT_RUNTIME_ROOT.resolve(strict=False)
+    if not root.is_dir():
+        return []
+    cutoff = (time.time() if now is None else now) - AGENT_RUNTIME_MAX_AGE_SECONDS
+    removed: list[Path] = []
+    for candidate in root.iterdir():
+        if not candidate.is_dir() or candidate.is_symlink():
+            continue
+        target = candidate.resolve(strict=False)
+        if target.parent != root:
+            logger.warning("跳过越界的 Agent 临时目录: %s", target)
+            continue
+        try:
+            modified_at = candidate.stat().st_mtime
+        except OSError:
+            logger.warning("无法读取 Agent 临时目录时间: %s", candidate, exc_info=True)
+            continue
+        if modified_at > cutoff:
+            continue
+        try:
+            shutil.rmtree(target)
+        except OSError:
+            logger.warning("清理过期 Agent 临时目录失败: %s", target, exc_info=True)
+            continue
+        removed.append(target)
+    return removed
 
 
 def _load_agent_system_prompt(workspace_root: Path | None = None) -> str:
@@ -1225,13 +1323,21 @@ def _agent_event_payload(
     if isinstance(event.result, dict):
         if event.tool_name in {"edit_workspace_file", "edit_attachment_file"}:
             payload["details"] = str(event.result.get("diff", ""))[:8000]
-        elif event.tool_name == "run_project_command":
+        elif event.tool_name in TERMINAL_TOOL_NAMES:
             command = str(event.result.get("command", ""))
-            stdout = str(event.result.get("stdout", ""))
-            stderr = str(event.result.get("stderr", ""))
+            output = str(event.result.get("output", ""))
+            changed_files = event.result.get("changed_files")
+            changed_text = ""
+            if isinstance(changed_files, list) and changed_files:
+                changed_text = "\n变更文件:\n" + "\n".join(
+                    f"- {path}" for path in changed_files if isinstance(path, str)
+                )
+                if event.result.get("changes_truncated") is True:
+                    changed_text += "\n- …变更列表或扫描范围已截断"
             payload["details"] = (
-                f"$ {command}\nexit_code: {event.result.get('exit_code')}\n"
-                f"{stdout}\n{stderr}"
+                f"[{event.result.get('shell', 'shell')}] {command}\n"
+                f"exit_code: {event.result.get('exit_code')}\n"
+                f"{output}{changed_text}"
             )[:8000]
     knowledge_sources = _knowledge_sources_from_observation(event)
     if knowledge_sources:
@@ -1596,7 +1702,7 @@ def download_legacy_agent_artifact(run_id: str, file_path: str) -> FileResponse:
 async def decide_agent_command_endpoint(
     approval_id: str, body: AgentCommandDecisionBody,
 ) -> dict[str, bool]:
-    """仅对当前待审的一条项目命令提交一次批准或拒绝。"""
+    """仅对当前待审的一次终端命令提交一次批准或拒绝。"""
     decision = _pending_agent_commands.get(approval_id)
     if decision is None or decision.done():
         raise HTTPException(status_code=409, detail="该命令已不再等待批准")
@@ -1722,6 +1828,7 @@ async def agent_profile_stream_endpoint(
         raise
     data_paths = uploaded_paths
     api_settings = _read_api_settings() or {}
+    terminal_shell = _configured_terminal_shell(api_settings)
     tavily_settings = api_settings.get("external_services", {}).get("tavily", {})
     tavily_api_key = (
         tavily_settings.get("apiKey")
@@ -1739,6 +1846,7 @@ async def agent_profile_stream_endpoint(
             python_executable=python_environment.executable,
             python_environment_source=python_environment.source,
             python_environment_name=python_environment.name,
+            terminal_shell=terminal_shell,
         )
         state = AgentState(
             user_query=compose_user_message(message, attachment_context),
@@ -1783,14 +1891,14 @@ async def agent_profile_stream_endpoint(
         cancel_check=_agent_cancel_check,
     )
     planner = Planner(llm, registry.specs(), cancel_check=_agent_cancel_check)
-    approved_command_actions: set[int] = set()
+    approved_terminal_actions: set[int] = set()
 
-    def consume_command_approval(action: Action) -> bool:
-        """只允许已批准的同一条命令执行一次。"""
+    def consume_terminal_approval(action: Action) -> bool:
+        """只允许已批准的同一次终端调用执行一次。"""
         key = id(action)
-        if key not in approved_command_actions:
+        if key not in approved_terminal_actions:
             return False
-        approved_command_actions.remove(key)
+        approved_terminal_actions.remove(key)
         return True
 
     execution_context = ExecutionContext(
@@ -1804,7 +1912,7 @@ async def agent_profile_stream_endpoint(
             timeout_seconds=AGENT_TOOL_TIMEOUT_SECONDS,
             working_directory=workspace_root or PROJECT_ROOT,
         ),
-        command_approval=consume_command_approval,
+        terminal_approval=consume_terminal_approval,
         execution_context=execution_context,
         cancel_check=_agent_cancel_check,
     )
@@ -1887,7 +1995,10 @@ async def agent_profile_stream_endpoint(
                         break
                     payload = _agent_event_payload(event)
                     trace.append(payload)
-                    if isinstance(event, Action) and event.tool_name == "run_project_command":
+                    if (
+                        isinstance(event, Action)
+                        and event.tool_name in TERMINAL_TOOL_NAMES
+                    ):
                         approval_id = uuid.uuid4().hex
                         decision = asyncio.get_running_loop().create_future()
                         _pending_agent_commands[approval_id] = decision
@@ -1896,7 +2007,8 @@ async def agent_profile_stream_endpoint(
                             "type": "agent_command_approval_required",
                             "approval_id": approval_id,
                             "command": str(event.arguments.get("command", "")),
-                            "python_environment": event.arguments.get("python_environment"),
+                            "shell": terminal_shell,
+                            "timeout_seconds": event.arguments.get("timeout_seconds"),
                             "workspace_root": str(workspace_root),
                         }
                         trace.append(request_payload)
@@ -1916,7 +2028,7 @@ async def agent_profile_stream_endpoint(
                             yield json.dumps({"type": "cancelled", "run_id": run_id}, ensure_ascii=False) + "\n"
                             return
                         if approved:
-                            approved_command_actions.add(id(event))
+                            approved_terminal_actions.add(id(event))
                         decision_payload = {
                             "type": "agent_command_approval_decision",
                             "approval_id": approval_id,

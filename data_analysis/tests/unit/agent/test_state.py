@@ -204,11 +204,9 @@ def test_successful_tool_observation_adds_real_artifact_to_state(tmp_path) -> No
     assert state.available_artifacts[0].source_tool == "execute_python"
 
 
-def test_attachment_edit_observation_adds_updated_copy_as_artifact(tmp_path) -> None:
+def test_in_place_attachment_edit_is_not_added_as_artifact(tmp_path) -> None:
     output_dir = tmp_path / "outputs"
     output_dir.mkdir()
-    updated = output_dir / "notes.md"
-    updated.write_text("更新内容", encoding="utf-8")
     state = AgentState(user_query="修改附件", output_dir=str(output_dir))
 
     state.record_observation(Observation(
@@ -217,13 +215,14 @@ def test_attachment_edit_observation_adds_updated_copy_as_artifact(tmp_path) -> 
         result={
             "path": "notes.md",
             "edit_count": 1,
-            "description": "已按原文件名更新上传附件，共应用 1 项精确修改",
+            "in_place": True,
+            "description": "已原位修改项目文件 notes.md，共应用 1 项精确修改",
         },
     ))
 
-    assert len(state.available_artifacts) == 1
-    assert state.available_artifacts[0].relative_path == "notes.md"
-    assert state.available_artifacts[0].source_tool == "edit_attachment_file"
+    assert state.available_artifacts == []
+    assert state.work_trajectory.files_modified == ["notes.md"]
+    assert state.work_trajectory.artifact_descriptions == {}
 
 
 def test_loop_context_contains_absolute_input_path_and_reusable_artifact(

@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -179,6 +180,39 @@ def test_agent_upload_rejects_unsupported_file(monkeypatch, tmp_path):
     assert not (tmp_path / "agent_uploads" / "run-2").exists()
 
 
+def test_agent_upload_size_error_uses_configured_limit(monkeypatch, tmp_path):
+    monkeypatch.setattr(main, "AGENT_RUNTIME_ROOT", tmp_path / "agent_uploads")
+    monkeypatch.setattr(main, "MAX_AGENT_ATTACHMENT_BYTES", 2 * 1024 * 1024)
+
+    with pytest.raises(HTTPException, match="2 MB 限制"):
+        asyncio.run(main._prepare_agent_data_files(
+            [_upload("large.txt", b"x" * (2 * 1024 * 1024 + 1))],
+            "discussion-size",
+            "run-size",
+        ))
+
+
+def test_startup_cleanup_removes_only_stale_runtime_directories(
+    monkeypatch,
+    tmp_path,
+):
+    runtime_root = tmp_path / "agent_uploads"
+    stale = runtime_root / "stale-run"
+    fresh = runtime_root / "fresh-run"
+    stale.mkdir(parents=True)
+    fresh.mkdir()
+    now = 2_000_000_000.0
+    os.utime(stale, (now - main.AGENT_RUNTIME_MAX_AGE_SECONDS - 1,) * 2)
+    os.utime(fresh, (now, now))
+    monkeypatch.setattr(main, "AGENT_RUNTIME_ROOT", runtime_root)
+
+    removed = main._cleanup_stale_agent_runtime_dirs(now=now)
+
+    assert removed == [stale.resolve()]
+    assert not stale.exists()
+    assert fresh.exists()
+
+
 @pytest.mark.parametrize(
     "file_name",
     [
@@ -300,15 +334,18 @@ def test_project_edit_and_command_results_are_visible_in_trace():
         result={"path": "src/a.py", "diff": "-old\n+new\n"},
     )
     command = Observation(
-        tool_name="run_project_command", success=False,
+        tool_name="run_terminal_command", success=False,
         result={"command": "python -m pytest", "exit_code": 1,
-                "stdout": "FAILED test_a", "stderr": ""},
+                "shell": "powershell", "output": "FAILED test_a",
+                "changed_files": ["coverage.xml"],
+                "changes_truncated": False},
         error="命令退出码 1: FAILED test_a",
     )
 
     assert "-old" in main._agent_event_payload(edit)["details"]
     assert "exit_code: 1" in main._agent_event_payload(command)["details"]
     assert "FAILED test_a" in main._agent_event_payload(command)["details"]
+    assert "coverage.xml" in main._agent_event_payload(command)["details"]
 
 def test_agent_code_event_exposes_generated_code_only():
     action = Action(
@@ -352,13 +389,12 @@ def test_agent_action_exposes_summary_arguments_only():
 
     command = Action(
         thought="运行测试",
-        tool_name="run_project_command",
-        arguments={"command": "python -m pytest " + "a" * 500, "python_environment": ".venv"},
+        tool_name="run_terminal_command",
+        arguments={"command": "python -m pytest " + "a" * 500},
     )
 
     command_args = main._agent_event_payload(command)["arguments"]
     assert len(command_args["command"]) == main.SUMMARY_ARGUMENT_MAX_LENGTH
-    assert "python_environment" not in command_args
 
 
 def test_agent_finish_exposes_public_reasoning_summary():

@@ -22,10 +22,10 @@ MUTATING_TOOLS = frozenset(
     {
         "write_artifact",
         "edit_attachment_file",
-        "create_workspace_file",
+        "write_workspace_file",
         "edit_workspace_file",
         "execute_python",
-        "run_project_command",
+        "run_terminal_command",
     }
 )
 

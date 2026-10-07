@@ -96,6 +96,7 @@ test('deriveTodoStates 忽略不属于当前计划的陈旧任务 ID', () => {
     inProgress: 0,
     completed: 0,
     failed: 0,
+    terminated: 0,
   })
 })
 
@@ -115,6 +116,27 @@ test('countTodoStates 汇总各状态数量', () => {
     inProgress: 1,
     completed: 1,
     failed: 1,
+    terminated: 0,
+  })
+})
+
+test('运行终止时将进行中与等待中的任务同步标记为已终止', () => {
+  const plan = planEvent(['t1', 't2', 't3'])
+  const trace: AgentTraceEvent[] = [
+    plan,
+    { type: 'agent_todo_completed', todo_id: 't1', result_summary: 'ok' },
+    { type: 'agent_todo_started', todo_id: 't2', objective: '任务 t2' },
+  ]
+
+  const states = deriveTodoStates(plan, trace, true)
+
+  assert.deepEqual(states, { t1: 'completed', t2: 'terminated', t3: 'terminated' })
+  assert.deepEqual(countTodoStates(plan, states), {
+    pending: 0,
+    inProgress: 0,
+    completed: 1,
+    failed: 0,
+    terminated: 2,
   })
 })
 

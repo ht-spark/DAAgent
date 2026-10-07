@@ -89,27 +89,40 @@ test('一次工具调用只产生「思考行 + 工具行」，观测并入工�
 
 test('工具行按白名单参数与代码注释取摘要', () => {
   const rows = buildAgentTraceRows([
-    action('run_project_command', { command: 'python -m pytest' }),
-    observation('run_project_command'),
+    action('run_terminal_command', { command: 'python -m pytest' }),
+    observation('run_terminal_command'),
     action('execute_python', {}, { code: '# 计算相关系数\nresult = 1' }),
     observation('execute_python'),
   ])
 
-  assert.equal(rows[1].action, '运行命令')
+  assert.equal(rows[1].action, '操作终端')
   assert.equal(rows[1].summary, 'python -m pytest')
   assert.equal(rows[3].action, '运行 Python')
   assert.equal(rows[3].summary, '计算相关系数')
 })
 
-test('附件编辑显示为编辑操作并使用附件路径摘要', () => {
+test('附件编辑显示为原位编辑并优先使用项目目标路径', () => {
   const rows = buildAgentTraceRows([
-    action('edit_attachment_file', { file_path: 'D:/runtime/input/notes.md' }),
+    action('edit_attachment_file', {
+      file_path: 'D:/runtime/input/notes.md',
+      target_path: 'docs/notes.md',
+    }),
     observation('edit_attachment_file', { details: '@@ -1 +1 @@' }),
   ])
 
-  assert.equal(rows[1].action, '编辑附件')
-  assert.equal(rows[1].summary, 'D:/runtime/input/notes.md')
+  assert.equal(rows[1].action, '原位编辑')
+  assert.equal(rows[1].summary, 'docs/notes.md')
   assert.equal(rows[1].details?.[0].text, '@@ -1 +1 @@')
+})
+
+test('完整写入项目文件显示为写入操作', () => {
+  const rows = buildAgentTraceRows([
+    action('write_workspace_file', { relative_path: 'src/new_module.py' }),
+    observation('write_workspace_file'),
+  ])
+
+  assert.equal(rows[1].action, '写入文件')
+  assert.equal(rows[1].summary, 'src/new_module.py')
 })
 
 test('未登记的工具回退到工具名，并保留代码详情', () => {
@@ -124,10 +137,10 @@ test('未登记的工具回退到工具名，并保留代码详情', () => {
 
 test('批准与拒绝并入同一次工具调用', () => {
   const rows = buildAgentTraceRows([
-    action('run_project_command', { command: 'git status' }),
-    { type: 'agent_command_approval_required', approval_id: 'a1', command: 'git status', workspace_root: 'D:/w' },
+    action('run_terminal_command', { command: 'git status' }),
+    { type: 'agent_command_approval_required', approval_id: 'a1', command: 'git status', shell: 'powershell', workspace_root: 'D:/w' },
     { type: 'agent_command_approval_decision', approval_id: 'a1', approved: true },
-    observation('run_project_command', { details: '$ git status\nclean' }),
+    observation('run_terminal_command', { details: '[powershell] git status\nclean' }),
   ])
 
   assert.equal(rows.length, 2)
@@ -137,8 +150,8 @@ test('批准与拒绝并入同一次工具调用', () => {
 
 test('等待批准的失败工具行标记为失败并保留错误摘要', () => {
   const rows = buildAgentTraceRows([
-    action('run_project_command', { command: 'git push' }),
-    { type: 'agent_command_approval_required', approval_id: 'a1', command: 'git push', workspace_root: 'D:/w' },
+    action('run_terminal_command', { command: 'git push' }),
+    { type: 'agent_command_approval_required', approval_id: 'a1', command: 'git push', shell: 'git-bash', workspace_root: 'D:/w' },
     { type: 'agent_command_approval_decision', approval_id: 'a1', approved: false },
   ])
 

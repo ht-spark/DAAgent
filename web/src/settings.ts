@@ -1,4 +1,4 @@
-// 通用界面设置（localStorage），当前仅字体大小。
+// 常规设置的浏览器缓存；终端类型还会同步到后端供 Agent 执行时使用。
 
 export const FONT_SIZE_OPTIONS = [
   { value: 12, label: '小', scale: 12 / 14 },
@@ -7,15 +7,30 @@ export const FONT_SIZE_OPTIONS = [
   { value: 18, label: '特大', scale: 18 / 14 },
 ] as const
 
+export type TerminalType = 'powershell' | 'bash' | 'git-bash'
+
+export const TERMINAL_TYPE_OPTIONS: { value: TerminalType; label: string }[] = [
+  { value: 'powershell', label: 'PowerShell' },
+  { value: 'bash', label: 'Bash' },
+  { value: 'git-bash', label: 'Git Bash' },
+]
+
+export function isTerminalType(value: unknown): value is TerminalType {
+  return TERMINAL_TYPE_OPTIONS.some((option) => option.value === value)
+}
+
 export type UiSettings = {
   /** 界面正文字号（px） */
   fontSize: number
+  /** Agent 执行终端命令时固定使用的 Shell */
+  terminalType: TerminalType
 }
 
 const KEY_UI = 'mmagent.uiSettings'
 
 export const DEFAULT_UI_SETTINGS: UiSettings = {
   fontSize: 14,
+  terminalType: 'powershell',
 }
 
 export function loadUiSettings(): UiSettings {
@@ -27,6 +42,9 @@ export function loadUiSettings(): UiSettings {
     const known = FONT_SIZE_OPTIONS.some((o) => o.value === fontSize)
     return {
       fontSize: known ? fontSize : DEFAULT_UI_SETTINGS.fontSize,
+      terminalType: isTerminalType(parsed.terminalType)
+        ? parsed.terminalType
+        : DEFAULT_UI_SETTINGS.terminalType,
     }
   } catch {
     return { ...DEFAULT_UI_SETTINGS }

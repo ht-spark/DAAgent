@@ -1,16 +1,12 @@
-"""项目编辑与受控命令的权限边界测试。"""
+"""项目文本创建与编辑的权限边界测试。"""
 from __future__ import annotations
-
-import sys
 
 import pytest
 
 from data_analysis.tools.project_edit_tools import (
-    _environment_command,
-    create_workspace_file,
     edit_workspace_file,
-    run_project_command,
-    run_project_command_tool,
+    run_edit_workspace_file,
+    write_workspace_file,
 )
 from data_analysis.tools.registry import create_agent_tool_registry
 from data_analysis.tools.workspace_tools import WorkspacePathError
@@ -19,10 +15,18 @@ from data_analysis.tools.workspace_tools import WorkspacePathError
 def test_project_change_tools_are_available_when_project_is_selected(tmp_path):
     output = tmp_path / "outputs"
     registry = create_agent_tool_registry(
-        [], output, workspace_root=tmp_path, python_executable=sys.executable,
+        [], output, workspace_root=tmp_path,
     )
     names = {tool.name for tool in registry.specs()}
-    assert {"create_workspace_file", "edit_workspace_file", "run_project_command"} <= names
+    assert {
+        "write_workspace_file",
+        "edit_workspace_file",
+        "run_terminal_command",
+    } <= names
+    assert "run_project_command" not in names
+    terminal = registry.resolve("run_terminal_command")
+    assert terminal.context["terminal_shell"] == "powershell"
+    assert "shell" not in terminal.spec.parameters["properties"]
     target = tmp_path / "existing.txt"
     target.write_text("before", encoding="utf-8")
     registry.resolve("edit_workspace_file").invoke({
@@ -32,7 +36,11 @@ def test_project_change_tools_are_available_when_project_is_selected(tmp_path):
     assert target.read_text(encoding="utf-8") == "after"
     assert not output.exists()
     unbound = create_agent_tool_registry([], output)
-    assert not {"create_workspace_file", "edit_workspace_file", "run_project_command"} & {
+    assert not {
+        "write_workspace_file",
+        "edit_workspace_file",
+        "run_terminal_command",
+    } & {
         tool.name for tool in unbound.specs()
     }
 
@@ -60,20 +68,25 @@ def test_edit_tool_rejects_malformed_edits(tmp_path, edits):
     assert target.read_text(encoding="utf-8") == "before"
 
 
-def test_create_and_edit_project_file_returns_diff(tmp_path):
-    created = create_workspace_file(tmp_path, "src/calculator.py", "return a - b\n")
+def test_write_and_edit_project_file_returns_diff(tmp_path):
+    created = write_workspace_file(tmp_path, "src/calculator.py", "return a - b\n")
+    overwritten = write_workspace_file(tmp_path, "src/calculator.py", "return a - b\n")
     edited = edit_workspace_file(
         tmp_path,
         "src/calculator.py",
         [{"old_text": "return a - b", "new_text": "return a + b"}],
     )
     assert created["created"] is True
+    assert created["overwritten"] is False
+    assert overwritten["created"] is False
+    assert overwritten["overwritten"] is True
     assert edited["edit_count"] == 1
-    assert "-return a - b" in edited["diff"]
-    assert "+return a + b" in edited["diff"]
+    assert "-1 return a - b" in edited["diff"]
+    assert "+1 return a + b" in edited["diff"]
+    assert "-return a - b" in edited["patch"]
+    assert "+return a + b" in edited["patch"]
+    assert edited["first_changed_line"] == 1
     assert (tmp_path / "src/calculator.py").read_text(encoding="utf-8") == "return a + b\n"
-    with pytest.raises(FileExistsError):
-        create_workspace_file(tmp_path, "src/calculator.py", "overwrite")
 
 
 def test_edit_rejects_ambiguous_and_outside_paths(tmp_path):
@@ -85,25 +98,27 @@ def test_edit_rejects_ambiguous_and_outside_paths(tmp_path):
             [{"old_text": "pass", "new_text": "return"}],
         )
     with pytest.raises(WorkspacePathError):
-        create_workspace_file(tmp_path, "../escape.py", "x")
+        write_workspace_file(tmp_path, "../escape.py", "x")
     with pytest.raises(WorkspacePathError):
-        create_workspace_file(tmp_path, ".env", "SECRET=x")
+        write_workspace_file(tmp_path, ".env", "SECRET=x")
+    with pytest.raises(WorkspacePathError):
+        write_workspace_file(tmp_path, ".runtime/cache.txt", "x")
 
 
-def test_create_and_edit_accept_absolute_path_inside_project(tmp_path):
+def test_write_and_edit_accept_absolute_path_inside_project(tmp_path):
     target = tmp_path / "nested" / "result.md"
-    created = create_workspace_file(tmp_path, str(target), "before\n")
+    created = write_workspace_file(tmp_path, str(target), "before\n")
     edited = edit_workspace_file(
         tmp_path,
         str(target),
         [{"old_text": "before", "new_text": "after"}],
     )
     assert created["created"] is True
-    assert "+after" in edited["diff"]
+    assert "+1 after" in edited["diff"]
     assert target.read_text(encoding="utf-8") == "after\n"
 
 
-def test_edit_falls_back_to_direct_write_when_windows_replace_is_denied(
+def test_edit_preserves_original_when_atomic_replace_is_denied(
     tmp_path, monkeypatch,
 ):
     target = tmp_path / "locked.md"
@@ -117,21 +132,36 @@ def test_edit_falls_back_to_direct_write_when_windows_replace_is_denied(
         deny_replace,
     )
 
-    result = edit_workspace_file(
-        tmp_path,
-        "locked.md",
-        [{"old_text": "before", "new_text": "after"}],
-    )
+    with pytest.raises(PermissionError):
+        edit_workspace_file(
+            tmp_path,
+            "locked.md",
+            [{"old_text": "before", "new_text": "after"}],
+        )
 
-    assert "+after" in result["diff"]
-    assert target.read_text(encoding="utf-8") == "after\n"
+    assert target.read_text(encoding="utf-8") == "before\n"
     assert not list(tmp_path.glob(".locked.md.*.tmp"))
+
+
+def test_edit_rejects_stale_expected_content_without_writing(tmp_path):
+    target = tmp_path / "notes.md"
+    target.write_text("newer\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="内容不一致"):
+        edit_workspace_file(
+            tmp_path,
+            "notes.md",
+            [{"old_text": "newer", "new_text": "changed"}],
+            expected_content=b"older\n",
+        )
+
+    assert target.read_text(encoding="utf-8") == "newer\n"
 
 
 def test_project_file_tools_reject_absolute_path_outside_project(tmp_path):
     outside = tmp_path.parent / "outside.md"
     with pytest.raises(WorkspacePathError, match="超出当前项目目录"):
-        create_workspace_file(tmp_path, str(outside), "not allowed")
+        write_workspace_file(tmp_path, str(outside), "not allowed")
     with pytest.raises(WorkspacePathError, match="超出当前项目目录"):
         edit_workspace_file(
             tmp_path,
@@ -161,8 +191,10 @@ def test_edit_applies_multiple_replacements_against_original_file(tmp_path):
     assert target.read_text(encoding="utf-8") == (
         'host = "0.0.0.0"\nport = 8080\ndebug = False\n'
     )
-    assert '-host = "localhost"' in result["diff"]
-    assert "+port = 8080" in result["diff"]
+    assert 'host = "localhost"' in result["diff"]
+    assert "port = 8080" in result["diff"]
+    assert '-host = "localhost"' in result["patch"]
+    assert "+port = 8080" in result["patch"]
 
 
 def test_edit_is_atomic_when_any_replacement_is_invalid(tmp_path):
@@ -170,7 +202,7 @@ def test_edit_is_atomic_when_any_replacement_is_invalid(tmp_path):
     original = "port = 3000\ndebug = False\n"
     target.write_text(original, encoding="utf-8")
 
-    with pytest.raises(ValueError, match="第 2 项.*匹配 0 次"):
+    with pytest.raises(ValueError, match="第 2 项.*无法.*old_text"):
         edit_workspace_file(
             tmp_path,
             "settings.py",
@@ -226,68 +258,72 @@ def test_edit_preserves_lf_on_windows(tmp_path):
     assert target.read_bytes() == b"one\ntwo\n"
 
 
-def test_command_rejects_shell_and_returns_failure_to_model(tmp_path):
-    with pytest.raises(ValueError, match="只允许"):
-        run_project_command(tmp_path, "powershell Remove-Item *", sys.executable)
-    result = run_project_command(tmp_path, "python -m pytest", sys.executable)
-    assert result["exit_code"] != 0
-    assert result["stderr"] or result["stdout"]
+def test_edit_fuzzy_match_preserves_untouched_original_lines(tmp_path):
+    target = tmp_path / "unicode.md"
+    original = "标题\u00a0值  \n未触及“原样”  \n目标：“旧值”  \n"
+    target.write_text(original, encoding="utf-8", newline="")
 
-def test_git_command_rejects_parent_repository(tmp_path):
-    import subprocess
+    result = edit_workspace_file(
+        tmp_path,
+        "unicode.md",
+        [{"old_text": '目标："旧值"', "new_text": "目标：“新值”"}],
+    )
 
-    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
-    nested = tmp_path / "nested"
-    nested.mkdir()
-    with pytest.raises(ValueError, match="仓库根目录"):
-        run_project_command(nested, "git status", sys.executable)
-
-
-def test_environment_commands_target_project_and_selected_python(tmp_path, monkeypatch):
-    monkeypatch.setattr("data_analysis.tools.project_edit_tools.shutil.which", lambda name: name)
-    python = str(sys.executable)
-    assert _environment_command(tmp_path, "python -m venv .venv", python) == [
-        python, "-m", "venv", str(tmp_path / ".venv"),
-    ]
-    assert _environment_command(tmp_path, "pip install pandas", python) == [
-        python, "-m", "pip", "install", "pandas",
-    ]
-    assert _environment_command(tmp_path, "uv pip install numpy", python) == [
-        "uv", "pip", "install", "--python", python, "numpy",
-    ]
-    (tmp_path / "requirements.txt").write_text("pandas\n", encoding="utf-8")
-    assert _environment_command(tmp_path, "pip install -r requirements.txt", python) == [
-        python, "-m", "pip", "install", "-r", str(tmp_path / "requirements.txt"),
-    ]
-    assert _environment_command(tmp_path, "conda create -p env python=3.11", python) == [
-        "conda", "create", "-p", str(tmp_path / "env"), "python=3.11", "-y",
-    ]
-    (tmp_path / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
-    assert _environment_command(tmp_path, "uv sync", python) == ["uv", "sync"]
+    updated = target.read_text(encoding="utf-8")
+    assert updated.startswith("标题\u00a0值  \n未触及“原样”  \n")
+    assert updated.endswith("目标：“新值”\n")
+    assert result["first_changed_line"] == 3
 
 
-def test_environment_commands_reject_escape_and_shell_syntax(tmp_path):
-    with pytest.raises(WorkspacePathError):
-        _environment_command(tmp_path, "python -m venv ../outside", sys.executable)
-    with pytest.raises(ValueError, match="不支持的安装参数"):
-        _environment_command(tmp_path, "pip install pandas && whoami", sys.executable)
-    with pytest.raises(WorkspacePathError, match="当前项目内"):
-        run_project_command_tool(
-            {"command": "pip install pandas", "python_environment": str(tmp_path.parent)},
-            {"workspace_root": str(tmp_path), "python_executable": sys.executable},
+def test_edit_prefers_unique_exact_match_over_fuzzy_equivalent(tmp_path):
+    target = tmp_path / "quotes.txt"
+    target.write_text("target 'old'\ntarget ‘old’\n", encoding="utf-8", newline="")
+
+    edit_workspace_file(
+        tmp_path,
+        "quotes.txt",
+        [{"old_text": "target 'old'", "new_text": "target 'new'"}],
+    )
+
+    assert target.read_text(encoding="utf-8") == "target 'new'\ntarget ‘old’\n"
+
+
+def test_edit_rejects_no_op_replacement(tmp_path):
+    target = tmp_path / "same.txt"
+    target.write_text("same\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="完全相同"):
+        edit_workspace_file(
+            tmp_path,
+            "same.txt",
+            [{"old_text": "same", "new_text": "same"}],
         )
 
+    assert target.read_text(encoding="utf-8") == "same\n"
 
-def test_missing_project_environment_only_allows_bootstrap_command(tmp_path):
-    context = {
-        "workspace_root": str(tmp_path),
-        "python_executable": sys.executable,
-        "python_environment_source": "host",
-    }
-    with pytest.raises(ValueError, match="当前项目未发现 Python 环境"):
-        run_project_command_tool({"command": "pip install pandas"}, context)
-    with pytest.raises(ValueError, match="当前项目未发现 Python 环境"):
-        run_project_command_tool({"command": "python -m pytest"}, context)
-    result = run_project_command_tool({"command": "python -m venv .venv"}, context)
-    assert result["exit_code"] == 0
-    assert (tmp_path / ".venv" / "pyvenv.cfg").is_file()
+
+def test_edit_runtime_accepts_pi_compatible_argument_shapes(tmp_path):
+    first = tmp_path / "first.txt"
+    second = tmp_path / "second.txt"
+    first.write_text("before", encoding="utf-8")
+    second.write_text("before", encoding="utf-8")
+    context = {"workspace_root": str(tmp_path)}
+
+    run_edit_workspace_file(
+        {
+            "relative_path": "first.txt",
+            "edits": '{"oldText":"before","newText":"after"}',
+        },
+        context,
+    )
+    run_edit_workspace_file(
+        {
+            "relative_path": "second.txt",
+            "old_text": "before",
+            "new_text": "after",
+        },
+        context,
+    )
+
+    assert first.read_text(encoding="utf-8") == "after"
+    assert second.read_text(encoding="utf-8") == "after"

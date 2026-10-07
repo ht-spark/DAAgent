@@ -190,12 +190,19 @@ def _parse_response(output: str) -> dict:
 
 def _safe_environment() -> dict[str, str]:
     allowed_names = (
+        "APPDATA",
         "COMSPEC",
+        "HOMEDRIVE",
+        "HOMEPATH",
+        "LOCALAPPDATA",
         "PATH",
         "PATHEXT",
+        "PROGRAMFILES",
+        "PROGRAMFILES(X86)",
         "SYSTEMROOT",
         "TEMP",
         "TMP",
+        "USERPROFILE",
         "WINDIR",
     )
     environment = {

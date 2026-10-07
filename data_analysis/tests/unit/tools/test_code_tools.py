@@ -118,6 +118,19 @@ def test_execute_python_code_rejects_write_outside_run_directory(tmp_path) -> No
     assert not outside.exists()
 
 
+def test_execute_python_code_rejects_runtime_internal_directory(tmp_path) -> None:
+    output_dir = tmp_path / "output"
+
+    with pytest.raises(CodeExecutionError, match="运行时内部目录"):
+        execute_python_code(
+            "ARTIFACTS.path('nested/.runtime/cache.json').write_text('{}')",
+            data_paths=[],
+            output_dir=output_dir,
+        )
+
+    assert not (output_dir / ".runtime" / "cache.json").exists()
+
+
 def test_execute_python_code_requires_promised_artifact(tmp_path) -> None:
     with pytest.raises(CodeExecutionError, match="没有在当前运行目录生成承诺产物"):
         execute_python_code(

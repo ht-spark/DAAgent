@@ -126,7 +126,7 @@ Planner **看不到** `observations`，也看不到计划执行过程中的工�
 
 - 每个 Todo 用 `_todo_state` **新建隔离状态**：`memory_summary` 共享、`messages` 为会话历史浅拷贝、`available_artifacts` 为列表拷贝（Todo 内继续增长）、`work_trajectory` 为深拷贝（只读视图进 prompt）、`observations` **从空开始**、`run_budget` 传入**同一对象**。
 - 观察记忆按预算投影：预算从最新一条向前分配（最近 8 条以内、合计 ≤16000 字符），**刚拿到的结果原样保留**，更早的折叠为 `earlier_digests`；只有单条结果自身就超预算时才裁剪其超长字段（单字段 ≤8000 字符，保留头尾并写明是运行时截断）。
-- 防重复执行（`runtime/repeat_guard.py`）：按「工具名 + 参数」指纹登记已成功执行的调用；同样的调用再次出现时**不执行**，直接返回说明性观察（含上次结果要点与「改用范围参数」的建议）。成功的写入类工具（`write_artifact` / `edit_attachment_file` / `create_workspace_file` / `edit_workspace_file` / `execute_python` / `run_project_command`）会清空登记，因此「改完文件再复核」的重新读取仍然允许；失败的调用不登记，修好后可以重试。
+- 防重复执行（`runtime/repeat_guard.py`）：按「工具名 + 参数」指纹登记已成功执行的调用；同样的调用再次出现时**不执行**，直接返回说明性观察（含上次结果要点与「改用范围参数」的建议）。成功的写入类工具（`write_artifact` / `edit_attachment_file` / `write_workspace_file` / `edit_workspace_file` / `execute_python` / `run_terminal_command`）会清空登记，因此「改完文件再复核」的重新读取仍然允许；失败的调用不登记，修好后可以重试。
 - 单 Todo 步数上限：`iter_plan_graph(max_todo_steps=30)` 达到上限时把该 Todo 标记为失败并交给恢复规划（摘要里带上被拦截的重复调用统计），避免一个 Todo 把整轮预算耗光。
 - 决策门禁：`AgentLoop.step` 读取共享的 `run_budget.iterations`，因此 `max_iterations` 约束的是**整轮 run**（全部 Todo + 最终汇总之和），而不是每个 Todo 各算一份。
 - Todo 结束：`finish.answer` 写入 `todo.result_summary` 与 `work_trajectory.key_decisions`，并通过 `user_query` 投影传给后续 Todo 与最终汇总；该 Todo 的 `observations` 随状态对象一起丢弃。
@@ -142,7 +142,7 @@ Planner **看不到** `observations`，也看不到计划执行过程中的工�
 | 附件读取                | 80,000 字符          |
 | 产物检查                | 50,000 字符          |
 | `execute_python` 代码 | 50,000 字符输入      |
-| 项目命令 stdout/stderr  | 20,000 字符          |
+| 终端合并输出            | 尾部 2,000 行或 50 KiB；截断时保留完整日志路径 |
 | 知识库/联网 query       | 4,000 / 1,000 字符   |
 | 工作区列表/搜索/读文件  | 有`truncated` 标记 |
 | 单条观察进 prompt       | 最近的按 16000 字符预算原样保留；仅单条自身超预算时按 8000 字符保留头尾并标注运行时截断 |
@@ -371,7 +371,7 @@ final = _final_state(state, plan)          # 汇总 ReAct，同样共享 run_bud
 ## 6. Harness 执行边界
 
 - 决策层**从不**自己跑工具
-- 项目命令需服务端审批 Future 通过后才允许执行一次
+- 终端命令需服务端审批 Future 通过后才允许执行一次
 - 沙箱负责路径/超时等（`SubprocessSandbox`）
 
 ## 7. 状态模型（`agent/state.py`）
@@ -436,7 +436,7 @@ AgentLoop.step  →  Action {tool_name, arguments, thought}
         ┌───────────────┼────────────────┐
         ▼               ▼                ▼
   人工审批拦截     进程内工具        子进程沙箱
-  (项目命令)    (LLM/知识库等)   (多数工具/代码)
+  (终端命令)    (LLM/知识库等)   (多数工具/代码)
         │               │                │
         └───────────────┴────────────────┘
                         ▼
@@ -455,11 +455,11 @@ AgentLoop.step  →  Action {tool_name, arguments, thought}
 | 步骤                | 行为                                                                                                                            |
 | ------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
 | 1. 计时             | `started_at = time.monotonic()`                                                                                               |
-| 2. 项目命令门禁     | `tool_name == "run_project_command"` 且 `command_approval` 未通过 → 直接失败 Observation：「项目命令未获人工批准，未执行」 |
+| 2. 终端命令门禁     | `tool_name` 属于 `TERMINAL_TOOL_NAMES` 且 `terminal_approval` 未通过 → 直接失败 Observation：「终端命令未获人工批准，未执行」 |
 | 3. 解析工具         | `registry.resolve(tool_name)`；未知工具 → 失败 Observation                                                                   |
 | 4. 执行分流         | `run_in_process=True` → `tool.invoke(arguments)`；否则 → `sandbox.execute(tool, arguments)`                             |
 | 5. 异常兜底         | `ToolNotFoundError` / `SandboxError` / `ValueError` / `RuntimeError` → 失败 Observation，`error=str(exc)`            |
-| 6. 项目命令二次校验 | 若结果 dict 里`exit_code != 0` → 失败，error 含退出码 + stderr/stdout 截断约 1000 字符                                       |
+| 6. 终端命令二次校验 | 若结果 dict 里`exit_code != 0` → 失败，error 含退出码 + 合并输出截断约 1000 字符                                               |
 | 7. 成功             | `Observation(success=True, result=…, duration_ms=…)`                                                                        |
 
 核心契约：
@@ -535,11 +535,11 @@ env = 精简环境变量 + PYTHONPATH=仓库根
 
 | 情况                                | Observation                               |
 | ----------------------------------- | ----------------------------------------- |
-| 项目命令未批准                      | `success=false`, error=未获批准         |
+| 终端命令未批准                      | `success=false`, error=未获批准         |
 | 工具名不存在                        | `success=false`, ToolNotFoundError 文案 |
 | 参数/上下文不合法                   | ToolArgumentsError 等 → 失败             |
 | 沙箱超时 / 协议错误 / 工具业务失败  | 对应 Sandbox* 文案                        |
-| `run_project_command` 退出码 ≠ 0 | 失败，含 exit_code 与输出摘录             |
+| `run_terminal_command` 退出码 ≠ 0 | 失败，含 exit_code 与合并输出摘录          |
 | 正常返回                            | `success=true`, result=工具 JSON        |
 
 Harness **不**自动重试；重试策略在决策层（看 observation 后自己改参数再调）或系统提示要求模型「依据错误修改后再试」。
@@ -563,7 +563,7 @@ Harness **不**自动重试；重试策略在决策层（看 observation 后自�
 
 - 决策/执行解耦，失败统一成 Observation
 - 默认子进程隔离 + 环境变量白名单 + 入口模块白名单
-- 项目命令人工审批、一次性生效
+- 终端命令人工审批、一次性生效
 - 进程内通道服务 LLM/检索类工具
 - 超时与 payload/output 字节上限
 
@@ -616,7 +616,7 @@ Loop 只决定「调什么」；Harness 负责「能不能调、在哪调、失�
 | `MAX_PLAN_RESULTS_CHARS`             | `16000` | 一次 prompt 内全部已完成结果的总预算。                           | `data_analysis/agent/graph.py`    |
 | `MAX_PLANNER_HISTORY_MESSAGES` 等     | 8 / 1500 / 6000 | Planner 注入的最近对话条数、单条与总字符预算。            | `data_analysis/agent/planner.py`  |
 | `max_todo_steps`                     |      30 | 单个 Todo 允许的决策轮数上限，超限按 Todo 失败交给恢复规划。     | `data_analysis/agent/graph.py`    |
-| `MUTATING_TOOLS`                     | 5 个工具 | 成功后清空重复调用登记，允许重新读取同一目标。                    | `data_analysis/runtime/repeat_guard.py` |
+| `MUTATING_TOOLS`                     | 7 个工具 | 成功后清空重复调用登记，允许重新读取同一目标。                    | `data_analysis/runtime/repeat_guard.py` |
 
 ### 3）知识库切分参数
 
@@ -648,7 +648,7 @@ Loop 只决定「调什么」；Harness 负责「能不能调、在哪调、失�
 | ------------------------------------------ | -----------: | -------------------------------------- | ------------------ |
 | `AGENT_TOOL_TIMEOUT_SECONDS`             |  `7200` 秒 | Agent 单次工具执行允许持续的最长时间。 | `server/main.py` |
 | `AGENT_RUN_TIMEOUT_SECONDS`              | `10800` 秒 | 一整轮 Agent 运行允许持续的最长时间。  | `server/main.py` |
-| `AGENT_COMMAND_APPROVAL_TIMEOUT_SECONDS` |   `300` 秒 | 项目命令等待用户批准的最长时间。       | `server/main.py` |
+| `AGENT_COMMAND_APPROVAL_TIMEOUT_SECONDS` |   `300` 秒 | 终端命令等待用户批准的最长时间。       | `server/main.py` |
 
 ### 7）知识库检索参数
 
@@ -670,6 +670,8 @@ Loop 只决定「调什么」；Harness 负责「能不能调、在哪调、失�
 | `FILE_TREE_MAX_DEPTH`           |       `5` 层 | 自动扫描项目目录树时允许遍历的最大深度。        | `server/project_workspaces.py` |
 | `FILE_TREE_MAX_ENTRIES_PER_DIR` |        `400` | 单个目录最多收集的文件和子目录数量。            | `server/project_workspaces.py` |
 | `FILE_TREE_MAX_TOTAL_NODES`     |       `3000` | 一次目录树扫描允许收集的最大节点总数。          | `server/project_workspaces.py` |
+| `MAX_WORKSPACE_READ_LINES`      |       `2000` | 单次项目文件读取允许返回的最大完整行数。        | `data_analysis/tools/workspace_tools.py` |
+| `MAX_WORKSPACE_READ_BYTES`      |     `50 KB` | 单次项目文件读取允许返回的最大完整行字节数。    | `data_analysis/tools/workspace_tools.py` |
 
 ### 9）安全与体量限制参数
 
@@ -677,13 +679,15 @@ Loop 只决定「调什么」；Harness 负责「能不能调、在哪调、失�
 | -------------------------------- | --------------: | ------------------------------------------------------ | --------------------------------------------- |
 | `MAX_AGENT_ATTACHMENTS`        |          `10` | 单条 Agent 请求允许上传的最大附件数量。                | `server/main.py`                            |
 | `MAX_AGENT_ATTACHMENT_BYTES`   |      `100 MB` | 单个 Agent 附件允许的最大文件体积。                    | `server/main.py`                            |
+| `AGENT_RUNTIME_MAX_AGE_SECONDS`|      `24 小时` | 服务启动时可清理的遗留附件运行目录最小年龄。           | `server/main.py`                            |
 | `MAX_AGENT_PREVIEW_TEXT_BYTES` |       `20 MB` | 生成文本附件预览时允许读取的最大字节数。               | `server/main.py`                            |
 | `MAX_AGENT_PREVIEW_ROWS`       |      `200` 行 | 表格、文档预览允许读取的最大行数。                     | `server/main.py`                            |
 | `MAX_AGENT_PREVIEW_COLUMNS`    |       `40` 列 | 表格预览允许读取的最大列数。                           | `server/main.py`                            |
 | `MAX_AGENT_PREVIEW_SHEETS`     |        `8` 个 | 工作簿预览允许读取的最大工作表数量。                   | `server/main.py`                            |
-| `MAX_WORKSPACE_FILE_BYTES`     | `500000` 字节 | 工作区文件工具单次允许读取的最大文件体积。             | `data_analysis/tools/workspace_tools.py`    |
+| `MAX_WORKSPACE_FILE_BYTES`     | `500000` 字节 | 工作区搜索与项目文件编辑允许处理的单文件体积上限。     | `data_analysis/tools/workspace_tools.py`、`data_analysis/tools/project_edit_tools.py` |
 | `MAX_ATTACHMENT_READ_CHARS`    |  `80000` 字符 | 附件内容通过工具注入当前上下文时允许返回的最大字符数。 | `data_analysis/tools/attachment_tools.py`   |
-| `MAX_COMMAND_OUTPUT_CHARS`     |  `20000` 字符 | 项目命令返回给 Agent 的 stdout/stderr 最大字符数。     | `data_analysis/tools/project_edit_tools.py` |
+| `MAX_TERMINAL_OUTPUT_LINES`    |     `2000` 行 | 终端合并输出返回给 Agent 的最大尾部行数。              | `data_analysis/tools/terminal_tools.py`     |
+| `MAX_TERMINAL_OUTPUT_BYTES`    |      `50 KB` | 终端合并输出返回给 Agent 的最大尾部字节数。            | `data_analysis/tools/terminal_tools.py`     |
 | `MAX_ARCHIVE_FILES`            |         `500` | 单个压缩包允许解压的最大文件数量。                     | `KnowledgeBase/upload_file.py`              |
 | `MAX_ARCHIVE_BYTES`            |      `500 MB` | 单个压缩包解压后的文件总体积上限。                     | `KnowledgeBase/upload_file.py`              |
 | `MAX_SINGLE_FILE_BYTES`        |      `200 MB` | 压缩包内单个文件允许的最大体积。                       | `KnowledgeBase/upload_file.py`              |

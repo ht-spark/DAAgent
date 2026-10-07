@@ -86,8 +86,11 @@ def resolve_generated_artifact(output_dir: str | Path, relative_path: str) -> Pa
     raw_path = Path(relative_path)
     if raw_path.is_absolute() or not raw_path.parts or ".." in raw_path.parts:
         raise ToolArgumentsError("产物路径必须是无 '..' 的非空相对路径")
-    if raw_path.parts[0].casefold() in {"input", ".runs"}:
-        raise ToolArgumentsError("禁止读取输入附件目录")
+    if (
+        raw_path.parts[0].casefold() in {"input", ".runs"}
+        or any(part.casefold() == ".runtime" for part in raw_path.parts)
+    ):
+        raise ToolArgumentsError("禁止读取输入附件目录或运行时内部目录")
     target = (root / raw_path).resolve(strict=False)
     if target == root or root not in target.parents:
         raise ToolArgumentsError("产物路径超出当前会话产物目录")

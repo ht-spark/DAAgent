@@ -46,6 +46,19 @@ def test_inspect_artifact_rejects_path_traversal(tmp_path) -> None:
         )
 
 
+def test_inspect_artifact_rejects_runtime_internal_file(tmp_path) -> None:
+    output_dir = tmp_path / "output"
+    runtime = output_dir / ".runtime"
+    runtime.mkdir(parents=True)
+    (runtime / "cache.py").write_text("secret = True", encoding="utf-8")
+    registry = create_agent_tool_registry([], output_dir)
+
+    with pytest.raises(ToolArgumentsError, match="运行时内部目录"):
+        registry.resolve("inspect_artifact").invoke(
+            {"relative_path": "nested/.runtime/cache.py"}
+        )
+
+
 def test_inspect_generated_image_returns_visual_observation(tmp_path) -> None:
     """生成图片应能重新交给当前模型检查。"""
     output_dir = tmp_path / "output"

@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 
 import ApiManager from '../pages/ApiManager'
+import { persistGeneralSettings } from '../api'
 import { pushModalLayer } from '../modalLayer'
 import {
   FONT_SIZE_OPTIONS,
+  TERMINAL_TYPE_OPTIONS,
   applyUiSettings,
   loadUiSettings,
   saveUiSettings,
@@ -47,20 +49,31 @@ export default function SettingsModal({ open, onClose }: Props) {
     if (!q) return true
     return '字体大小 界面字号 font size 常规 通用'.toLowerCase().includes(q) || q.includes('字')
   }, [q])
+  const showTerminalType = useMemo(() => {
+    if (!q) return true
+    return '终端 shell powershell bash git bash 命令行 常规 通用'.includes(q)
+  }, [q])
   const showApiTab = useMemo(() => {
     if (!q) return true
     return 'api 模型 服务 密钥 key 检索 mineru tavily 配置'.includes(q) || q.includes('a')
   }, [q])
   const showGeneralTab = useMemo(() => {
     if (!q) return true
-    return showFontSize
-  }, [q, showFontSize])
+    return showFontSize || showTerminalType
+  }, [q, showFontSize, showTerminalType])
 
   function updateFontSize(size: number) {
     const next = { ...settings, fontSize: size }
     setSettings(next)
     saveUiSettings(next)
     applyUiSettings(next)
+  }
+
+  function updateTerminalType(terminalType: UiSettings['terminalType']) {
+    const next = { ...settings, terminalType }
+    setSettings(next)
+    saveUiSettings(next)
+    void persistGeneralSettings(terminalType)
   }
 
   function selectTab(next: SettingsTab) {
@@ -161,11 +174,31 @@ export default function SettingsModal({ open, onClose }: Props) {
                       </div>
                     </div>
                   )}
-                  {!showFontSize && (
+                  {showTerminalType && (
+                    <div className="settings-row">
+                      <div className="settings-row-copy">
+                        <div className="settings-row-label">默认终端类型</div>
+                        <p className="settings-row-desc">Agent 的终端命令固定使用此 Shell；修改后对新任务生效。</p>
+                      </div>
+                      <div className="settings-row-control">
+                        <select
+                          className="settings-select"
+                          value={settings.terminalType}
+                          onChange={(event) => updateTerminalType(event.target.value as UiSettings['terminalType'])}
+                          aria-label="默认终端类型"
+                        >
+                          {TERMINAL_TYPE_OPTIONS.map((option) => (
+                            <option key={option.value} value={option.value}>{option.label}</option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
+                  )}
+                  {!showFontSize && !showTerminalType && (
                     <div className="settings-row">
                       <div className="settings-row-copy">
                         <div className="settings-row-label">没有匹配的设置</div>
-                        <p className="settings-row-desc">试试搜索「字体」或「API」。</p>
+                        <p className="settings-row-desc">试试搜索「字体」「终端」或「API」。</p>
                       </div>
                     </div>
                   )}

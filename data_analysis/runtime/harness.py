@@ -8,6 +8,7 @@ from collections.abc import Callable
 from ..agent.loop import Action
 from ..agent.state import Observation
 from ..tools.registry import ToolNotFoundError, ToolRegistry
+from ..tools.terminal_tools import TERMINAL_TOOL_NAMES
 from .execution_context import ExecutionContext
 from ..cancellation import TaskCancelledError, raise_if_cancelled
 from .sandbox import SandboxError, SubprocessSandbox
@@ -22,7 +23,7 @@ class Harness:
         self,
         registry: ToolRegistry,
         sandbox: SubprocessSandbox | None = None,
-        command_approval: Callable[[Action], bool] | None = None,
+        terminal_approval: Callable[[Action], bool] | None = None,
         execution_context: ExecutionContext | None = None,
         cancel_check: Callable[[], bool] | None = None,
     ) -> None:
@@ -31,13 +32,13 @@ class Harness:
         Args:
             registry: 当前运行可用的工具注册表。
             sandbox: subprocess 沙箱；缺省时创建默认实例。
-            command_approval: 项目命令的一次性人工批准检查。
+            terminal_approval: 终端调用的一次性人工批准检查。
             execution_context: 当前 Run 可由工具自动继承的动态执行上下文。
             cancel_check: 用户请求终止时返回 True，将打断工具执行。
         """
         self._registry = registry
         self._sandbox = sandbox or SubprocessSandbox()
-        self._command_approval = command_approval
+        self._terminal_approval = terminal_approval
         self._execution_context = execution_context
         self._cancel_check = cancel_check
 
@@ -52,13 +53,13 @@ class Harness:
         """
         started_at = time.monotonic()
         raise_if_cancelled(self._cancel_check)
-        if action.tool_name == "run_project_command" and (
-            self._command_approval is None or not self._command_approval(action)
+        if action.tool_name in TERMINAL_TOOL_NAMES and (
+            self._terminal_approval is None or not self._terminal_approval(action)
         ):
             return Observation(
                 tool_name=action.tool_name,
                 success=False,
-                error="项目命令未获人工批准，未执行",
+                error="终端命令未获人工批准，未执行",
                 duration_ms=_elapsed_ms(started_at),
             )
         effective_action = (
@@ -98,10 +99,10 @@ class Harness:
                 error=str(exc),
                 duration_ms=_elapsed_ms(started_at),
             )
-        if action.tool_name == "run_project_command" and isinstance(result, dict):
+        if action.tool_name in TERMINAL_TOOL_NAMES and isinstance(result, dict):
             exit_code = result.get("exit_code")
             if isinstance(exit_code, int) and exit_code != 0:
-                details = str(result.get("stderr") or result.get("stdout") or "命令执行失败")
+                details = str(result.get("output") or "命令执行失败")
                 return Observation(
                     tool_name=action.tool_name,
                     success=False,
@@ -131,14 +132,8 @@ class Harness:
         if self._execution_context is None:
             return
         requested = action.arguments.get("python_environment")
-        if action.tool_name in {"execute_python", "run_project_command"} and isinstance(
-            requested,
-            str,
-        ):
+        if action.tool_name == "execute_python" and isinstance(requested, str):
             self._execution_context.select_python_environment(requested)
-            return
-        if action.tool_name == "run_project_command":
-            self._execution_context.refresh_project_environment()
 
 
 def _elapsed_ms(started_at: float) -> int:

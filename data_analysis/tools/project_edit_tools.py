@@ -1,23 +1,38 @@
-"""限定项目目录的文本创建、精确编辑与开发命令。"""
+"""限定项目目录的文本创建与精确编辑。"""
 from __future__ import annotations
 
+from contextlib import contextmanager
 import difflib
+import hashlib
+import json
 import os
-import re
-import shlex
 import shutil
-import subprocess
+import tempfile
+import time
+import unicodedata
+import uuid
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Any, BinaryIO, Iterator, TypedDict
 
-from ..python_environment import resolve_python_environment
-from .workspace_tools import WorkspacePathError, resolve_workspace_path
+from .workspace_tools import (
+    WorkspacePathError,
+    resolve_workspace_member_path,
+)
 
 MAX_TEXT_BYTES = 500_000
 MAX_COMMAND_OUTPUT_CHARS = 20_000
 MAX_FILE_EDITS = 100
-BLOCKED_PARTS = {".git", ".venv", "node_modules", "__pycache__", "outputs"}
-PACKAGE_SPEC = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+!<>=~,*\[\]-]*$")
+# 同一文件的写操作最长等待 30 秒；超时后把冲突明确返回给模型，避免拖死整轮运行。
+FILE_LOCK_TIMEOUT_SECONDS = 30.0
+BLOCKED_PARTS = {
+    ".git",
+    ".runtime",
+    ".venv",
+    "node_modules",
+    "__pycache__",
+    "outputs",
+}
 
 
 class FileEdit(TypedDict):
@@ -27,15 +42,148 @@ class FileEdit(TypedDict):
     new_text: str
 
 
+_FUZZY_CHARACTER_TRANSLATION = str.maketrans({
+    "\u2018": "'",
+    "\u2019": "'",
+    "\u201a": "'",
+    "\u201b": "'",
+    "\u201c": '"',
+    "\u201d": '"',
+    "\u201e": '"',
+    "\u201f": '"',
+    "\u2010": "-",
+    "\u2011": "-",
+    "\u2012": "-",
+    "\u2013": "-",
+    "\u2014": "-",
+    "\u2015": "-",
+    "\u2212": "-",
+    "\u00a0": " ",
+    "\u2002": " ",
+    "\u2003": " ",
+    "\u2004": " ",
+    "\u2005": " ",
+    "\u2006": " ",
+    "\u2007": " ",
+    "\u2008": " ",
+    "\u2009": " ",
+    "\u200a": " ",
+    "\u202f": " ",
+    "\u205f": " ",
+    "\u3000": " ",
+})
+
+
+def normalize_for_fuzzy_match(text: str) -> str:
+    """规范尾随空白、智能标点、破折号与特殊空格。"""
+    normalized = unicodedata.normalize("NFKC", text)
+    normalized = "\n".join(line.rstrip() for line in normalized.split("\n"))
+    return normalized.translate(_FUZZY_CHARACTER_TRANSLATION)
+
+
+def _line_spans(content: str) -> list[tuple[int, int]]:
+    """返回保留换行符的逐行字符区间。"""
+    spans: list[tuple[int, int]] = []
+    offset = 0
+    for line in content.splitlines(keepends=True):
+        spans.append((offset, offset + len(line)))
+        offset += len(line)
+    if content and not spans:
+        spans.append((0, len(content)))
+    return spans
+
+
+def _replacement_line_range(
+    spans: list[tuple[int, int]],
+    start: int,
+    end: int,
+) -> tuple[int, int]:
+    """把字符替换区间扩展为它实际触及的行区间。"""
+    start_line = next(
+        (index for index, (line_start, line_end) in enumerate(spans)
+         if line_start <= start < line_end),
+        -1,
+    )
+    if start_line < 0:
+        raise ValueError("修改范围超出原文件内容")
+    end_line = start_line
+    while end_line < len(spans) and spans[end_line][1] < end:
+        end_line += 1
+    if end_line >= len(spans):
+        raise ValueError("修改范围超出原文件内容")
+    return start_line, end_line + 1
+
+
+def _apply_replacements(
+    content: str,
+    replacements: list[tuple[int, int, str, int]],
+    *,
+    offset: int = 0,
+) -> str:
+    """按逆序应用已排序的替换，保持所有原始偏移稳定。"""
+    result = content
+    for start, end, new_text, _index in reversed(replacements):
+        relative_start = start - offset
+        relative_end = end - offset
+        result = f"{result[:relative_start]}{new_text}{result[relative_end:]}"
+    return result
+
+
+def _apply_fuzzy_replacements_preserving_lines(
+    original: str,
+    normalized: str,
+    replacements: list[tuple[int, int, str, int]],
+) -> str:
+    """只重写模糊匹配实际触及的行，其余行保留原始字节对应文本。"""
+    original_lines = original.splitlines(keepends=True)
+    normalized_spans = _line_spans(normalized)
+    if len(original_lines) != len(normalized_spans):
+        raise ValueError("规范化文本行数变化，无法安全保留未修改内容")
+
+    groups: list[tuple[int, int, list[tuple[int, int, str, int]]]] = []
+    for replacement in replacements:
+        start_line, end_line = _replacement_line_range(
+            normalized_spans,
+            replacement[0],
+            replacement[1],
+        )
+        if groups and start_line < groups[-1][1]:
+            previous_start, previous_end, previous_replacements = groups[-1]
+            groups[-1] = (
+                previous_start,
+                max(previous_end, end_line),
+                [*previous_replacements, replacement],
+            )
+        else:
+            groups.append((start_line, end_line, [replacement]))
+
+    original_line = 0
+    result: list[str] = []
+    for start_line, end_line, group_replacements in groups:
+        result.extend(original_lines[original_line:start_line])
+        group_start = normalized_spans[start_line][0]
+        group_end = normalized_spans[end_line - 1][1]
+        result.append(_apply_replacements(
+            normalized[group_start:group_end],
+            group_replacements,
+            offset=group_start,
+        ))
+        original_line = end_line
+    result.extend(original_lines[original_line:])
+    return "".join(result)
+
+
 def prepare_exact_text_edits(
     raw_content: bytes,
     edits: list[FileEdit],
+    path: str = "<file>",
 ) -> tuple[bytes, str, str]:
-    """校验并计算一组 Pi 风格的精确文本替换，不执行文件写入。
+    """校验并计算一组 Pi 风格的精确或轻量模糊文本替换。
 
     Args:
         raw_content: 原始 UTF-8 文件字节。
         edits: 基于原始文件内容的一组精确替换。
+        path: 用于错误信息的文件路径。
 
     Returns:
         写回字节、规范化后的原文和规范化后的修改文本。
@@ -44,20 +192,51 @@ def prepare_exact_text_edits(
         raise ValueError(f"edits 必须包含 1 到 {MAX_FILE_EDITS} 项修改")
     has_bom = raw_content.startswith(b"\xef\xbb\xbf")
     original_text = raw_content.decode("utf-8-sig")
-    newline = "\r\n" if "\r\n" in original_text else "\n"
-    original = original_text.replace("\r\n", "\n")
-    replacements: list[tuple[int, int, str, int]] = []
-    for index, edit in enumerate(edits, start=1):
-        old_text = edit["old_text"].replace("\r\n", "\n")
-        new_text = edit["new_text"].replace("\r\n", "\n")
-        if not old_text:
+    crlf_index = original_text.find("\r\n")
+    lf_index = original_text.find("\n")
+    newline = (
+        "\r\n"
+        if crlf_index >= 0 and (lf_index < 0 or crlf_index < lf_index)
+        else "\n"
+    )
+    original = original_text.replace("\r\n", "\n").replace("\r", "\n")
+    normalized_edits = [
+        {
+            "old_text": edit["old_text"].replace("\r\n", "\n").replace("\r", "\n"),
+            "new_text": edit["new_text"].replace("\r\n", "\n").replace("\r", "\n"),
+        }
+        for edit in edits
+    ]
+    for index, edit in enumerate(normalized_edits, start=1):
+        if not edit["old_text"]:
             raise ValueError(f"第 {index} 项 edit 的 old_text 不能为空")
-        matches = original.count(old_text)
-        if matches != 1:
+
+    fuzzy_content = normalize_for_fuzzy_match(original)
+    uses_fuzzy_match = any(
+        edit["old_text"] not in original
+        and normalize_for_fuzzy_match(edit["old_text"]) in fuzzy_content
+        for edit in normalized_edits
+    )
+    replacement_base = fuzzy_content if uses_fuzzy_match else original
+    replacements: list[tuple[int, int, str, int]] = []
+    for index, edit in enumerate(normalized_edits, start=1):
+        old_text = (
+            normalize_for_fuzzy_match(edit["old_text"])
+            if uses_fuzzy_match
+            else edit["old_text"]
+        )
+        new_text = edit["new_text"]
+        start = replacement_base.find(old_text)
+        if start < 0:
             raise ValueError(
-                f"第 {index} 项 edit 的 old_text 匹配 {matches} 次，需要唯一匹配"
+                f"第 {index} 项 edit 无法在 {path} 中找到 old_text；"
+                "必须匹配原文件中的空白和换行"
             )
-        start = original.index(old_text)
+        occurrences = replacement_base.count(old_text)
+        if occurrences > 1:
+            raise ValueError(
+                f"第 {index} 项 edit 的 old_text 匹配 {occurrences} 次，需要唯一匹配"
+            )
         replacements.append((start, start + len(old_text), new_text, index))
 
     replacements.sort(key=lambda item: item[0])
@@ -67,9 +246,17 @@ def prepare_exact_text_edits(
                 f"第 {previous[3]} 项和第 {current[3]} 项 edit 的修改范围重叠"
             )
 
-    updated = original
-    for start, end, new_text, _index in reversed(replacements):
-        updated = f"{updated[:start]}{new_text}{updated[end:]}"
+    updated = (
+        _apply_fuzzy_replacements_preserving_lines(
+            original,
+            replacement_base,
+            replacements,
+        )
+        if uses_fuzzy_match
+        else _apply_replacements(replacement_base, replacements)
+    )
+    if updated == original:
+        raise ValueError(f"未修改 {path}：替换后的内容与原内容完全相同")
     restored = updated.replace("\n", newline)
     encoded = restored.encode("utf-8")
     if has_bom:
@@ -77,16 +264,85 @@ def prepare_exact_text_edits(
     return encoded, original, updated
 
 
+def generate_edit_diff(
+    old_content: str,
+    new_content: str,
+    *,
+    context_lines: int = 4,
+) -> tuple[str, int | None]:
+    """生成带行号的紧凑展示 diff，并返回修改后文件的首个变更行。"""
+    old_lines = old_content.splitlines()
+    new_lines = new_content.splitlines()
+    matcher = difflib.SequenceMatcher(None, old_lines, new_lines)
+    groups = list(matcher.get_grouped_opcodes(context_lines))
+    width = len(str(max(len(old_lines), len(new_lines), 1)))
+    output: list[str] = []
+    first_changed_line: int | None = None
+    for group_index, group in enumerate(groups):
+        if group_index:
+            output.append(f" {'':>{width}} ...")
+        for tag, old_start, old_end, new_start, new_end in group:
+            if tag == "equal":
+                for offset, line in enumerate(old_lines[old_start:old_end]):
+                    output.append(f" {old_start + offset + 1:>{width}} {line}")
+                continue
+            if first_changed_line is None:
+                first_changed_line = new_start + 1
+            if tag in {"delete", "replace"}:
+                for offset, line in enumerate(old_lines[old_start:old_end]):
+                    output.append(f"-{old_start + offset + 1:>{width}} {line}")
+            if tag in {"insert", "replace"}:
+                for offset, line in enumerate(new_lines[new_start:new_end]):
+                    output.append(f"+{new_start + offset + 1:>{width}} {line}")
+    return "\n".join(output), first_changed_line
+
+
+def generate_unified_patch(path: str, old_content: str, new_content: str) -> str:
+    """生成标准 unified patch，默认保留四行上下文。"""
+    return "".join(difflib.unified_diff(
+        old_content.splitlines(keepends=True),
+        new_content.splitlines(keepends=True),
+        fromfile=path,
+        tofile=path,
+        n=4,
+    ))
+
+
+def coerce_file_edits(value: Any) -> list[FileEdit]:
+    """兼容模型把 edits 输出成 JSON 字符串、单个对象或 camelCase 字段。"""
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise ValueError("edits JSON 字符串无效") from exc
+    if isinstance(value, Mapping):
+        value = [value]
+    if not isinstance(value, list) or not value or len(value) > MAX_FILE_EDITS:
+        raise ValueError("edits 参数无效")
+
+    edits: list[FileEdit] = []
+    for item in value:
+        if not isinstance(item, Mapping):
+            raise ValueError("edits 参数无效")
+        keys = set(item)
+        if keys == {"old_text", "new_text"}:
+            old_text = item["old_text"]
+            new_text = item["new_text"]
+        elif keys == {"oldText", "newText"}:
+            old_text = item["oldText"]
+            new_text = item["newText"]
+        else:
+            raise ValueError("edits 参数无效")
+        if not isinstance(old_text, str) or not isinstance(new_text, str):
+            raise ValueError("edits 参数无效")
+        edits.append({"old_text": old_text, "new_text": new_text})
+    return edits
+
+
 def _editable_path(workspace_root: str | Path, relative_path: str) -> Path:
     """解析项目内可编辑的普通文本文件路径。"""
     root = Path(workspace_root).resolve(strict=True)
-    requested = Path(relative_path)
-    if requested.is_absolute():
-        target = requested.resolve(strict=False)
-        if target == root or root not in target.parents:
-            raise WorkspacePathError("项目文件路径超出当前项目目录")
-    else:
-        target = resolve_workspace_path(root, relative_path)
+    target = resolve_workspace_member_path(root, relative_path)
     parts = target.relative_to(root).parts
     if not parts or any(part.casefold() in BLOCKED_PARTS for part in parts):
         raise WorkspacePathError("不允许修改该项目路径")
@@ -97,258 +353,187 @@ def _editable_path(workspace_root: str | Path, relative_path: str) -> Path:
     return target
 
 
-def create_workspace_file(workspace_root: str | Path, relative_path: str, content: str) -> dict[str, Any]:
-    """仅创建不存在的 UTF-8 项目文件，不覆盖现有内容。"""
+def _try_lock_file(stream: BinaryIO) -> None:
+    """以非阻塞方式锁住锁文件的第一个字节。"""
+    stream.seek(0)
+    if os.name == "nt":
+        import msvcrt
+
+        msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+        return
+    import fcntl
+
+    fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def _unlock_file(stream: BinaryIO) -> None:
+    """释放当前进程持有的文件锁。"""
+    stream.seek(0)
+    if os.name == "nt":
+        import msvcrt
+
+        msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+        return
+    import fcntl
+
+    fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+
+
+@contextmanager
+def _exclusive_target_lock(target: Path) -> Iterator[None]:
+    """按目标绝对路径建立跨进程互斥锁，串行化同一文件的读改写。"""
+    normalized = os.path.normcase(str(target.resolve(strict=False)))
+    lock_name = hashlib.sha256(normalized.encode("utf-8")).hexdigest() + ".lock"
+    lock_root = Path(tempfile.gettempdir()) / "daagent-file-locks"
+    lock_root.mkdir(parents=True, exist_ok=True)
+    lock_path = lock_root / lock_name
+    deadline = time.monotonic() + FILE_LOCK_TIMEOUT_SECONDS
+    with lock_path.open("a+b") as stream:
+        if stream.tell() == 0:
+            stream.write(b"\0")
+            stream.flush()
+        while True:
+            try:
+                _try_lock_file(stream)
+                break
+            except OSError as exc:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(f"等待文件编辑锁超时: {target}") from exc
+                time.sleep(0.05)
+        try:
+            yield
+        finally:
+            _unlock_file(stream)
+
+
+def _atomic_replace_bytes(target: Path, content: bytes, *, preserve_mode: bool) -> None:
+    """先完整落盘临时文件，再用同目录原子替换提交内容。"""
+    temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with temporary.open("xb") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if preserve_mode:
+            shutil.copymode(target, temporary)
+        os.replace(temporary, target)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def write_workspace_file(
+    workspace_root: str | Path,
+    relative_path: str,
+    content: str,
+) -> dict[str, Any]:
+    """创建或完整覆盖一个 UTF-8 项目文件，并自动创建父目录。"""
     target = _editable_path(workspace_root, relative_path)
     encoded = content.encode("utf-8")
     if len(encoded) > MAX_TEXT_BYTES:
         raise ValueError("文件内容超过大小限制")
-    target.parent.mkdir(parents=True, exist_ok=True)
-    with target.open("xb") as stream:
-        stream.write(encoded)
-    return {"path": relative_path, "created": True, "size_bytes": len(encoded)}
+    with _exclusive_target_lock(target):
+        if target.exists() and not target.is_file():
+            raise ValueError("目标路径不是普通文件")
+        if target.is_symlink():
+            raise WorkspacePathError("不允许修改符号链接文件")
+        existed = target.exists()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_replace_bytes(target, encoded, preserve_mode=existed)
+    return {
+        "path": relative_path,
+        "created": not existed,
+        "overwritten": existed,
+        "size_bytes": len(encoded),
+    }
 
 
 def edit_workspace_file(
     workspace_root: str | Path,
     relative_path: str,
     edits: list[FileEdit],
+    *,
+    expected_content: bytes | None = None,
 ) -> dict[str, Any]:
     """一次性校验并应用一组不重叠的精确文本替换，返回实际 diff。"""
     target = _editable_path(workspace_root, relative_path)
-    if not target.is_file() or target.stat().st_size > MAX_TEXT_BYTES:
-        raise ValueError("目标文件不存在或超过大小限制")
-
-    encoded, original, updated = prepare_exact_text_edits(target.read_bytes(), edits)
-    if len(encoded) > MAX_TEXT_BYTES:
-        raise ValueError("修改后的文件超过大小限制")
-    diff = "".join(difflib.unified_diff(
-        original.splitlines(keepends=True), updated.splitlines(keepends=True),
-        fromfile=f"a/{relative_path}", tofile=f"b/{relative_path}",
-    ))
-    temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
-    try:
-        with temporary.open("xb") as stream:
-            stream.write(encoded)
-        shutil.copymode(target, temporary)
-        try:
-            os.replace(temporary, target)
-        except PermissionError:
-            # Windows 可能允许写入已打开文件，却拒绝用重命名替换该文件。
-            # 临时文件已完整写入后再回退，避免把项目修改转移到产物目录。
-            with target.open("wb") as stream:
-                stream.write(encoded)
-    finally:
-        temporary.unlink(missing_ok=True)
+    with _exclusive_target_lock(target):
+        if (
+            not target.is_file()
+            or target.is_symlink()
+            or target.stat().st_size > MAX_TEXT_BYTES
+        ):
+            raise ValueError("目标文件不存在、不是普通文件或超过大小限制")
+        raw_content = target.read_bytes()
+        if expected_content is not None and raw_content != expected_content:
+            raise ValueError(
+                "项目目标文件与本轮上传附件内容不一致，已拒绝原位修改以避免改错文件"
+            )
+        encoded, original, updated = prepare_exact_text_edits(
+            raw_content,
+            edits,
+            relative_path,
+        )
+        if len(encoded) > MAX_TEXT_BYTES:
+            raise ValueError("修改后的文件超过大小限制")
+        diff, first_changed_line = generate_edit_diff(original, updated)
+        patch = generate_unified_patch(relative_path, original, updated)
+        _atomic_replace_bytes(target, encoded, preserve_mode=True)
     return {
         "path": relative_path,
         "edit_count": len(edits),
         "diff": diff[:MAX_COMMAND_OUTPUT_CHARS],
+        "patch": patch[:MAX_COMMAND_OUTPUT_CHARS],
+        "first_changed_line": first_changed_line,
     }
 
 
-def run_project_command(
-    workspace_root: str | Path, command: str, python_executable: str | Path
+def run_write_workspace_file(
+    arguments: dict[str, Any],
+    context: dict[str, Any],
 ) -> dict[str, Any]:
-    """在项目目录执行受控开发或环境命令。"""
-    root = Path(workspace_root).resolve(strict=True)
-    executable = str(Path(python_executable).resolve(strict=True))
-    allowed = {
-        "git status": ["git", "status", "--short"],
-        "git diff": ["git", "diff", "--"],
-        "python -m pytest": [executable, "-m", "pytest"],
-        "npm run test": ["npm", "run", "test"],
-        "npm run build": ["npm", "run", "build"],
-    }
-    if command in allowed:
-        argv = allowed[command]
-    else:
-        argv = _environment_command(root, command, executable)
-    if command.startswith("git "):
-        repository = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"], cwd=root,
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
-            timeout=10, shell=False, check=False,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
-        if repository.returncode != 0 or Path(repository.stdout.strip()).resolve() != root:
-            raise ValueError("Git 仓库根目录必须与当前项目目录一致")
-    if command.startswith("npm "):
-        npm = shutil.which("npm.cmd" if os.name == "nt" else "npm")
-        if npm is None:
-            raise FileNotFoundError("当前环境找不到 npm")
-        argv[0] = npm
-    try:
-        environment_names = (
-            "PATH", "SYSTEMROOT", "COMSPEC", "PATHEXT", "WINDIR",
-            "TEMP", "TMP", "USERPROFILE", "APPDATA", "LOCALAPPDATA",
-            "HOMEDRIVE", "HOMEPATH",
-        )
-        completed = subprocess.run(
-            argv, cwd=root, capture_output=True, text=True,
-            encoding="utf-8", errors="replace", timeout=1800, shell=False,
-            env={name: os.environ[name] for name in environment_names if name in os.environ},
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), check=False,
-        )
-    except subprocess.TimeoutExpired:
-        return {"command": command, "exit_code": -1, "stdout": "", "stderr": "命令运行超时"}
-    return {
-        "command": command, "exit_code": completed.returncode,
-        "stdout": completed.stdout[:MAX_COMMAND_OUTPUT_CHARS],
-        "stderr": completed.stderr[:MAX_COMMAND_OUTPUT_CHARS],
-    }
-
-
-def _environment_command(root: Path, command: str, executable: str) -> list[str]:
-    """解析有限的环境创建和依赖安装命令，不交给 shell 解释。"""
-    if len(command) > 1000 or any(char in command for char in "\r\n\x00"):
-        raise ValueError("项目命令过长或包含非法字符")
-    try:
-        parts = shlex.split(command)
-    except ValueError as exc:
-        raise ValueError("项目命令引号不完整") from exc
-    if parts[:3] == ["python", "-m", "venv"] and len(parts) == 4:
-        return [executable, "-m", "venv", str(_project_environment_path(root, parts[3]))]
-    if parts[:2] == ["uv", "venv"] and len(parts) in {2, 3}:
-        uv = shutil.which("uv")
-        if uv is None:
-            raise FileNotFoundError("当前环境找不到 uv")
-        return [uv, "venv", str(_project_environment_path(root, parts[2] if len(parts) == 3 else ".venv"))]
-    if parts == ["uv", "sync"]:
-        if not (root / "pyproject.toml").is_file():
-            raise ValueError("uv sync 需要项目中的 pyproject.toml")
-        uv = shutil.which("uv")
-        if uv is None:
-            raise FileNotFoundError("当前环境找不到 uv")
-        return [uv, "sync"]
-    if parts[:3] == ["conda", "create", "-p"] and 4 <= len(parts) <= 5:
-        conda = shutil.which("conda")
-        if conda is None:
-            raise FileNotFoundError("当前环境找不到 conda")
-        version = parts[4:] or ["python=3.11"]
-        if not all(re.fullmatch(r"python=3\.\d{1,2}", item) for item in version):
-            raise ValueError("conda create 仅支持指定 Python 版本")
-        return [conda, "create", "-p", str(_project_environment_path(root, parts[3])), *version, "-y"]
-    if parts[:3] == ["python", "-m", "pip"]:
-        parts = ["pip", *parts[3:]]
-    if parts[:2] in (["pip", "install"], ["uv", "pip"]):
-        if parts[:2] == ["uv", "pip"]:
-            if len(parts) < 4 or parts[2] != "install":
-                raise ValueError("只支持 uv pip install")
-            packages = parts[3:]
-            uv = shutil.which("uv")
-            if uv is None:
-                raise FileNotFoundError("当前环境找不到 uv")
-            prefix = [uv, "pip", "install", "--python", executable]
-        else:
-            packages = parts[2:]
-            prefix = [executable, "-m", "pip", "install"]
-        return [*prefix, *_install_arguments(root, packages)]
-    if parts[:2] == ["conda", "install"]:
-        conda = shutil.which("conda")
-        if conda is None:
-            raise FileNotFoundError("当前环境找不到 conda")
-        environment = Path(executable).parent.parent
-        if not (environment / "conda-meta").is_dir():
-            raise ValueError("当前 Python 不是 Conda 环境，请指定项目内 Conda 环境")
-        packages = _install_arguments(root, parts[2:])
-        if "-r" in packages:
-            raise ValueError("conda install 不支持 -r，请直接提供包名")
-        return [conda, "install", "-p", str(environment), *packages, "-y"]
-    raise ValueError("只允许受控 Git、测试、构建、venv/uv/conda 创建环境及 pip/uv/conda 安装依赖")
-
-
-def _project_environment_path(root: Path, path: str) -> Path:
-    """限制新环境位于项目目录中且不覆盖已有路径。"""
-    target = resolve_workspace_path(root, path)
-    if target == root or target.exists():
-        raise ValueError("环境目录必须是项目内尚不存在的路径")
-    return target
-
-
-def _install_arguments(root: Path, parts: list[str]) -> list[str]:
-    """只允许包规格、升级开关和项目内需求文件。"""
-    if not parts:
-        raise ValueError("安装命令需要包名或 -r 需求文件")
-    result: list[str] = []
-    index = 0
-    while index < len(parts):
-        item = parts[index]
-        if item == "--upgrade":
-            result.append(item)
-        elif item == "-r" and index + 1 < len(parts):
-            target = resolve_workspace_path(root, parts[index + 1])
-            if not target.is_file():
-                raise ValueError("项目内需求文件不存在")
-            result.extend(["-r", str(target)])
-            index += 1
-        elif PACKAGE_SPEC.fullmatch(item):
-            result.append(item)
-        else:
-            raise ValueError(f"不支持的安装参数: {item}")
-        index += 1
-    return result
-
-def run_create_workspace_file(arguments: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
-    """校验工具参数后创建项目文件。"""
+    """校验工具参数后创建或完整覆盖项目文件。"""
     if set(arguments) != {"relative_path", "content"} or not all(
         isinstance(arguments[key], str) for key in arguments
     ):
-        raise ValueError("create_workspace_file 参数无效")
-    return create_workspace_file(context["workspace_root"], arguments["relative_path"], arguments["content"])
+        raise ValueError("write_workspace_file 参数无效")
+    return write_workspace_file(
+        context["workspace_root"],
+        arguments["relative_path"],
+        arguments["content"],
+    )
 
 
 def run_edit_workspace_file(arguments: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
     """校验工具参数后精确修改项目文件。"""
-    if set(arguments) != {"relative_path", "edits"} or not isinstance(
-        arguments.get("relative_path"), str
-    ):
+    allowed = {"relative_path", "edits", "old_text", "new_text", "oldText", "newText"}
+    if set(arguments) - allowed or not isinstance(arguments.get("relative_path"), str):
         raise ValueError("edit_workspace_file 参数无效")
-    edits = arguments.get("edits")
-    if not isinstance(edits, list) or not edits or len(edits) > MAX_FILE_EDITS:
-        raise ValueError("edit_workspace_file 参数无效")
-    if not all(
-        isinstance(edit, dict)
-        and set(edit) == {"old_text", "new_text"}
-        and isinstance(edit["old_text"], str)
-        and isinstance(edit["new_text"], str)
-        for edit in edits
-    ):
+    raw_edits: Any = arguments.get("edits")
+    legacy: dict[str, Any] | None = None
+    if "old_text" in arguments or "new_text" in arguments:
+        legacy = {
+            "old_text": arguments.get("old_text"),
+            "new_text": arguments.get("new_text"),
+        }
+    elif "oldText" in arguments or "newText" in arguments:
+        legacy = {
+            "oldText": arguments.get("oldText"),
+            "newText": arguments.get("newText"),
+        }
+    if raw_edits is None:
+        raw_edits = legacy
+    elif legacy is not None:
+        parsed = coerce_file_edits(raw_edits)
+        parsed.extend(coerce_file_edits(legacy))
+        raw_edits = parsed
+    try:
+        edits = coerce_file_edits(raw_edits)
+    except ValueError as exc:
+        raise ValueError("edit_workspace_file 参数无效") from exc
+    if len(edits) > MAX_FILE_EDITS:
         raise ValueError("edit_workspace_file 参数无效")
     return edit_workspace_file(
         context["workspace_root"],
         arguments["relative_path"],
         edits,
-    )
-
-
-def run_project_command_tool(arguments: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
-    """校验工具参数后执行受控项目命令。"""
-    if set(arguments) - {"command", "python_environment"} or not isinstance(arguments.get("command"), str):
-        raise ValueError("run_project_command 参数无效")
-    executable = context["python_executable"]
-    requested_environment = arguments.get("python_environment")
-    command = arguments["command"]
-    if context.get("python_environment_source") == "host" and requested_environment is None:
-        bootstrap = (
-            command in {"git status", "git diff", "npm run test", "npm run build", "uv sync", "uv venv"}
-            or command.startswith(("python -m venv ", "uv venv ", "conda create -p "))
-        )
-        if not bootstrap:
-            raise ValueError(
-                "当前项目未发现 Python 环境；不能使用 Agent 宿主环境运行该命令。"
-                "请先创建项目环境，或指定项目内的 python_environment。"
-            )
-    if requested_environment is not None:
-        if not isinstance(requested_environment, str) or not requested_environment.strip():
-            raise ValueError("python_environment 必须是项目内环境路径")
-        root = Path(context["workspace_root"]).resolve(strict=True)
-        requested = Path(requested_environment)
-        candidate = requested if requested.is_absolute() else root / requested
-        candidate = candidate.resolve(strict=True)
-        if candidate != root and root not in candidate.parents:
-            raise WorkspacePathError("命令目标环境必须位于当前项目内")
-        executable = str(resolve_python_environment(root, candidate).executable)
-    return run_project_command(
-        context["workspace_root"], arguments["command"], executable
     )

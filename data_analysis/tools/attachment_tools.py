@@ -2,21 +2,18 @@
 
 from __future__ import annotations
 
-import difflib
-import os
-import uuid
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
-from .artifact_tools import ArtifactWorkspace
 from .project_edit_tools import (
-    FileEdit,
     MAX_COMMAND_OUTPUT_CHARS,
     MAX_FILE_EDITS,
     MAX_TEXT_BYTES,
-    prepare_exact_text_edits,
+    coerce_file_edits,
+    edit_workspace_file,
 )
+from .workspace_tools import resolve_workspace_member_path
 
 TEXT_ATTACHMENT_SUFFIXES = frozenset(
     {".csv", ".json", ".jsonl", ".markdown", ".md", ".ndjson", ".py", ".txt"}
@@ -93,65 +90,59 @@ def edit_attachment_file(
     arguments: Mapping[str, Any],
     context: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """精确编辑上传文本附件，并以原文件名写出一个更新后的会话产物。
+    """把上传附件映射到项目原文件后执行 Pi 风格的原位编辑。
 
     Args:
-        arguments: 附件授权路径与一组 Pi 风格精确替换。
-        context: 本轮授权附件路径和会话产物目录。
+        arguments: 附件授权路径、可选项目目标路径与一组精确替换。
+        context: 本轮授权附件路径和已绑定项目目录。
 
     Returns:
-        更新副本的产物信息和实际 diff。
+        被原位修改的项目文件信息和实际 diff。
     """
-    if set(arguments) != {"file_path", "edits"}:
-        raise ValueError("edit_attachment_file 参数无效")
-    edits = arguments.get("edits")
-    if not isinstance(edits, list) or not edits or len(edits) > MAX_FILE_EDITS:
-        raise ValueError("edit_attachment_file 参数无效")
-    if not all(
-        isinstance(edit, dict)
-        and set(edit) == {"old_text", "new_text"}
-        and isinstance(edit["old_text"], str)
-        and isinstance(edit["new_text"], str)
-        for edit in edits
+    if (
+        set(arguments) - {"file_path", "target_path", "edits"}
+        or "file_path" not in arguments
+        or "edits" not in arguments
     ):
+        raise ValueError("edit_attachment_file 参数无效")
+    try:
+        edits = coerce_file_edits(arguments.get("edits"))
+    except ValueError as exc:
+        raise ValueError("edit_attachment_file 参数无效") from exc
+    if len(edits) > MAX_FILE_EDITS:
         raise ValueError("edit_attachment_file 参数无效")
     source = _authorized_attachment_path(arguments.get("file_path"), context)
     if source.stat().st_size > MAX_TEXT_BYTES:
         raise ValueError("目标附件超过可编辑大小限制")
-    encoded, original, updated = prepare_exact_text_edits(
-        source.read_bytes(),
-        cast(list[FileEdit], edits),
+    workspace_value = context.get("workspace_root")
+    if not isinstance(workspace_value, str) or not workspace_value.strip():
+        raise ValueError(
+            "浏览器上传不包含原文件路径；请先绑定原文件所在项目，无法原位修改时不会生成副本"
+        )
+    workspace_root = Path(workspace_value).expanduser().resolve(strict=True)
+    requested_target = arguments.get("target_path", source.name)
+    if not isinstance(requested_target, str) or not requested_target.strip():
+        raise ValueError("target_path 必须是当前项目中的有效文件路径")
+    target = resolve_workspace_member_path(workspace_root, requested_target)
+    if not target.is_file():
+        raise ValueError(
+            f"当前项目中未找到附件原文件: {requested_target}；不会在 outputs 中生成副本"
+        )
+    relative_path = target.relative_to(workspace_root).as_posix()
+    result = edit_workspace_file(
+        workspace_root,
+        relative_path,
+        edits,
+        expected_content=source.read_bytes(),
     )
-    if len(encoded) > MAX_TEXT_BYTES:
-        raise ValueError("修改后的附件超过大小限制")
-
-    output_dir = context.get("output_dir")
-    if not isinstance(output_dir, str) or not output_dir.strip():
-        raise ValueError("edit_attachment_file 缺少有效的产物目录上下文")
-    workspace = ArtifactWorkspace(output_dir)
-    target = workspace.path(source.name, overwrite=True)
-    existed = target.exists()
-    temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
-    try:
-        with temporary.open("xb") as stream:
-            stream.write(encoded)
-        os.replace(temporary, target)
-    finally:
-        temporary.unlink(missing_ok=True)
-
-    diff = "".join(difflib.unified_diff(
-        original.splitlines(keepends=True),
-        updated.splitlines(keepends=True),
-        fromfile=f"a/{source.name}",
-        tofile=f"b/{source.name}",
-    ))
-    return {
-        "path": source.name,
-        "name": source.name,
-        "format": source.suffix.lower().removeprefix("."),
+    result.update({
+        "absolute_path": str(target),
+        "name": target.name,
+        "format": target.suffix.lower().removeprefix("."),
         "size_bytes": target.stat().st_size,
-        "overwritten": existed,
-        "edit_count": len(edits),
-        "diff": diff[:MAX_COMMAND_OUTPUT_CHARS],
-        "description": f"已按原文件名更新上传附件，共应用 {len(edits)} 项精确修改",
-    }
+        "in_place": True,
+        "diff": str(result.get("diff", ""))[:MAX_COMMAND_OUTPUT_CHARS],
+        "patch": str(result.get("patch", ""))[:MAX_COMMAND_OUTPUT_CHARS],
+        "description": f"已原位修改项目文件 {relative_path}，共应用 {len(edits)} 项精确修改",
+    })
+    return result

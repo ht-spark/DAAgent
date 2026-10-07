@@ -30,9 +30,15 @@ from .markitdown import (
 from .code_tools import execute_python_code
 from .project_edit_tools import (
     MAX_FILE_EDITS,
-    run_create_workspace_file,
     run_edit_workspace_file,
-    run_project_command_tool,
+    run_write_workspace_file,
+)
+from .terminal_tools import (
+    DEFAULT_TERMINAL_SHELL,
+    MAX_TERMINAL_COMMAND_CHARS,
+    MAX_TERMINAL_TIMEOUT_SECONDS,
+    TERMINAL_SHELLS,
+    run_terminal_command_tool,
 )
 from .data_tools import (
     MAX_INSPECT_DATA_ROWS,
@@ -49,6 +55,7 @@ from .modeling_tool import (
 from .knowledge_tools import MAX_KNOWLEDGE_QUERY_CHARS, search_knowledge_base
 from .web_search import MAX_WEB_SEARCH_QUERY_CHARS, search_web
 from .workspace_tools import (
+    MAX_WORKSPACE_READ_LINES,
     list_workspace_directory,
     list_workspace_files,
     read_workspace_file,
@@ -320,6 +327,7 @@ def create_agent_tool_registry(
     python_executable: str | Path | None = None,
     python_environment_source: str = "host",
     python_environment_name: str = "MMAgent",
+    terminal_shell: str = DEFAULT_TERMINAL_SHELL,
 ) -> ToolRegistry:
     """创建同时支持确定性工具和动态 Python 的 Agent 注册表。
 
@@ -333,11 +341,14 @@ def create_agent_tool_registry(
         python_executable: 运行 Agent 分析代码的已验证 Python 解释器。
         python_environment_source: Python 环境来源。
         python_environment_name: Python 环境显示名称。
+        terminal_shell: 常规设置中选择的终端类型。
 
     Returns:
         根据附件情况注册数据工具，并始终注册 Python 代码执行能力。
     """
     bound_paths = tuple(authorized_paths)
+    if terminal_shell not in TERMINAL_SHELLS:
+        raise ValueError("terminal_shell 只支持 powershell、bash 或 git-bash")
     profile_paths = tuple(path for path in bound_paths if supports_data_profile(path))
     registry = (
         create_data_profile_registry(profile_paths)
@@ -401,6 +412,7 @@ def create_agent_tool_registry(
         attachment_context = {
             "authorized_paths": [str(path) for path in text_attachment_paths],
             "output_dir": str(output_dir),
+            "workspace_root": str(workspace_root) if workspace_root is not None else "",
         }
         registry.register(
             ToolSpec(
@@ -424,46 +436,52 @@ def create_agent_tool_registry(
             read_attachment_file,
             context=attachment_context,
         )
-        registry.register(
-            ToolSpec(
-                name="edit_attachment_file",
-                description=(
-                    "按 Pi 风格 edits 精确修改用户上传的 UTF-8 文本附件，并只以原文件名"
-                    "输出一个更新副本。每个 old_text 必须在原附件中唯一匹配，各修改范围"
-                    "不得重叠；保留 UTF-8 BOM 和原始换行格式。仅当用户明确要求修改上传"
-                    "附件时使用；不要同时生成独立章节、改名合并稿或其他替代文件。浏览器"
-                    "上传无法取得并覆盖用户电脑上的原文件。"
-                ),
-                parameters={
-                    "type": "object",
-                    "properties": {
-                        "file_path": {
-                            "type": "string",
-                            "minLength": 1,
-                            "description": "available_data_files 中的附件绝对路径",
-                        },
-                        "edits": {
-                            "type": "array",
-                            "minItems": 1,
-                            "maxItems": MAX_FILE_EDITS,
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "old_text": {"type": "string", "minLength": 1},
-                                    "new_text": {"type": "string"},
+        if workspace_root is not None:
+            registry.register(
+                ToolSpec(
+                    name="edit_attachment_file",
+                    description=(
+                        "把上传的 UTF-8 文本附件映射到当前项目中的真实原文件，并按 Pi 风格"
+                        " edits 直接原位修改；绝不在 outputs 中生成更新副本。默认目标是项目"
+                        "根目录下的同名文件，嵌套文件必须传 target_path。执行前要求项目文件"
+                        "与上传快照内容完全一致，避免误改同名文件。每个 old_text 必须唯一"
+                        "匹配，各修改范围不得重叠；保留 UTF-8 BOM 和原始换行格式。"
+                    ),
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "file_path": {
+                                "type": "string",
+                                "minLength": 1,
+                                "description": "available_data_files 中的附件绝对路径",
+                            },
+                            "target_path": {
+                                "type": "string",
+                                "minLength": 1,
+                                "description": "附件对应的项目相对路径；根目录同名文件可省略",
+                            },
+                            "edits": {
+                                "type": "array",
+                                "minItems": 1,
+                                "maxItems": MAX_FILE_EDITS,
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "old_text": {"type": "string", "minLength": 1},
+                                        "new_text": {"type": "string"},
+                                    },
+                                    "required": ["old_text", "new_text"],
+                                    "additionalProperties": False,
                                 },
-                                "required": ["old_text", "new_text"],
-                                "additionalProperties": False,
                             },
                         },
+                        "required": ["file_path", "edits"],
+                        "additionalProperties": False,
                     },
-                    "required": ["file_path", "edits"],
-                    "additionalProperties": False,
-                },
-            ),
-            edit_attachment_file,
-            context=attachment_context,
-        )
+                ),
+                edit_attachment_file,
+                context=attachment_context,
+            )
     # 非 Markdown 文档附件：先转换成 Markdown 才能阅读
     document_attachment_paths = tuple(
         path
@@ -607,14 +625,21 @@ def create_agent_tool_registry(
                 name="read_workspace_file",
                 description=(
                     "读取当前项目目录内一个 UTF-8 文本文件。路径必须来自"
-                    " list_workspace_directory 或 list_workspace_files，不能使用绝对路径或 '..'。"
+                    " list_workspace_directory 或 list_workspace_files；支持项目相对路径和"
+                    "项目内绝对路径，禁止越过项目根目录。按 2000 行或 50KB 中先达到的"
+                    "限制截断，truncated=true 时使用 next_offset 继续读取。"
                 ),
                 parameters={
                     "type": "object",
                     "properties": {
                         "relative_path": {"type": "string", "minLength": 1},
                         "offset": {"type": "integer", "minimum": 1, "default": 1},
-                        "limit": {"type": "integer", "minimum": 1, "maximum": 500, "default": 500},
+                        "limit": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": MAX_WORKSPACE_READ_LINES,
+                            "default": MAX_WORKSPACE_READ_LINES,
+                        },
                     },
                     "required": ["relative_path"],
                     "additionalProperties": False,
@@ -829,14 +854,13 @@ def create_agent_tool_registry(
     if workspace_root is not None:
         change_context = {
             "workspace_root": str(workspace_root),
-            "python_executable": str(python_executable or ""),
-            "python_environment_source": python_environment_source,
+            "terminal_shell": terminal_shell,
         }
         project_tools = (
-            ("create_workspace_file", "在当前项目指定位置创建 UTF-8 文本或代码文件，不覆盖已有文件。路径可为项目相对路径或项目内绝对路径。",
+            ("write_workspace_file", "创建或完整覆盖当前项目中的 UTF-8 文本或代码文件，并自动创建父目录。只用于新文件或用户明确要求的完整重写；局部修改已有文件必须使用 edit_workspace_file。路径可为项目相对路径或项目内绝对路径。",
              {"relative_path": {"type": "string", "description": "项目相对路径或项目内绝对路径"}, "content": {"type": "string"}},
-             ["relative_path", "content"], run_create_workspace_file),
-            ("edit_workspace_file", "一次精确修改已有项目文本文件的一处或多处内容；每个 old_text 必须在原文件中唯一匹配，各修改范围不得重叠。保留 UTF-8 BOM 和原始换行格式，并返回 diff。路径可为项目相对路径或项目内绝对路径。",
+             ["relative_path", "content"], run_write_workspace_file),
+            ("edit_workspace_file", "一次修改已有项目文本文件的一处或多处内容；优先精确匹配，必要时兼容尾随空白、智能引号、破折号和特殊空格差异。每个 old_text 必须在原文件中唯一匹配，各修改范围不得重叠，且不能产生无变化替换。保留 UTF-8 BOM、原始换行格式和未触及行，返回带行号 diff、unified patch 与首个变更行。路径可为项目相对路径或项目内绝对路径。",
              {"relative_path": {"type": "string", "description": "项目相对路径或项目内绝对路径"},
               "edits": {"type": "array", "minItems": 1, "maxItems": MAX_FILE_EDITS, "items": {
                   "type": "object", "properties": {
@@ -845,10 +869,12 @@ def create_agent_tool_registry(
                   }, "required": ["old_text", "new_text"], "additionalProperties": False,
               }}},
              ["relative_path", "edits"], run_edit_workspace_file),
-            ("run_project_command", "需人工逐条批准的项目命令。支持 Git 状态/差异、测试、构建，python -m venv、uv venv、conda create -p 创建项目内环境，以及 pip、uv pip、conda install、uv sync 安装依赖。命令独立运行；用 python_environment 指定后续命令的环境，不要使用无效的 shell activate。",
-             {"command": {"type": "string", "maxLength": 1000},
-              "python_environment": {"type": "string", "description": "可选，项目内已有环境目录或 Python 路径；每条命令单独指定"}},
-             ["command"], run_project_command_tool),
+            ("run_terminal_command", f"需人工逐条批准的项目终端。当前常规设置固定使用 {terminal_shell}。每次调用都在当前项目目录启动一个独立 Shell，可执行完整的 Shell 语法与任意命令，不使用命令白名单。stdout 与 stderr 按产生顺序合并；长输出返回尾部和完整日志路径。命令可能创建、修改或删除文件，结果会返回 changed_files 审计。Shell 状态不会跨调用保留。",
+             {
+                 "command": {"type": "string", "minLength": 1, "maxLength": MAX_TERMINAL_COMMAND_CHARS},
+                 "timeout_seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": MAX_TERMINAL_TIMEOUT_SECONDS},
+             },
+             ["command"], run_terminal_command_tool),
         )
         for name, description, properties, required, handler in project_tools:
             registry.register(
@@ -915,7 +941,7 @@ def _run_read_workspace_file(
     if not isinstance(relative_path, str) or not relative_path.strip():
         raise ToolArgumentsError("relative_path 必须是非空字符串")
     offset = arguments.get("offset", 1)
-    limit = arguments.get("limit", 500)
+    limit = arguments.get("limit", MAX_WORKSPACE_READ_LINES)
     if type(offset) is not int or type(limit) is not int:
         raise ToolArgumentsError("offset 和 limit 必须是整数")
     return read_workspace_file(

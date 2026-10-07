@@ -22,6 +22,10 @@ def test_get_returns_unsaved_when_no_file(monkeypatch, tmp_path):
     assert result["saved"] is False
     assert result["configs"] == []
     assert result["active_id"] is None
+    assert asyncio.run(main.get_general_settings_endpoint()) == {
+        "saved": False,
+        "terminal_type": "powershell",
+    }
 
 
 def test_put_then_get_roundtrip(monkeypatch, tmp_path):
@@ -72,6 +76,40 @@ def test_put_sanitizes_non_string_active_id(monkeypatch, tmp_path):
     data = json.loads(path.read_text(encoding="utf-8"))
     assert data["active_id"] is None
     assert data["external_services"] == {}
+
+
+def test_general_terminal_type_roundtrip_preserves_api_settings(monkeypatch, tmp_path):
+    path = _use_tmp_settings(monkeypatch, tmp_path)
+    asyncio.run(main.save_api_settings_endpoint({"configs": [{"id": "cfg_1"}]}))
+
+    asyncio.run(main.save_general_settings_endpoint({"terminal_type": "git-bash"}))
+
+    result = asyncio.run(main.get_general_settings_endpoint())
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert result == {"saved": True, "terminal_type": "git-bash"}
+    assert data["configs"] == [{"id": "cfg_1"}]
+
+
+def test_api_settings_save_preserves_general_terminal_type(monkeypatch, tmp_path):
+    _use_tmp_settings(monkeypatch, tmp_path)
+    asyncio.run(main.save_general_settings_endpoint({"terminal_type": "bash"}))
+
+    asyncio.run(main.save_api_settings_endpoint({"configs": []}))
+
+    assert asyncio.run(main.get_general_settings_endpoint()) == {
+        "saved": True,
+        "terminal_type": "bash",
+    }
+
+
+def test_general_terminal_type_rejects_unknown_value(monkeypatch, tmp_path):
+    path = _use_tmp_settings(monkeypatch, tmp_path)
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(main.save_general_settings_endpoint({"terminal_type": "cmd"}))
+
+    assert exc.value.status_code == 422
+    assert not path.exists()
 
 
 def test_get_survives_corrupt_file(monkeypatch, tmp_path):

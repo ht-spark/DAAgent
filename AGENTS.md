@@ -2,6 +2,8 @@
 
 ### 所有代码注释均所有中文
 
+**脚本设计超参数的，要详细注释超参数的作用**
+
 ### Project Objectives and Functions
 
     **Objective**: This is an intelligent agent for mathematical modeling, aiming to implement task-oriented automated mathematical modeling.

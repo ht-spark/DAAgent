@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import Sidebar from './components/Sidebar'
 import SettingsModal from './components/SettingsModal'
-import { syncApiSettingsCache } from './api'
+import { syncApiSettingsCache, syncGeneralSettingsCache } from './api'
 import { applyUiSettings, loadUiSettings } from './settings'
 import NewTask from './pages/NewTask'
 import History from './pages/History'
@@ -140,6 +140,7 @@ export default function App() {
   // 换浏览器/端口或清缓存后无需重新设置。
   useEffect(() => {
     void syncApiSettingsCache()
+    void syncGeneralSettingsCache()
     applyUiSettings(loadUiSettings())
   }, [])
 

@@ -37,22 +37,21 @@ def test_write_artifact_writes_nested_code_and_markdown(tmp_path) -> None:
 
 @pytest.mark.parametrize(
     "relative_path",
-    ["../outside.md", "input/source.md", "D:/outside.md", "/outside.md", ""],
+    [
+        "../outside.md",
+        "input/source.md",
+        ".runtime/cache.md",
+        "reports/.runtime/cache.md",
+        "D:/outside.md",
+        "/outside.md",
+        "",
+    ],
 )
 def test_write_artifact_rejects_unsafe_paths(tmp_path, relative_path: str) -> None:
     with pytest.raises(ArtifactPathError):
         write_artifact(
             relative_path,
             "内容",
-            output_dir=tmp_path / "output",
-        )
-
-
-def test_write_artifact_rejects_session_input_directory(tmp_path) -> None:
-    with pytest.raises(ArtifactPathError, match="输入附件目录"):
-        write_artifact(
-            ".runs/run-1/input/source.csv",
-            [{"值": 1}],
             output_dir=tmp_path / "output",
         )
 

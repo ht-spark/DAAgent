@@ -1,21 +1,24 @@
 import { useEffect } from 'react'
+import type { TerminalType } from '../settings'
 
 type Props = {
   command: string
   workspaceRoot: string
-  pythonEnvironment?: string | null
+  shell: TerminalType
+  timeoutSeconds?: number | null
   onApprove: () => void
   onReject: () => void
 }
 
 /**
- * Agent 项目命令的人工批准卡片：贴在聊天输入框上方，
+ * Agent 终端命令的人工批准卡片：贴在聊天输入框上方，
  * 与 WorkBuddy 等 agent 工具一致，不打断会话上下文。
  */
 export default function CommandApprovalDialog({
   command,
   workspaceRoot,
-  pythonEnvironment,
+  shell,
+  timeoutSeconds,
   onApprove,
   onReject,
 }: Props) {
@@ -37,7 +40,7 @@ export default function CommandApprovalDialog({
       <div className="rag-approval-head">
         <div className="rag-approval-head-copy">
           <p className="rag-approval-kicker">等待人工批准</p>
-          <h3 id="command-approval-title">Agent 请求运行项目命令</h3>
+          <h3 id="command-approval-title">Agent 请求操作终端</h3>
           <p id="command-approval-desc" className="rag-approval-lead">
             请检查命令与项目路径，确认后再决定是否批准执行。
           </p>
@@ -55,16 +58,22 @@ export default function CommandApprovalDialog({
           <dt>项目</dt>
           <dd>{workspaceRoot}</dd>
         </div>
-        {pythonEnvironment ? (
+        <div>
+          <dt>Shell</dt>
+          <dd>{shell === 'git-bash' ? 'Git Bash' : shell === 'powershell' ? 'PowerShell' : 'Bash'}</dd>
+        </div>
+        {timeoutSeconds ? (
           <div>
-            <dt>目标环境</dt>
-            <dd>{pythonEnvironment}</dd>
+            <dt>超时</dt>
+            <dd>{timeoutSeconds} 秒</dd>
           </div>
         ) : null}
       </dl>
 
       <div className="rag-approval-foot">
-        <p className="rag-approval-warning">此命令可能安装依赖或执行项目代码，请确认来源可信。</p>
+        <p className="rag-approval-warning">
+          该命令会由真实 Shell 解释，可能访问系统、安装依赖、执行代码，并创建、修改或删除文件。每次执行只批准当前这一条命令。
+        </p>
         <div className="rag-approval-actions">
           <button type="button" className="rag-approval-reject" onClick={onReject}>
             拒绝
