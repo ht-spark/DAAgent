@@ -8,6 +8,7 @@ import {
   fetchProjectFilePreview,
   fetchProjectFileTree,
   getKnowledgeBases,
+  listSkills,
   openProjectFolder,
   projectFilePreviewUrl,
   renameBrainstormDiscussion,
@@ -22,6 +23,7 @@ import {
   type KnowledgeSourceCitation,
   type ProjectFilePreview,
   type ProjectFileNode,
+  type SkillInfo,
 } from '../api'
 import { loadConfigs, type ApiConfig } from '../apiConfigs'
 import type { TerminalType } from '../settings'
@@ -987,6 +989,8 @@ export default function NewChat({
   const [activeRunId, setActiveRunId] = useState<string | null>(null)
   const [isStopping, setIsStopping] = useState(false)
   const [files, setFiles] = useState<File[]>([])
+  const [skills, setSkills] = useState<SkillInfo[]>([])
+  const [selectedSkillIds, setSelectedSkillIds] = useState<string[]>([])
   const [title, setTitle] = useState('新讨论')
   const [agentTrace, setAgentTrace] = useState<AgentTraceEvent[]>([])
   const [agentRunTerminated, setAgentRunTerminated] = useState(false)
@@ -1230,6 +1234,18 @@ export default function NewChat({
   }, [])
 
   useEffect(() => {
+    void listSkills()
+      .then((items) => {
+        setSkills(items)
+        setSelectedSkillIds((current) => {
+          const available = new Set(items.map((item) => item.skill_id))
+          return current.filter((id) => available.has(id))
+        })
+      })
+      .catch(() => setSkills([]))
+  }, [])
+
+  useEffect(() => {
     if (discussionId && runningDiscussionRef.current === discussionId) return
     streamControllerRef.current?.abort()
     streamControllerRef.current = null
@@ -1241,6 +1257,7 @@ export default function NewChat({
     setIsSubmitting(false)
     setIsStopping(false)
     setAgentRunTerminated(false)
+    setSelectedSkillIds([])
     if (!discussionId) {
       setMessages([])
       setTitle('新讨论')
@@ -1382,6 +1399,7 @@ export default function NewChat({
         selectedConfigId || null,
         knowledgeBaseIds,
         projectId,
+        selectedSkillIds,
         controller.signal,
       )
     } catch (error) {
@@ -1546,7 +1564,7 @@ export default function NewChat({
               />
             ) : null}
             <div className="rag-composer">
-              {files.length > 0 && (
+              {(files.length > 0 || selectedSkillIds.length > 0) && (
                 <div className="rag-file-chips">
                   {files.map((file, index) => (
                     <span className="rag-file-chip" key={`${file.name}-${index}`}>
@@ -1555,6 +1573,19 @@ export default function NewChat({
                         type="button"
                         aria-label="移除附件"
                         onClick={() => setFiles((list) => list.filter((_, i) => i !== index))}
+                        disabled={isSubmitting}
+                      >
+                        ×
+                      </button>
+                    </span>
+                  ))}
+                  {selectedSkillIds.map((skillId) => (
+                    <span className="rag-file-chip rag-skill-chip" key={skillId}>
+                      技能 · {skills.find((item) => item.skill_id === skillId)?.name ?? skillId}
+                      <button
+                        type="button"
+                        aria-label="移除技能"
+                        onClick={() => setSelectedSkillIds((current) => current.filter((id) => id !== skillId))}
                         disabled={isSubmitting}
                       >
                         ×
@@ -1629,14 +1660,46 @@ export default function NewChat({
                     })}
                   </div>
                 </details>
-                <button
-                  type="button"
-                  className="rag-btn"
-                  onClick={() => fileInputRef.current?.click()}
-                  disabled={isSubmitting}
-                >
-                  添加附件{files.length ? ` · ${files.length}` : ''}
-                </button>
+                <details className="rag-add-picker">
+                  <summary
+                    className={isSubmitting ? 'is-disabled' : undefined}
+                    aria-label="添加附件或加载技能"
+                    title="添加附件或加载技能"
+                  >
+                    +
+                  </summary>
+                  <div className="rag-add-menu">
+                    <button
+                      type="button"
+                      disabled={isSubmitting}
+                      onClick={(event) => {
+                        fileInputRef.current?.click()
+                        const details = event.currentTarget.closest('details')
+                        if (details instanceof HTMLDetailsElement) details.open = false
+                      }}
+                    >
+                      上传附件{files.length ? ` · ${files.length}` : ''}
+                    </button>
+                    <div className="rag-add-menu-title">加载已有技能</div>
+                    {skills.length === 0 ? (
+                      <p>暂无已安装技能</p>
+                    ) : skills.map((skill) => (
+                      <label key={skill.skill_id} title={skill.description}>
+                        <input
+                          type="checkbox"
+                          checked={selectedSkillIds.includes(skill.skill_id)}
+                          disabled={isSubmitting}
+                          onChange={() => setSelectedSkillIds((current) => (
+                            current.includes(skill.skill_id)
+                              ? current.filter((id) => id !== skill.skill_id)
+                              : [...current, skill.skill_id]
+                          ))}
+                        />
+                        <span>{skill.name}</span>
+                      </label>
+                    ))}
+                  </div>
+                </details>
                 <input
                   ref={fileInputRef}
                   hidden

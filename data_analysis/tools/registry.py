@@ -711,7 +711,8 @@ def create_agent_tool_registry(
                 "result 和产物清单返回给下一轮思考。代码中可直接使用 DATA_FILES"
                 "（授权文件路径列表）、DATA_FILE_MAP（文件名到路径）、OUTPUT_DIR"
                 "（产物目录）、WORKSPACE_DIR（当前项目目录，未绑定时为空）和"
-                " ARTIFACTS（安全产物工作区）；应将关键结论赋给"
+                " ARTIFACTS（安全产物工作区）和 SKILL_ASSETS（已物化 Skill"
+                " 资产标识到路径的映射）；应将关键结论赋给"
                 " JSON 可序列化变量 result。生成文件时必须填写 expected_artifacts，运行时会验证"
                 "文件确实产生在当前 Run。运行环境已由项目配置自动绑定，返回值"
                 "中的 runtime 会说明实际解释器。仅当用户明确指定了环境路径，或你从"
@@ -1108,6 +1109,11 @@ def _run_python_code(
         environment_source=selected_source,
         environment_name=selected_name,
         expected_artifacts=expected_artifacts,
+        skill_assets=(
+            context.get("skill_assets")
+            if isinstance(context.get("skill_assets"), Mapping)
+            else {}
+        ),
     )
 
 

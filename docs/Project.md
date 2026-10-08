@@ -46,18 +46,18 @@ flowchart TB
 
 ## 1. 记忆分层与生命周期
 
-| 层级            | 载体                                        | 落点                        | 生命周期                 | 谁会读到                                        |
-| --------------- | ------------------------------------------- | --------------------------- | ------------------------ | ----------------------------------------------- |
-| L0 全量历史     | `messages`（user/assistant）              | `server/agent.db`         | 永久，不因压缩删除       | 滚动压缩器                                      |
-| L1 滚动摘要     | `memory_summary`                          | 库中 `role=tool` 隐藏记录 | 跨轮递归滚动             | Planner、所有 ReAct                             |
-| L2 最近原文     | `state.messages`                          | AgentState                | 跨轮（仅本轮请求）       | 仅 ReAct（Planner 只拿最近若干条的裁剪版）      |
-| L3 工作轨迹     | `WorkTrajectory`                          | assistant metadata        | 跨轮，按条数与字符裁剪   | Planner（完整视图）、ReAct（精简视图）          |
-| L4 产物引用     | `available_artifacts`                     | AgentState + 磁盘扫描     | 跨轮，Todo 内持续增长    | Planner、所有 ReAct                             |
-| L5 计划对象     | `AnalysisPlan`                            | AgentState                | 单个 run                 | 仅 graph 调度器（**不进 prompt**）            |
-| L6 观察暂存区   | `observations`                            | 单个 Todo 的 AgentState   | **单个 Todo 内**   | 该 Todo 的 ReAct（最近结果原样保留 + 更早摘要） |
-| L7 运行预算     | `run_budget`                              | 所有 Todo 共享同一对象    | 单个 run                 | `AgentLoop.step` 的轮数门禁                     |
-| L8 纠错上下文   | （临时消息对）                              | 函数局部变量              | 单次 LLM 调用            | Planner / ReAct 各自的格式纠错                  |
-| L9 重复调用指纹 | `RepeatGuard`                             | graph 的 Todo 局部对象    | 单个 Todo（写入后重置）  | 执行前的重复调用拦截                            |
+| 层级            | 载体                           | 落点                       | 生命周期                | 谁会读到                                        |
+| --------------- | ------------------------------ | -------------------------- | ----------------------- | ----------------------------------------------- |
+| L0 全量历史     | `messages`（user/assistant） | `server/agent.db`        | 永久，不因压缩删除      | 滚动压缩器                                      |
+| L1 滚动摘要     | `memory_summary`             | 库中`role=tool` 隐藏记录 | 跨轮递归滚动            | Planner、所有 ReAct                             |
+| L2 最近原文     | `state.messages`             | AgentState                 | 跨轮（仅本轮请求）      | 仅 ReAct（Planner 只拿最近若干条的裁剪版）      |
+| L3 工作轨迹     | `WorkTrajectory`             | assistant metadata         | 跨轮，按条数与字符裁剪  | Planner（完整视图）、ReAct（精简视图）          |
+| L4 产物引用     | `available_artifacts`        | AgentState + 磁盘扫描      | 跨轮，Todo 内持续增长   | Planner、所有 ReAct                             |
+| L5 计划对象     | `AnalysisPlan`               | AgentState                 | 单个 run                | 仅 graph 调度器（**不进 prompt**）        |
+| L6 观察暂存区   | `observations`               | 单个 Todo 的 AgentState    | **单个 Todo 内**  | 该 Todo 的 ReAct（最近结果原样保留 + 更早摘要） |
+| L7 运行预算     | `run_budget`                 | 所有 Todo 共享同一对象     | 单个 run                | `AgentLoop.step` 的轮数门禁                   |
+| L8 纠错上下文   | （临时消息对）                 | 函数局部变量               | 单次 LLM 调用           | Planner / ReAct 各自的格式纠错                  |
+| L9 重复调用指纹 | `RepeatGuard`                | graph 的 Todo 局部对象     | 单个 Todo（写入后重置） | 执行前的重复调用拦截                            |
 
 ## 2. 每次 LLM 请求的输入
 
@@ -104,17 +104,17 @@ Planner **看不到** `observations`，也看不到计划执行过程中的工�
 
 **边界总表**（✅ 进入 prompt，❌ 不进入）：
 
-| 记忆载体                        | Planner（跨轮） | Planner（重规划） | 当前 Todo 的 ReAct | 最终汇总 ReAct |
-| ------------------------------- | --------------- | ----------------- | ------------------ | -------------- |
-| `memory_summary` 滚动摘要       | ✅              | ✅                | ✅                 | ✅             |
-| 最近对话原文                    | ✅ 裁剪版       | ✅ 裁剪版         | ✅ 完整保留        | ✅             |
-| `work_trajectory`               | ✅ 宽松上限     | ✅                | ✅ 精简视图        | ✅ 精简视图    |
-| `available_artifacts`           | ✅              | ✅                | ✅ 逐个 Todo 演进  | ✅             |
-| `AnalysisPlan` 对象             | —              | —                 | ❌                 | ❌             |
-| 已完成 Todo 的 `result_summary` | 经上轮 `key_decisions` | ✅ 显式写入 | ✅ 拼进 `user_query` | ✅ 拼进 `user_query` |
-| `observations`                  | ❌              | ❌                | ✅ 本 Todo 私有    | ❌ 从空开始    |
-| 失败证据                        | ✅ `failures`   | ✅                | ✅ `failures`      | ✅             |
-| `run_budget` 决策预算           | —              | 继续计数          | ✅ 共享            | ✅ 共享        |
+| 记忆载体                         | Planner（跨轮）         | Planner（重规划） | 当前 Todo 的 ReAct    | 最终汇总 ReAct        |
+| -------------------------------- | ----------------------- | ----------------- | --------------------- | --------------------- |
+| `memory_summary` 滚动摘要      | ✅                      | ✅                | ✅                    | ✅                    |
+| 最近对话原文                     | ✅ 裁剪版               | ✅ 裁剪版         | ✅ 完整保留           | ✅                    |
+| `work_trajectory`              | ✅ 宽松上限             | ✅                | ✅ 精简视图           | ✅ 精简视图           |
+| `available_artifacts`          | ✅                      | ✅                | ✅ 逐个 Todo 演进     | ✅                    |
+| `AnalysisPlan` 对象            | —                      | —                | ❌                    | ❌                    |
+| 已完成 Todo 的`result_summary` | 经上轮`key_decisions` | ✅ 显式写入       | ✅ 拼进`user_query` | ✅ 拼进`user_query` |
+| `observations`                 | ❌                      | ❌                | ✅ 本 Todo 私有       | ❌ 从空开始           |
+| 失败证据                         | ✅`failures`          | ✅                | ✅`failures`        | ✅                    |
+| `run_budget` 决策预算          | —                      | 继续计数          | ✅ 共享               | ✅ 共享               |
 
 **Planner 侧**（`agent/planner.py`）
 
@@ -137,14 +137,14 @@ Planner **看不到** `observations`，也看不到计划执行过程中的工�
 
 这是对「工具吃上下文」的第一道防线，配合上面的观察预算与轨迹条数上限使用：
 
-| 位置                    | 限制                 |
-| ----------------------- | -------------------- |
-| 附件读取                | 80,000 字符          |
-| 产物检查                | 50,000 字符          |
-| `execute_python` 代码 | 50,000 字符输入      |
-| 终端合并输出            | 尾部 2,000 行或 50 KiB；截断时保留完整日志路径 |
-| 知识库/联网 query       | 4,000 / 1,000 字符   |
-| 工作区列表/搜索/读文件  | 有`truncated` 标记 |
+| 位置                    | 限制                                                                                    |
+| ----------------------- | --------------------------------------------------------------------------------------- |
+| 附件读取                | 80,000 字符                                                                             |
+| 产物检查                | 50,000 字符                                                                             |
+| `execute_python` 代码 | 50,000 字符输入                                                                         |
+| 终端合并输出            | 尾部 2,000 行或 50 KiB；截断时保留完整日志路径                                          |
+| 知识库/联网 query       | 4,000 / 1,000 字符                                                                      |
+| 工作区列表/搜索/读文件  | 有`truncated` 标记                                                                    |
 | 单条观察进 prompt       | 最近的按 16000 字符预算原样保留；仅单条自身超预算时按 8000 字符保留头尾并标注运行时截断 |
 
 路径授权、知识库 ID、API Key 等放在**工具注册表的 context** 里（`tools/registry.py`），不暴露给 LLM；LLM 只看到工具参数 schema。
@@ -161,7 +161,6 @@ Planner **看不到** `observations`，也看不到计划执行过程中的工�
 完整历史落 SQLite；每轮请求前编译成「滚动摘要 + 最近原文 + 结构化轨迹 + 产物引用」；Planner 用一次性快照做规划，每个 Todo 用带预算的独立 ReAct 暂存区执行，两者之间只通过 Todo 目标投影、`result_summary` 与工作轨迹单向传递，共享同一个 run 级决策预算；运行时按「重复调用拦截 + 单 Todo 步数上限 + run 总预算」三层约束执行次数，工具输出靠工具级字符上限 + 观察预算 + 轨迹条数上限共同控体量。仍存在的短板是：**没有真实 tokenizer 与动态阈值微调**、**单个超大工具结果只能按字符截断**（而非结构化摘要）。
 
 如果继续往下改，优先级通常是：接入真实 tokenizer → run 内按 token 预算压缩工具结果 → 语义检索式的长期记忆。
-
 
 # 2.储存管理
 
@@ -376,18 +375,18 @@ final = _final_state(state, plan)          # 汇总 ReAct，同样共享 run_bud
 
 ## 7. 状态模型（`agent/state.py`）
 
-| 字段                                                                  | 作用                                |
-| --------------------------------------------------------------------- | ----------------------------------- |
-| `user_query`                                                        | 本轮用户问题（Todo 状态里是 Todo 目标投影） |
-| `memory_summary`                                                    | 滚动记忆摘要                        |
-| `messages`                                                          | 对话历史（编译后）                  |
+| 字段                                                                  | 作用                                           |
+| --------------------------------------------------------------------- | ---------------------------------------------- |
+| `user_query`                                                        | 本轮用户问题（Todo 状态里是 Todo 目标投影）    |
+| `memory_summary`                                                    | 滚动记忆摘要                                   |
+| `messages`                                                          | 对话历史（编译后）                             |
 | `observations`                                                      | **当前状态**的工具结果；运行级状态恒为空 |
-| `iteration`                                                         | 当前状态已执行的工具观察次数        |
-| `run_budget`                                                        | 整轮 run 共享的决策预算（所有 Todo + 汇总） |
-| `analysis_plan` / `current_todo_id`                                 | 顶层计划与当前 Todo（**不进 prompt**） |
-| `work_trajectory`                                                   | 已读/已改文件、关键决定、观察要点、失败要点 |
-| `available_artifacts`                                               | 可复用的真实产物引用                |
-| `data_paths` / `output_dir` / `workspace_root` / `project_id` | 运行上下文                          |
+| `iteration`                                                         | 当前状态已执行的工具观察次数                   |
+| `run_budget`                                                        | 整轮 run 共享的决策预算（所有 Todo + 汇总）    |
+| `analysis_plan` / `current_todo_id`                               | 顶层计划与当前 Todo（**不进 prompt**）   |
+| `work_trajectory`                                                   | 已读/已改文件、关键决定、观察要点、失败要点    |
+| `available_artifacts`                                               | 可复用的真实产物引用                           |
+| `data_paths` / `output_dir` / `workspace_root` / `project_id` | 运行上下文                                     |
 
 跨轮：`messages` 来自库；`observations` **不**持久化进对话，下一轮从空开始；`work_trajectory` 与 `available_artifacts` 由库中的 metadata 与磁盘产物重建（详见第 1 章）。
 
@@ -452,15 +451,15 @@ AgentLoop.step  →  Action {tool_name, arguments, thought}
 
 实现：`data_analysis/runtime/harness.py`
 
-| 步骤                | 行为                                                                                                                            |
-| ------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| 1. 计时             | `started_at = time.monotonic()`                                                                                               |
+| 步骤                | 行为                                                                                                                                 |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| 1. 计时             | `started_at = time.monotonic()`                                                                                                    |
 | 2. 终端命令门禁     | `tool_name` 属于 `TERMINAL_TOOL_NAMES` 且 `terminal_approval` 未通过 → 直接失败 Observation：「终端命令未获人工批准，未执行」 |
-| 3. 解析工具         | `registry.resolve(tool_name)`；未知工具 → 失败 Observation                                                                   |
-| 4. 执行分流         | `run_in_process=True` → `tool.invoke(arguments)`；否则 → `sandbox.execute(tool, arguments)`                             |
-| 5. 异常兜底         | `ToolNotFoundError` / `SandboxError` / `ValueError` / `RuntimeError` → 失败 Observation，`error=str(exc)`            |
-| 6. 终端命令二次校验 | 若结果 dict 里`exit_code != 0` → 失败，error 含退出码 + 合并输出截断约 1000 字符                                               |
-| 7. 成功             | `Observation(success=True, result=…, duration_ms=…)`                                                                        |
+| 3. 解析工具         | `registry.resolve(tool_name)`；未知工具 → 失败 Observation                                                                        |
+| 4. 执行分流         | `run_in_process=True` → `tool.invoke(arguments)`；否则 → `sandbox.execute(tool, arguments)`                                  |
+| 5. 异常兜底         | `ToolNotFoundError` / `SandboxError` / `ValueError` / `RuntimeError` → 失败 Observation，`error=str(exc)`                 |
+| 6. 终端命令二次校验 | 若结果 dict 里`exit_code != 0` → 失败，error 含退出码 + 合并输出截断约 1000 字符                                                  |
+| 7. 成功             | `Observation(success=True, result=…, duration_ms=…)`                                                                             |
 
 核心契约：
 
@@ -533,14 +532,14 @@ env = 精简环境变量 + PYTHONPATH=仓库根
 
 ## 5. 错误与 Observation 对照
 
-| 情况                                | Observation                               |
-| ----------------------------------- | ----------------------------------------- |
-| 终端命令未批准                      | `success=false`, error=未获批准         |
-| 工具名不存在                        | `success=false`, ToolNotFoundError 文案 |
-| 参数/上下文不合法                   | ToolArgumentsError 等 → 失败             |
-| 沙箱超时 / 协议错误 / 工具业务失败  | 对应 Sandbox* 文案                        |
-| `run_terminal_command` 退出码 ≠ 0 | 失败，含 exit_code 与合并输出摘录          |
-| 正常返回                            | `success=true`, result=工具 JSON        |
+| 情况                                 | Observation                               |
+| ------------------------------------ | ----------------------------------------- |
+| 终端命令未批准                       | `success=false`, error=未获批准         |
+| 工具名不存在                         | `success=false`, ToolNotFoundError 文案 |
+| 参数/上下文不合法                    | ToolArgumentsError 等 → 失败             |
+| 沙箱超时 / 协议错误 / 工具业务失败   | 对应 Sandbox* 文案                        |
+| `run_terminal_command` 退出码 ≠ 0 | 失败，含 exit_code 与合并输出摘录         |
+| 正常返回                             | `success=true`, result=工具 JSON        |
 
 Harness **不**自动重试；重试策略在决策层（看 observation 后自己改参数再调）或系统提示要求模型「依据错误修改后再试」。
 
@@ -592,31 +591,31 @@ Loop 只决定「调什么」；Harness 负责「能不能调、在哪调、失�
 
 ### 1）上下文压缩参数
 
-| 参数                                          |                   当前值 | 含义                                                                                   | 设置脚本                                    |
-| --------------------------------------------- | -----------------------: | -------------------------------------------------------------------------------------- | ------------------------------------------- |
-| `COMPACTION_TRIGGER_TOKENS`                 |                  `300000` | 活跃上下文（旧摘要 + 未压缩原文及附件上下文）估算 token 数超过该值时触发滚动压缩；也是推导阈值的上限。 | `data_analysis/context/rolling_memory.py` |
-| `DEFAULT_MODEL_CONTEXT_TOKENS`              |                  `356000` | 未声明模型窗口时使用的推导值；扣除 `56000` token 预留后得到 300K 压缩阈值。              | `data_analysis/context/rolling_memory.py` |
-| `ATTACHMENT_RAW_CHARS`                      |              `50000` 字符 | 单份附件直接进入上下文的原文上限；超出部分调用当前模型分批生成详细摘要。                  | `data_analysis/context/attachments.py` |
-| `OUTPUT_RESERVE_TOKENS` / `PROMPT_OVERHEAD_TOKENS` |        `32000` / `24000` | 推导阈值时预留的模型输出与 system/工具协议/观察等固定开销。                              | `data_analysis/context/rolling_memory.py` |
-| `KEEP_RECENT_TOKENS`                        |                   `40000` | 压缩后保留的最近 user/assistant 原文预算上限，按完整对话轮次保留；实际取阈值 ×0.2 并夹在该上限与 `8000` 之间。 | `data_analysis/context/rolling_memory.py` |
-| `_MAX_COMPACTION_INPUT_CHARS`               |             `150000` 字符 | 单批送入摘要模型的历史原文上限；超过时按时间分批递归摘要，不再截断丢弃。                 | `data_analysis/context/rolling_memory.py` |
-| `contextWindow`（API 配置键）               |                   未设置 | 在 `server/api_settings.json` 的模型配置里声明模型上下文窗口后，压缩阈值自动推导为 `窗口 − 预留`；也可用环境变量 `DAAGENT_CONTEXT_WINDOW` 覆盖。 | `server/main.py::_agent_context_window_tokens` |
+| 参数                                                   |                当前值 | 含义                                                                                                                                                   | 设置脚本                                         |
+| ------------------------------------------------------ | --------------------: | ------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------ |
+| `COMPACTION_TRIGGER_TOKENS`                          |            `300000` | 活跃上下文（旧摘要 + 未压缩原文及附件上下文）估算 token 数超过该值时触发滚动压缩；也是推导阈值的上限。                                                 | `data_analysis/context/rolling_memory.py`      |
+| `DEFAULT_MODEL_CONTEXT_TOKENS`                       |            `356000` | 未声明模型窗口时使用的推导值；扣除`56000` token 预留后得到 300K 压缩阈值。                                                                           | `data_analysis/context/rolling_memory.py`      |
+| `ATTACHMENT_RAW_CHARS`                               |        `50000` 字符 | 单份附件直接进入上下文的原文上限；超出部分调用当前模型分批生成详细摘要。                                                                               | `data_analysis/context/attachments.py`         |
+| `OUTPUT_RESERVE_TOKENS` / `PROMPT_OVERHEAD_TOKENS` | `32000` / `24000` | 推导阈值时预留的模型输出与 system/工具协议/观察等固定开销。                                                                                            | `data_analysis/context/rolling_memory.py`      |
+| `KEEP_RECENT_TOKENS`                                 |             `40000` | 压缩后保留的最近 user/assistant 原文预算上限，按完整对话轮次保留；实际取阈值 ×0.2 并夹在该上限与`8000` 之间。                                       | `data_analysis/context/rolling_memory.py`      |
+| `_MAX_COMPACTION_INPUT_CHARS`                        |       `150000` 字符 | 单批送入摘要模型的历史原文上限；超过时按时间分批递归摘要，不再截断丢弃。                                                                               | `data_analysis/context/rolling_memory.py`      |
+| `contextWindow`（API 配置键）                        |                未设置 | 在`server/api_settings.json` 的模型配置里声明模型上下文窗口后，压缩阈值自动推导为 `窗口 − 预留`；也可用环境变量 `DAAGENT_CONTEXT_WINDOW` 覆盖。 | `server/main.py::_agent_context_window_tokens` |
 
 ### 2）观察与轨迹预算
 
-| 参数                                   |  当前值 | 含义                                                             | 设置脚本                            |
-| -------------------------------------- | ------: | ---------------------------------------------------------------- | ----------------------------------- |
-| `MAX_CONTEXT_OBSERVATIONS`           |       8 | 进入 prompt 的完整观察条数上限。                                 | `data_analysis/agent/loop.py`     |
-| `MAX_OBSERVATION_DIGESTS`            |      24 | 更早观察折叠出的一行摘要条数上限。                               | `data_analysis/agent/loop.py`     |
-| `MAX_OBSERVATION_CONTEXT_CHARS`      | `16000` | observations 进入 prompt 的字符预算，按「最近优先」分配。         | `data_analysis/agent/loop.py`     |
-| `MAX_OBSERVATION_STRING_CHARS`       |  `8000` | 仅当单条结果自身超预算时，才裁剪其单个字符串字段的上限（保留头尾）。 | `data_analysis/agent/loop.py`     |
-| `MAX_TRAJECTORY_NOTES` / `_FAILURES` | 40 / 20 | 观察要点与失败要点保留条数上限（各条 ≤240 字符）。              | `data_analysis/agent/state.py`    |
-| `MAX_TRAJECTORY_PATHS` / `_DECISIONS` | 200 / 100 | 已读/已改路径与关键决定保留条数上限（决定单条 ≤400 字符）。     | `data_analysis/agent/state.py`    |
-| `MAX_RESULT_SUMMARY_CHARS`           |  `2000` | 单个 Todo 结果投影进后续 prompt 的字符上限。                     | `data_analysis/agent/graph.py`    |
-| `MAX_PLAN_RESULTS_CHARS`             | `16000` | 一次 prompt 内全部已完成结果的总预算。                           | `data_analysis/agent/graph.py`    |
-| `MAX_PLANNER_HISTORY_MESSAGES` 等     | 8 / 1500 / 6000 | Planner 注入的最近对话条数、单条与总字符预算。            | `data_analysis/agent/planner.py`  |
-| `max_todo_steps`                     |      30 | 单个 Todo 允许的决策轮数上限，超限按 Todo 失败交给恢复规划。     | `data_analysis/agent/graph.py`    |
-| `MUTATING_TOOLS`                     | 7 个工具 | 成功后清空重复调用登记，允许重新读取同一目标。                    | `data_analysis/runtime/repeat_guard.py` |
+| 参数                                      |          当前值 | 含义                                                                 | 设置脚本                                  |
+| ----------------------------------------- | --------------: | -------------------------------------------------------------------- | ----------------------------------------- |
+| `MAX_CONTEXT_OBSERVATIONS`              |               8 | 进入 prompt 的完整观察条数上限。                                     | `data_analysis/agent/loop.py`           |
+| `MAX_OBSERVATION_DIGESTS`               |              24 | 更早观察折叠出的一行摘要条数上限。                                   | `data_analysis/agent/loop.py`           |
+| `MAX_OBSERVATION_CONTEXT_CHARS`         |       `16000` | observations 进入 prompt 的字符预算，按「最近优先」分配。            | `data_analysis/agent/loop.py`           |
+| `MAX_OBSERVATION_STRING_CHARS`          |        `8000` | 仅当单条结果自身超预算时，才裁剪其单个字符串字段的上限（保留头尾）。 | `data_analysis/agent/loop.py`           |
+| `MAX_TRAJECTORY_NOTES` / `_FAILURES`  |         40 / 20 | 观察要点与失败要点保留条数上限（各条 ≤240 字符）。                  | `data_analysis/agent/state.py`          |
+| `MAX_TRAJECTORY_PATHS` / `_DECISIONS` |       200 / 100 | 已读/已改路径与关键决定保留条数上限（决定单条 ≤400 字符）。         | `data_analysis/agent/state.py`          |
+| `MAX_RESULT_SUMMARY_CHARS`              |        `2000` | 单个 Todo 结果投影进后续 prompt 的字符上限。                         | `data_analysis/agent/graph.py`          |
+| `MAX_PLAN_RESULTS_CHARS`                |       `16000` | 一次 prompt 内全部已完成结果的总预算。                               | `data_analysis/agent/graph.py`          |
+| `MAX_PLANNER_HISTORY_MESSAGES` 等       | 8 / 1500 / 6000 | Planner 注入的最近对话条数、单条与总字符预算。                       | `data_analysis/agent/planner.py`        |
+| `max_todo_steps`                        |              30 | 单个 Todo 允许的决策轮数上限，超限按 Todo 失败交给恢复规划。         | `data_analysis/agent/graph.py`          |
+| `MUTATING_TOOLS`                        |        7 个工具 | 成功后清空重复调用登记，允许重新读取同一目标。                       | `data_analysis/runtime/repeat_guard.py` |
 
 ### 3）知识库切分参数
 
@@ -626,12 +625,13 @@ Loop 只决定「调什么」；Harness 负责「能不能调、在哪调、失�
 | `chunkSize`                            | `800` 字符 | 前端设定的目标分块大小；当前仅参与前端分块数量估算。             | `web/src/App.tsx`                             |
 | `overlap`                              | `100` 字符 | 前端设定的相邻分块重叠长度；当前仅参与前端分块数量估算。         | `web/src/App.tsx`                             |
 | `windowSize` / `DEFAULT_WINDOW_SIZE` |     `5` 句 | 实际传给后端的句子窗口大小，控制每个知识节点包含的相邻句子范围。 | `web/src/App.tsx`、`KnowledgeBase/chunk.py` |
+
 ### 4）Agent 决策循环参数
 
-| 参数 | 当前值 | 含义 | 设置脚本 |
-| ---- | -----: | ---- | -------- |
-| `max_iterations` | `160` | **整轮 run 共享**的决策轮数上限（全部 Todo 的内部 ReAct + 最终汇总之和）；每执行一次工具并记录 Observation 消耗一轮，达到上限仍未返回 `finish` 时抛出 `IterationLimitError`。共享计数器位于 `AgentState.run_budget`，各 Todo 状态按引用共享。 | `server/main.py`（`AGENT_MAX_DECISIONS`）；`data_analysis/agent/loop.py` 中的 `50` 仅为未显式传参时的默认值。 |
-| `decision_retries` | `5` | 单轮决策中，模型输出无法解析、结构不合法或工具名无效时允许的纠错重试次数；首次请求不计入重试，因此单轮最多调用模型 6 次。工具执行报错不使用此重试，而是形成 Observation 并进入下一轮。 | `server/main.py`（正式运行实例化参数）；`data_analysis/agent/loop.py` 定义默认值及重试逻辑。 |
+| 参数                 |  当前值 | 含义                                                                                                                                                                                                                                                      | 设置脚本                                                                                                              |
+| -------------------- | ------: | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `max_iterations`   | `160` | **整轮 run 共享**的决策轮数上限（全部 Todo 的内部 ReAct + 最终汇总之和）；每执行一次工具并记录 Observation 消耗一轮，达到上限仍未返回 `finish` 时抛出 `IterationLimitError`。共享计数器位于 `AgentState.run_budget`，各 Todo 状态按引用共享。 | `server/main.py`（`AGENT_MAX_DECISIONS`）；`data_analysis/agent/loop.py` 中的 `50` 仅为未显式传参时的默认值。 |
+| `decision_retries` |   `5` | 单轮决策中，模型输出无法解析、结构不合法或工具名无效时允许的纠错重试次数；首次请求不计入重试，因此单轮最多调用模型 6 次。工具执行报错不使用此重试，而是形成 Observation 并进入下一轮。                                                                    | `server/main.py`（正式运行实例化参数）；`data_analysis/agent/loop.py` 定义默认值及重试逻辑。                      |
 
 ### 5）模型/API 参数
 
@@ -664,31 +664,55 @@ Loop 只决定「调什么」；Harness 负责「能不能调、在哪调、失�
 
 ### 8）项目读取范围参数
 
-| 参数                              |         当前值 | 含义                                            | 设置脚本                         |
-| --------------------------------- | -------------: | ----------------------------------------------- | -------------------------------- |
-| `MAX_PROJECT_CONTEXT_CHARS`     | `60000` 字符 | 注入 Agent 系统上下文的项目说明文本最大总长度。 | `server/project_workspaces.py` |
-| `FILE_TREE_MAX_DEPTH`           |       `5` 层 | 自动扫描项目目录树时允许遍历的最大深度。        | `server/project_workspaces.py` |
-| `FILE_TREE_MAX_ENTRIES_PER_DIR` |        `400` | 单个目录最多收集的文件和子目录数量。            | `server/project_workspaces.py` |
-| `FILE_TREE_MAX_TOTAL_NODES`     |       `3000` | 一次目录树扫描允许收集的最大节点总数。          | `server/project_workspaces.py` |
+| 参数                              |         当前值 | 含义                                            | 设置脚本                                   |
+| --------------------------------- | -------------: | ----------------------------------------------- | ------------------------------------------ |
+| `MAX_PROJECT_CONTEXT_CHARS`     | `60000` 字符 | 注入 Agent 系统上下文的项目说明文本最大总长度。 | `server/project_workspaces.py`           |
+| `FILE_TREE_MAX_DEPTH`           |       `5` 层 | 自动扫描项目目录树时允许遍历的最大深度。        | `server/project_workspaces.py`           |
+| `FILE_TREE_MAX_ENTRIES_PER_DIR` |        `400` | 单个目录最多收集的文件和子目录数量。            | `server/project_workspaces.py`           |
+| `FILE_TREE_MAX_TOTAL_NODES`     |       `3000` | 一次目录树扫描允许收集的最大节点总数。          | `server/project_workspaces.py`           |
 | `MAX_WORKSPACE_READ_LINES`      |       `2000` | 单次项目文件读取允许返回的最大完整行数。        | `data_analysis/tools/workspace_tools.py` |
-| `MAX_WORKSPACE_READ_BYTES`      |     `50 KB` | 单次项目文件读取允许返回的最大完整行字节数。    | `data_analysis/tools/workspace_tools.py` |
+| `MAX_WORKSPACE_READ_BYTES`      |      `50 KB` | 单次项目文件读取允许返回的最大完整行字节数。    | `data_analysis/tools/workspace_tools.py` |
 
 ### 9）安全与体量限制参数
 
-| 参数                             |          当前值 | 含义                                                   | 设置脚本                                      |
-| -------------------------------- | --------------: | ------------------------------------------------------ | --------------------------------------------- |
-| `MAX_AGENT_ATTACHMENTS`        |          `10` | 单条 Agent 请求允许上传的最大附件数量。                | `server/main.py`                            |
-| `MAX_AGENT_ATTACHMENT_BYTES`   |      `100 MB` | 单个 Agent 附件允许的最大文件体积。                    | `server/main.py`                            |
-| `AGENT_RUNTIME_MAX_AGE_SECONDS`|      `24 小时` | 服务启动时可清理的遗留附件运行目录最小年龄。           | `server/main.py`                            |
-| `MAX_AGENT_PREVIEW_TEXT_BYTES` |       `20 MB` | 生成文本附件预览时允许读取的最大字节数。               | `server/main.py`                            |
-| `MAX_AGENT_PREVIEW_ROWS`       |      `200` 行 | 表格、文档预览允许读取的最大行数。                     | `server/main.py`                            |
-| `MAX_AGENT_PREVIEW_COLUMNS`    |       `40` 列 | 表格预览允许读取的最大列数。                           | `server/main.py`                            |
-| `MAX_AGENT_PREVIEW_SHEETS`     |        `8` 个 | 工作簿预览允许读取的最大工作表数量。                   | `server/main.py`                            |
-| `MAX_WORKSPACE_FILE_BYTES`     | `500000` 字节 | 工作区搜索与项目文件编辑允许处理的单文件体积上限。     | `data_analysis/tools/workspace_tools.py`、`data_analysis/tools/project_edit_tools.py` |
-| `MAX_ATTACHMENT_READ_CHARS`    |  `80000` 字符 | 附件内容通过工具注入当前上下文时允许返回的最大字符数。 | `data_analysis/tools/attachment_tools.py`   |
-| `MAX_TERMINAL_OUTPUT_LINES`    |     `2000` 行 | 终端合并输出返回给 Agent 的最大尾部行数。              | `data_analysis/tools/terminal_tools.py`     |
-| `MAX_TERMINAL_OUTPUT_BYTES`    |      `50 KB` | 终端合并输出返回给 Agent 的最大尾部字节数。            | `data_analysis/tools/terminal_tools.py`     |
-| `MAX_ARCHIVE_FILES`            |         `500` | 单个压缩包允许解压的最大文件数量。                     | `KnowledgeBase/upload_file.py`              |
-| `MAX_ARCHIVE_BYTES`            |      `500 MB` | 单个压缩包解压后的文件总体积上限。                     | `KnowledgeBase/upload_file.py`              |
-| `MAX_SINGLE_FILE_BYTES`        |      `200 MB` | 压缩包内单个文件允许的最大体积。                       | `KnowledgeBase/upload_file.py`              |
+| 参数                              |          当前值 | 含义                                                   | 设置脚本                                                                                  |
+| --------------------------------- | --------------: | ------------------------------------------------------ | ----------------------------------------------------------------------------------------- |
+| `MAX_AGENT_ATTACHMENTS`         |          `10` | 单条 Agent 请求允许上传的最大附件数量。                | `server/main.py`                                                                        |
+| `MAX_AGENT_ATTACHMENT_BYTES`    |      `100 MB` | 单个 Agent 附件允许的最大文件体积。                    | `server/main.py`                                                                        |
+| `AGENT_RUNTIME_MAX_AGE_SECONDS` |     `24 小时` | 服务启动时可清理的遗留附件运行目录最小年龄。           | `server/main.py`                                                                        |
+| `MAX_AGENT_PREVIEW_TEXT_BYTES`  |       `20 MB` | 生成文本附件预览时允许读取的最大字节数。               | `server/main.py`                                                                        |
+| `MAX_AGENT_PREVIEW_ROWS`        |      `200` 行 | 表格、文档预览允许读取的最大行数。                     | `server/main.py`                                                                        |
+| `MAX_AGENT_PREVIEW_COLUMNS`     |       `40` 列 | 表格预览允许读取的最大列数。                           | `server/main.py`                                                                        |
+| `MAX_AGENT_PREVIEW_SHEETS`      |        `8` 个 | 工作簿预览允许读取的最大工作表数量。                   | `server/main.py`                                                                        |
+| `MAX_WORKSPACE_FILE_BYTES`      | `500000` 字节 | 工作区搜索与项目文件编辑允许处理的单文件体积上限。     | `data_analysis/tools/workspace_tools.py`、`data_analysis/tools/project_edit_tools.py` |
+| `MAX_ATTACHMENT_READ_CHARS`     |  `80000` 字符 | 附件内容通过工具注入当前上下文时允许返回的最大字符数。 | `data_analysis/tools/attachment_tools.py`                                               |
+| `MAX_TERMINAL_OUTPUT_LINES`     |     `2000` 行 | 终端合并输出返回给 Agent 的最大尾部行数。              | `data_analysis/tools/terminal_tools.py`                                                 |
+| `MAX_TERMINAL_OUTPUT_BYTES`     |       `50 KB` | 终端合并输出返回给 Agent 的最大尾部字节数。            | `data_analysis/tools/terminal_tools.py`                                                 |
+| `MAX_ARCHIVE_FILES`             |         `500` | 单个压缩包允许解压的最大文件数量。                     | `KnowledgeBase/upload_file.py`                                                          |
+| `MAX_ARCHIVE_BYTES`             |      `500 MB` | 单个压缩包解压后的文件总体积上限。                     | `KnowledgeBase/upload_file.py`                                                          |
+| `MAX_SINGLE_FILE_BYTES`         |      `200 MB` | 压缩包内单个文件允许的最大体积。                       | `KnowledgeBase/upload_file.py`                                                          |
 
+# 8.Skills 加载能力
+
+### 1) Skills 的一般化结构
+
+**ab-testing/**
+├── **SKILL.md**
+├── **references/**
+│   ├── statistics.md
+│   └── metrics.md
+├── **scripts/**
+│   └── check_srm.py
+└── **assets/**
+    └── report_template.md
+
+### 2)不同内容这么加载
+
+* **SKILL.md**：将 Markdown 内容加入 LLM 上下文。
+* **assets**、references：**需要时读取参考资料或模板。
+* **scripts**：**通过工具运行代码，将执行结果返回 LLM。
+* 需要在**SKILL.md**中告诉 Agent 哪些资源可用，以及何时使用。
+
+完整加载过程：
+
+![1791441129751](image/Project/1791441129751.png)

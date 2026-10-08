@@ -23,6 +23,7 @@ from pydantic import (
 )
 
 from ..tools.registry import ToolSpec
+from ..skills.models import SkillAction, SkillContext
 from ..cancellation import invoke_cancellable, raise_if_cancelled
 from .state import clip_text, summarize_tool_payload
 
@@ -66,6 +67,8 @@ class AgentStateView(Protocol):
     memory_summary: str | None
     messages: Sequence[Any]
     observations: Sequence[Any]
+    skill_context: SkillContext
+    skill_observations: Sequence[Any]
     data_paths: Sequence[str]
     available_artifacts: Sequence[Any]
     workspace_root: str | None
@@ -134,7 +137,7 @@ class Finish(BaseModel):
         return True
 
 
-Decision: TypeAlias = Action | Finish
+Decision: TypeAlias = Action | SkillAction | Finish
 _DECISION_ADAPTER = TypeAdapter(Decision)
 
 
@@ -285,6 +288,17 @@ class AgentLoop:
             "没有可用工具时只能输出 finish。answer 中的换行必须按 JSON 规则转义。"
             "answer 中出现的双引号也必须转义。"
         )
+        skill_context = getattr(state, "skill_context", SkillContext())
+        if skill_context.active_skills:
+            protocol += (
+                "\n\n本轮还启用了 Skill。需要 Skill 资料、资产或脚本时输出："
+                '{"type":"skill_action","thought":"公开判断摘要",'
+                '"operation":"read_reference|read_asset|materialize_asset|run_script",'
+                '"skill_id":"已启用 Skill 标识","resource_id":"资源标识或 null",'
+                '"entrypoint_id":"脚本入口标识或 null","arguments":{}}。'
+                "只能使用 active_skills 中公开的稳定标识；不得用普通工具或终端绕过 "
+                "SkillRuntime 直接读取或执行 Skill 文件。"
+            )
         messages: list[tuple[str, str]] = [
             ("system", f"{self._system_prompt}{protocol}")
         ]
@@ -329,6 +343,10 @@ class AgentLoop:
             "project_id": getattr(state, "project_id", None),
             "workspace_enabled": bool(getattr(state, "workspace_root", None)),
             "observations": _project_observations(state.observations),
+            "skill_observations": _project_observations(
+                getattr(state, "skill_observations", ())
+            ),
+            "active_skills": _active_skills_view(skill_context),
         }
         trajectory = _trajectory_view(state)
         if trajectory is not None:
@@ -358,6 +376,35 @@ def _trajectory_view(state: AgentStateView) -> dict[str, list[str]] | None:
         max_failures=REACT_TRAJECTORY_FAILURES,
         max_item_chars=REACT_TRAJECTORY_ITEM_CHARS,
     )
+
+
+def _active_skills_view(context: SkillContext) -> list[dict[str, Any]]:
+    """只注入 Skill 正文与资源索引，不注入资源内容或脚本源码。"""
+    return [
+        {
+            "skill_id": active.metadata.skill_id,
+            "name": active.metadata.name,
+            "description": active.metadata.description,
+            "instructions": active.instructions,
+            "references": [
+                {"id": item.resource_id, "description": item.description}
+                for item in active.metadata.references
+            ],
+            "assets": [
+                {
+                    "id": item.resource_id,
+                    "description": item.description,
+                    "media_type": item.media_type,
+                }
+                for item in active.metadata.assets
+            ],
+            "scripts": [
+                {"id": item.entrypoint_id, "description": item.description}
+                for item in active.metadata.scripts
+            ],
+        }
+        for active in context.active_skills
+    ]
 
 
 def _project_observations(observations: Sequence[Any]) -> dict[str, Any]:
@@ -633,7 +680,7 @@ def _extract_decision_payload(text: str) -> Any:
                 continue
             if (
                 isinstance(candidate, dict)
-                and candidate.get("type") in {"action", "finish"}
+                and candidate.get("type") in {"action", "skill_action", "finish"}
             ):
                 candidates.append(candidate)
         if len(candidates) == 1:

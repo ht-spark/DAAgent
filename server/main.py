@@ -43,6 +43,13 @@ from data_analysis.agent.state import (
     collect_work_trajectory_from_session,
     discover_artifacts,
 )
+from data_analysis.skills import (
+    SkillAction,
+    SkillObservation,
+    SkillRegistry,
+    SkillRegistryError,
+    SkillRuntime,
+)
 from data_analysis.context import (
     AttachmentText,
     compile_attachment_context,
@@ -132,6 +139,7 @@ from server.schemas import (
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 ARTIFACTS_ROOT = PROJECT_ROOT / "artifacts"
 AGENT_RUNTIME_ROOT = PROJECT_ROOT / ".runtime" / "agent_uploads"
+SKILLS_ROOT = PROJECT_ROOT / "data_analysis" / "skills"
 # 启动时只清理超过 24 小时的附件运行目录，避免误删另一个仍在运行的服务实例。
 AGENT_RUNTIME_MAX_AGE_SECONDS = 24 * 60 * 60
 WEB_DIST = PROJECT_ROOT / "web" / "dist"
@@ -141,6 +149,7 @@ AGENT_RUN_TIMEOUT_SECONDS = 3 * 60 * 60           # Agent 整轮运行硬超时�
 AGENT_MAX_DECISIONS = 160                         # 整轮运行共享的决策轮数上限（含全部 Todo 与最终汇总）
 AGENT_COMMAND_APPROVAL_TIMEOUT_SECONDS = 300      # 单次终端命令等待人工批准的上限
 _pending_agent_commands: dict[str, asyncio.Future[bool]] = {}
+_skill_registry = SkillRegistry(SKILLS_ROOT)
 
 
 @dataclass
@@ -1240,7 +1249,7 @@ def _final_answer_chunks(answer: str) -> list[str]:
 
 
 def _agent_event_payload(
-    event: Action | Observation | Finish | PlanCreated | TodoStarted | TodoCompleted | TodoFailed,
+    event: Action | SkillAction | Observation | SkillObservation | Finish | PlanCreated | TodoStarted | TodoCompleted | TodoFailed,
 ) -> dict[str, object]:
     """把内部 Agent 事件转换为可公开展示的精简载荷。"""
     if isinstance(event, PlanCreated):
@@ -1309,6 +1318,29 @@ def _agent_event_payload(
         if event.tool_name == "execute_python" and isinstance(code, str):
             payload["code"] = code
         return payload
+    if isinstance(event, SkillAction):
+        payload = {
+            "type": "agent_skill_action",
+            "thought": event.thought,
+            "operation": event.operation,
+            "skill_id": event.skill_id,
+            "resource_id": event.resource_id,
+            "entrypoint_id": event.entrypoint_id,
+        }
+        if event.reasoning.strip():
+            payload["model_reasoning"] = event.reasoning
+        return payload
+    if isinstance(event, SkillObservation):
+        return {
+            "type": "agent_skill_observation",
+            "operation": event.operation,
+            "skill_id": event.skill_id,
+            "resource_id": event.resource_id,
+            "entrypoint_id": event.entrypoint_id,
+            "success": event.success,
+            "duration_ms": event.duration_ms,
+            "error": event.error,
+        }
     result_summary = None
     if isinstance(event.result, dict) and isinstance(event.result.get("summary"), dict):
         result_summary = event.result["summary"]
@@ -1710,6 +1742,43 @@ async def decide_agent_command_endpoint(
     return {"accepted": True}
 
 
+@app.get("/api/skills")
+async def list_skills_endpoint() -> dict[str, object]:
+    """返回已安装 Skill 的发现阶段元数据。"""
+    try:
+        skills = await asyncio.to_thread(_skill_registry.discover)
+    except SkillRegistryError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"skills": [item.model_dump(mode="json") for item in skills]}
+
+
+@app.post("/api/skills/import")
+async def import_skill_endpoint(file: UploadFile = File(...)) -> dict[str, object]:
+    """从用户选择的 ZIP 包安装或更新一个 Skill。"""
+    if not file.filename or not file.filename.casefold().endswith(".zip"):
+        raise HTTPException(status_code=400, detail="仅支持上传 .zip Skill 包")
+    payload = await file.read()
+    try:
+        metadata = await asyncio.to_thread(_skill_registry.install_archive, payload)
+    except SkillRegistryError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return metadata.model_dump(mode="json")
+
+
+@app.get("/api/skills/{skill_id}/export")
+async def export_skill_endpoint(skill_id: str) -> Response:
+    """下载一个已安装 Skill 的 ZIP 包。"""
+    try:
+        payload = await asyncio.to_thread(_skill_registry.export_archive, skill_id)
+    except SkillRegistryError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return Response(
+        content=payload,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{skill_id}.zip"'},
+    )
+
+
 @app.post("/api/agent/chat/stream")
 @app.post("/api/agent/profile/stream", include_in_schema=False)
 async def agent_profile_stream_endpoint(
@@ -1720,6 +1789,7 @@ async def agent_profile_stream_endpoint(
     config_id: str | None = Form(None),
     knowledge_base_id: str | None = Form(None),
     knowledge_base_ids: list[str] | None = Form(None),
+    skill_ids: list[str] | None = Form(None),
     project_id: str | None = Form(None),
 ) -> StreamingResponse:
     """启动自主决策 Agent，并流式返回回答及工具运行轨迹。"""
@@ -1746,6 +1816,12 @@ async def agent_profile_stream_endpoint(
     except KnowledgeBaseCatalogError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     selected_base_ids = [base.id for base in bases]
+    try:
+        skill_context = await asyncio.to_thread(
+            _skill_registry.load_selected, skill_ids or []
+        )
+    except SkillRegistryError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     run_id = uuid.uuid4().hex
 
     if any(
@@ -1860,6 +1936,7 @@ async def agent_profile_stream_endpoint(
             project_id=str(project["id"]) if project else None,
             messages=history,
             work_trajectory=prior_trajectory,
+            skill_context=skill_context,
         )
         system_prompt = _load_agent_system_prompt(workspace_root)
         if workspace_root is not None and python_environment.source == "host":
@@ -1892,6 +1969,7 @@ async def agent_profile_stream_endpoint(
     )
     planner = Planner(llm, registry.specs(), cancel_check=_agent_cancel_check)
     approved_terminal_actions: set[int] = set()
+    approved_skill_actions: set[int] = set()
 
     def consume_terminal_approval(action: Action) -> bool:
         """只允许已批准的同一次终端调用执行一次。"""
@@ -1901,10 +1979,19 @@ async def agent_profile_stream_endpoint(
         approved_terminal_actions.remove(key)
         return True
 
+    def consume_skill_approval(action: SkillAction) -> bool:
+        """只允许已批准的同一次 Skill 脚本调用执行一次。"""
+        key = id(action)
+        if key not in approved_skill_actions:
+            return False
+        approved_skill_actions.remove(key)
+        return True
+
     execution_context = ExecutionContext(
         output_dir=output_dir,
         workspace_root=workspace_root,
         python_environment=python_environment,
+        authorized_paths=[Path(path) for path in state.data_paths],
     )
     harness = Harness(
         registry,
@@ -1914,6 +2001,16 @@ async def agent_profile_stream_endpoint(
         ),
         terminal_approval=consume_terminal_approval,
         execution_context=execution_context,
+        cancel_check=_agent_cancel_check,
+    )
+    skill_runtime = SkillRuntime(
+        _skill_registry,
+        skill_context,
+        output_dir=output_dir,
+        data_paths=state.data_paths,
+        python_executable=python_environment.executable,
+        approval=consume_skill_approval,
+        on_asset_materialized=execution_context.register_skill_asset,
         cancel_check=_agent_cancel_check,
     )
     _agent_chat_runs[run_id] = chat_run
@@ -1926,12 +2023,19 @@ async def agent_profile_stream_endpoint(
             "message": message,
             "files": [path.name for path in data_paths],
             "knowledge_base_ids": selected_base_ids,
+            "skill_ids": list(skill_context.active_ids),
         }
         trace: list[dict[str, object]] = [started_event]
         yield json.dumps(started_event, ensure_ascii=False) + "\n"
         answer = ""
         knowledge_sources: list[dict[str, str]] = []
-        iterator = iter_plan_graph(state, planner, loop, harness)
+        iterator = iter_plan_graph(
+            state,
+            planner,
+            loop,
+            harness,
+            skill_runtime=skill_runtime,
+        )
 
         async def save_stopped_run(content: str) -> str:
             """保存未完成结果，使任务切换后仍能在历史对话中看到。"""
@@ -2029,6 +2133,44 @@ async def agent_profile_stream_endpoint(
                             return
                         if approved:
                             approved_terminal_actions.add(id(event))
+                        decision_payload = {
+                            "type": "agent_command_approval_decision",
+                            "approval_id": approval_id,
+                            "approved": approved,
+                        }
+                        trace.append(decision_payload)
+                        yield json.dumps(decision_payload, ensure_ascii=False) + "\n"
+                        continue
+                    if isinstance(event, SkillAction) and skill_runtime.requires_approval(event):
+                        approval_id = uuid.uuid4().hex
+                        decision = asyncio.get_running_loop().create_future()
+                        _pending_agent_commands[approval_id] = decision
+                        chat_run.approval_id = approval_id
+                        request_payload = {
+                            "type": "agent_command_approval_required",
+                            "approval_id": approval_id,
+                            "command": (
+                                f"运行 Skill 脚本：{event.skill_id}/"
+                                f"{event.entrypoint_id or ''}"
+                            ),
+                            "shell": terminal_shell,
+                            "timeout_seconds": None,
+                            "workspace_root": str(workspace_root or PROJECT_ROOT),
+                        }
+                        trace.append(request_payload)
+                        yield json.dumps(payload, ensure_ascii=False) + "\n"
+                        yield json.dumps(request_payload, ensure_ascii=False) + "\n"
+                        try:
+                            approved = await asyncio.wait_for(
+                                decision, AGENT_COMMAND_APPROVAL_TIMEOUT_SECONDS,
+                            )
+                        except TimeoutError:
+                            approved = False
+                        finally:
+                            _pending_agent_commands.pop(approval_id, None)
+                            chat_run.approval_id = None
+                        if approved:
+                            approved_skill_actions.add(id(event))
                         decision_payload = {
                             "type": "agent_command_approval_decision",
                             "approval_id": approval_id,

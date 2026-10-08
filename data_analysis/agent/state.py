@@ -17,6 +17,8 @@ from pydantic import (
     model_validator,
 )
 
+from ..skills.models import SkillContext, SkillObservation
+
 
 class TodoItem(BaseModel):
     """顶层执行计划中的一个可独立完成的任务。"""
@@ -703,6 +705,8 @@ class AgentState(BaseModel):
     available_artifacts: list[ArtifactReference] = Field(default_factory=list)
     messages: list[AgentMessage] = Field(default_factory=list)
     observations: list[Observation] = Field(default_factory=list)
+    skill_context: SkillContext = Field(default_factory=SkillContext)
+    skill_observations: list[SkillObservation] = Field(default_factory=list)
     iteration: int = Field(default=0, ge=0)
     analysis_plan: AnalysisPlan | None = None
     current_todo_id: str | None = None
@@ -792,6 +796,46 @@ class AgentState(BaseModel):
         if not observation.success or self.output_dir is None:
             return
         for artifact in _observation_artifacts(observation, self.output_dir):
+            self.work_trajectory.add_modified(artifact.relative_path)
+            self._upsert_artifact(artifact)
+
+    def record_skill_observation(self, observation: SkillObservation) -> None:
+        """记录 Skill 观察，并与普通工具共同消耗决策预算。"""
+        self.skill_observations.append(observation)
+        self.absorb_skill_observation(observation)
+        self.iteration += 1
+        self.run_budget.iterations += 1
+
+    def absorb_skill_observation(self, observation: SkillObservation) -> None:
+        """把 Skill 操作摘要加入跨 Todo 工作轨迹。"""
+        target = observation.resource_id or observation.entrypoint_id or observation.operation
+        if observation.success:
+            self.work_trajectory.add_note(
+                f"Skill {observation.skill_id} 已执行 {observation.operation}: {target}"
+            )
+        else:
+            self.work_trajectory.add_failure(
+                f"Skill {observation.skill_id} 的 {observation.operation} 失败: "
+                f"{observation.error or '未知错误'}"
+            )
+        if not observation.success or self.output_dir is None:
+            return
+        if not isinstance(observation.result, Mapping):
+            return
+        raw_artifacts = observation.result.get("artifacts")
+        if not isinstance(raw_artifacts, list):
+            return
+        for raw_path in raw_artifacts:
+            if not isinstance(raw_path, str):
+                continue
+            try:
+                artifact = _artifact_reference(
+                    Path(self.output_dir).resolve(strict=False),
+                    raw_path,
+                    source_tool=f"skill:{observation.skill_id}:{observation.operation}",
+                )
+            except (OSError, ValueError):
+                continue
             self.work_trajectory.add_modified(artifact.relative_path)
             self._upsert_artifact(artifact)
 

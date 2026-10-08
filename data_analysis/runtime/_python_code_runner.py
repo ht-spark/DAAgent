@@ -100,6 +100,7 @@ def main() -> int:
             "DATA_FILE_MAP": {Path(path).name: path for path in data_files},
             "OUTPUT_DIR": str(output_dir),
             "WORKSPACE_DIR": request.get("workspace_root"),
+            "SKILL_ASSETS": request.get("skill_assets", {}),
             "ARTIFACTS": artifacts,
             "result": None,
         }

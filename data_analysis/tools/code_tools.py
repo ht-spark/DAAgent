@@ -7,7 +7,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import Sequence
+from typing import Mapping, Sequence
 
 from pydantic import JsonValue
 
@@ -33,6 +33,7 @@ def execute_python_code(
     environment_source: str = "host",
     environment_name: str = "MMAgent",
     expected_artifacts: Sequence[str] = (),
+    skill_assets: Mapping[str, str] | None = None,
 ) -> dict[str, JsonValue]:
     """执行模型生成的 Python 代码并收集观察结果。
 
@@ -49,6 +50,7 @@ def execute_python_code(
         environment_source: 环境来源，用于向 Agent 报告。
         environment_name: 环境显示名称，用于向 Agent 报告。
         expected_artifacts: 本次代码承诺创建或更新的相对产物路径。
+        skill_assets: 已由 SkillRuntime 物化并授权的资产标识到路径映射。
 
     Returns:
         标准输出、标准错误、结构化结果及当前产物清单。
@@ -82,6 +84,7 @@ def execute_python_code(
         "data_files": [str(path) for path in resolved_paths],
         "output_dir": str(target_dir),
         "workspace_root": resolved_workspace,
+        "skill_assets": dict(skill_assets or {}),
     }
     try:
         completed = subprocess.run(

@@ -166,6 +166,8 @@ class Planner:
             messages=list(state.messages),
             work_trajectory=state.work_trajectory.model_copy(deep=True),
             run_budget=state.run_budget,
+            skill_context=state.skill_context,
+            skill_observations=list(state.skill_observations),
         )
         recovery = self.create_plan(recovery_state, allow_direct=False)
         if isinstance(recovery, Finish):  # pragma: no cover - allow_direct=False 已拦截
@@ -212,6 +214,26 @@ class Planner:
             "session_memory": state.memory_summary,
             "recent_conversation": _recent_conversation(state),
             "work_trajectory": trajectory_view,
+            "active_skills": [
+                {
+                    "skill_id": active.metadata.skill_id,
+                    "description": active.metadata.description,
+                    "instructions": active.instructions,
+                    "references": [
+                        {"id": item.resource_id, "description": item.description}
+                        for item in active.metadata.references
+                    ],
+                    "assets": [
+                        {"id": item.resource_id, "description": item.description}
+                        for item in active.metadata.assets
+                    ],
+                    "scripts": [
+                        {"id": item.entrypoint_id, "description": item.description}
+                        for item in active.metadata.scripts
+                    ],
+                }
+                for active in state.skill_context.active_skills
+            ],
         }
         prompt = _render_planner_prompt(context, self._max_todos)
         return [

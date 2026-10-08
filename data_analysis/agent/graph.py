@@ -10,6 +10,8 @@ from pydantic import BaseModel, ConfigDict
 from .loop import Action, AgentLoop, Finish
 from .planner import Planner
 from .state import AgentState, AnalysisPlan, Observation, TodoItem, clip_text
+from ..skills.models import SkillAction, SkillObservation
+from ..skills.runtime import SkillRuntime
 from ..runtime.failure_tracker import (
     FailureTracker,
     RepeatedToolFailureError,
@@ -30,7 +32,7 @@ __all__ = [
     "run_plan_graph",
 ]
 
-GraphEvent = Action | Observation | Finish
+GraphEvent = Action | SkillAction | Observation | SkillObservation | Finish
 
 # Todo 结果进入后续 prompt 的字符预算，避免长回答被反复整段复制
 MAX_RESULT_SUMMARY_CHARS = 2_000          # 单个 Todo 结果摘要的字符上限
@@ -75,6 +77,7 @@ def iter_graph(
     state: AgentState,
     loop: AgentLoop,
     harness: Harness,
+    skill_runtime: SkillRuntime | None = None,
 ) -> Iterator[GraphEvent]:
     """逐事件运行思考、执行、观察循环。
 
@@ -94,6 +97,7 @@ def iter_graph(
     """
     failures = FailureTracker()
     repeats = RepeatGuard()
+    skill_repeats: set[str] = set()
     while True:
         decision = loop.step(state)
         if isinstance(decision, Finish):
@@ -103,18 +107,24 @@ def iter_graph(
             return
 
         yield decision
-        observation = _execute_once(decision, harness, repeats)
-        state.record_observation(observation)
+        if isinstance(decision, SkillAction):
+            observation = _execute_skill_once(decision, skill_runtime, skill_repeats)
+            state.record_skill_observation(observation)
+        else:
+            observation = _execute_once(decision, harness, repeats)
+            state.record_observation(observation)
         yield observation
-        circuit = failures.record(decision, observation)
-        if circuit is not None:
-            raise RepeatedToolFailureError(_failure_summary(circuit))
+        if isinstance(decision, Action) and isinstance(observation, Observation):
+            circuit = failures.record(decision, observation)
+            if circuit is not None:
+                raise RepeatedToolFailureError(_failure_summary(circuit))
 
 
 def run_graph(
     state: AgentState,
     loop: AgentLoop,
     harness: Harness,
+    skill_runtime: SkillRuntime | None = None,
 ) -> Finish:
     """运行思考—执行—观察循环，直到 Agent 返回最终回答。
 
@@ -132,7 +142,7 @@ def run_graph(
     Raises:
         AgentLoopError: LLM 决策无效或超过最大迭代次数。
     """
-    for event in iter_graph(state, loop, harness):
+    for event in iter_graph(state, loop, harness, skill_runtime):
         if isinstance(event, Finish):
             return event
     raise RuntimeError("Agent 图未产生最终回答")
@@ -144,6 +154,7 @@ def iter_plan_graph(
     loop: AgentLoop,
     harness: Harness,
     *,
+    skill_runtime: SkillRuntime | None = None,
     failure_threshold: int = 3,
     max_replans: int = 2,
     max_todo_steps: int = 30,
@@ -183,6 +194,7 @@ def iter_plan_graph(
         todo_state = _todo_state(state, todo)
         failures = FailureTracker(threshold=failure_threshold)
         repeats = RepeatGuard()
+        skill_repeats: set[str] = set()
         failure_summary: str | None = None
         while True:
             if todo_state.iteration >= max_todo_steps:
@@ -203,11 +215,18 @@ def iter_plan_graph(
                 )
                 break
             yield decision
-            observation = _execute_once(decision, harness, repeats)
-            todo_state.record_observation(observation)
-            # 运行级状态只聚合产物与轨迹，不重复留存结果、也不重复计入预算
-            state.absorb_observation(observation)
+            if isinstance(decision, SkillAction):
+                observation = _execute_skill_once(decision, skill_runtime, skill_repeats)
+                todo_state.record_skill_observation(observation)
+                state.absorb_skill_observation(observation)
+            else:
+                observation = _execute_once(decision, harness, repeats)
+                todo_state.record_observation(observation)
+                # 运行级状态只聚合产物与轨迹，不重复留存结果、也不重复计入预算
+                state.absorb_observation(observation)
             yield observation
+            if isinstance(decision, SkillAction):
+                continue
             circuit = failures.record(decision, observation)
             if circuit is None:
                 continue
@@ -239,6 +258,7 @@ def iter_plan_graph(
     final_state = _final_state(state, plan)
     final_failures = FailureTracker(threshold=failure_threshold)
     final_repeats = RepeatGuard()
+    final_skill_repeats: set[str] = set()
     while True:
         decision = loop.step(final_state)
         if isinstance(decision, Finish):
@@ -247,13 +267,52 @@ def iter_plan_graph(
             yield decision
             return
         yield decision
-        observation = _execute_once(decision, harness, final_repeats)
-        final_state.record_observation(observation)
-        state.absorb_observation(observation)
+        if isinstance(decision, SkillAction):
+            observation = _execute_skill_once(decision, skill_runtime, final_skill_repeats)
+            final_state.record_skill_observation(observation)
+            state.absorb_skill_observation(observation)
+        else:
+            observation = _execute_once(decision, harness, final_repeats)
+            final_state.record_observation(observation)
+            state.absorb_observation(observation)
         yield observation
-        circuit = final_failures.record(decision, observation)
-        if circuit is not None:
-            raise RepeatedToolFailureError(_failure_summary(circuit))
+        if isinstance(decision, Action) and isinstance(observation, Observation):
+            circuit = final_failures.record(decision, observation)
+            if circuit is not None:
+                raise RepeatedToolFailureError(_failure_summary(circuit))
+
+
+def _execute_skill_once(
+    decision: SkillAction,
+    runtime: SkillRuntime | None,
+    fingerprints: set[str],
+) -> SkillObservation:
+    """执行一次 Skill 操作，并拦截同阶段内完全相同的重复请求。"""
+    fingerprint = json.dumps(
+        decision.model_dump(mode="json", exclude={"thought", "reasoning"}),
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    if fingerprint in fingerprints:
+        return SkillObservation(
+            operation=decision.operation,
+            skill_id=decision.skill_id,
+            resource_id=decision.resource_id,
+            entrypoint_id=decision.entrypoint_id,
+            success=False,
+            error="相同 Skill 操作已执行过，请复用已有结果或调整参数",
+        )
+    fingerprints.add(fingerprint)
+    if runtime is None:
+        return SkillObservation(
+            operation=decision.operation,
+            skill_id=decision.skill_id,
+            resource_id=decision.resource_id,
+            entrypoint_id=decision.entrypoint_id,
+            success=False,
+            error="当前运行未启用 SkillRuntime",
+        )
+    return runtime.execute(decision)
 
 
 def _execute_once(
@@ -294,9 +353,12 @@ def run_plan_graph(
     planner: Planner,
     loop: AgentLoop,
     harness: Harness,
+    skill_runtime: SkillRuntime | None = None,
 ) -> Finish:
     """运行 Plan-and-Execute，直到最终汇总回答产生。"""
-    for event in iter_plan_graph(state, planner, loop, harness):
+    for event in iter_plan_graph(
+        state, planner, loop, harness, skill_runtime=skill_runtime
+    ):
         if isinstance(event, Finish):
             return event
     raise RuntimeError("Plan-and-Execute 图未产生最终回答")
@@ -424,6 +486,8 @@ def _todo_state(state: AgentState, todo: TodoItem) -> AgentState:
         current_todo_id=todo.id,
         work_trajectory=state.work_trajectory.model_copy(deep=True),
         run_budget=state.run_budget,
+        skill_context=state.skill_context,
+        skill_observations=list(state.skill_observations),
     )
 
 
@@ -448,4 +512,6 @@ def _final_state(state: AgentState, plan: AnalysisPlan) -> AgentState:
         analysis_plan=plan,
         work_trajectory=state.work_trajectory.model_copy(deep=True),
         run_budget=state.run_budget,
+        skill_context=state.skill_context,
+        skill_observations=list(state.skill_observations),
     )

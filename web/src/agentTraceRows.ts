@@ -271,6 +271,28 @@ export function buildAgentTraceRows(
         pendingTool = tool
         break
       }
+      case 'agent_skill_action': {
+        const thought = (event.thought || event.model_reasoning || '').trim()
+        const thoughtRow = thinkingRow(`${id}-think`, thought, event.model_reasoning)
+        if (thoughtRow) rows.push(thoughtRow)
+        const labels = {
+          read_reference: '读取技能资料',
+          read_asset: '读取技能资产',
+          materialize_asset: '准备技能资产',
+          run_script: '运行技能脚本',
+        }
+        const target = event.resource_id || event.entrypoint_id || event.skill_id
+        const tool: AgentTraceRow = {
+          id,
+          icon: event.operation === 'run_script' ? 'terminal' : 'book',
+          action: labels[event.operation],
+          summary: `${event.skill_id} · ${target}`,
+          status: running ? 'running' : 'idle',
+        }
+        rows.push(tool)
+        pendingTool = tool
+        break
+      }
       case 'agent_reasoning': {
         const row = thinkingRow(id, event.summary, event.model_reasoning)
         if (row) rows.push(row)
@@ -317,6 +339,20 @@ export function buildAgentTraceRows(
             { label: '命令输出或文件差异', text: event.details.trim() },
           ]
           target.detailLabel = '查看本轮输出'
+        }
+        break
+      }
+      case 'agent_skill_observation': {
+        const target = pendingTool
+        pendingTool = null
+        if (!target) break
+        target.status = event.success ? 'success' : 'failed'
+        target.meta = [event.success ? '' : '失败', formatDuration(event.duration_ms)]
+          .filter(Boolean)
+          .join(' · ')
+        if (!event.success) {
+          target.details = [{ label: '错误信息', text: summarizeErrorDetail(event.error) }]
+          target.detailLabel = '查看失败原因'
         }
         break
       }

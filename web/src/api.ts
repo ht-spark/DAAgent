@@ -512,11 +512,61 @@ export type KnowledgeSourceCitation = {
   excerpt?: string
 }
 
+export type SkillResourceInfo = {
+  resource_id: string
+  path: string
+  description: string
+  media_type?: string | null
+}
+
+export type SkillScriptInfo = {
+  entrypoint_id: string
+  path: string
+  description: string
+  runtime: 'python'
+  timeout_seconds: number
+  requires_approval: boolean
+  read_data_files: boolean
+  read_assets: string[]
+  write_artifacts: boolean
+  network: boolean
+}
+
+export type SkillInfo = {
+  skill_id: string
+  name: string
+  description: string
+  bundle_hash: string
+  references: SkillResourceInfo[]
+  assets: SkillResourceInfo[]
+  scripts: SkillScriptInfo[]
+}
+
+export async function listSkills(): Promise<SkillInfo[]> {
+  const res = await fetch('/api/skills')
+  if (!res.ok) throw new Error(await extractDetail(res, '获取技能列表失败'))
+  const data = await res.json() as { skills?: SkillInfo[] }
+  return data.skills ?? []
+}
+
+export async function importSkill(file: File): Promise<SkillInfo> {
+  const form = new FormData()
+  form.append('file', file)
+  const res = await fetch('/api/skills/import', { method: 'POST', body: form })
+  if (!res.ok) throw new Error(await extractDetail(res, '导入技能失败'))
+  return res.json()
+}
+
+export function skillExportUrl(skillId: string): string {
+  return `/api/skills/${encodeURIComponent(skillId)}/export`
+}
+
 export type AgentTraceEvent = {
   type: 'agent_started'
   run_id: string
   files: string[]
   knowledge_base_ids?: string[]
+  skill_ids?: string[]
 } | {
   type: 'agent_plan'
   objective: string
@@ -565,6 +615,23 @@ export type AgentTraceEvent = {
   details?: string
   /** search_knowledge_base 命中的来源标注 */
   sources?: KnowledgeSourceCitation[]
+} | {
+  type: 'agent_skill_action'
+  thought: string
+  model_reasoning?: string
+  operation: 'read_reference' | 'read_asset' | 'materialize_asset' | 'run_script'
+  skill_id: string
+  resource_id?: string | null
+  entrypoint_id?: string | null
+} | {
+  type: 'agent_skill_observation'
+  operation: string
+  skill_id: string
+  resource_id?: string | null
+  entrypoint_id?: string | null
+  success: boolean
+  duration_ms: number
+  error?: string | null
 } | {
   type: 'agent_command_approval_required'
   approval_id: string
@@ -630,6 +697,7 @@ export async function streamDataAgentMessage(
   configId?: string | null,
   knowledgeBaseIds?: string[],
   projectId?: string | null,
+  skillIds?: string[],
   signal?: AbortSignal,
 ): Promise<void> {
   const form = new FormData()
@@ -638,6 +706,7 @@ export async function streamDataAgentMessage(
   if (discussionId) form.append('discussion_id', discussionId)
   if (configId) form.append('config_id', configId)
   knowledgeBaseIds?.forEach((id) => form.append('knowledge_base_ids', id))
+  skillIds?.forEach((id) => form.append('skill_ids', id))
   if (projectId) form.append('project_id', projectId)
   files.forEach((file) => form.append('files', file))
 
@@ -690,6 +759,7 @@ async function consumeAgentChatStream(res: Response, handlers: AgentChatHandlers
       if (event.type === 'agent_plan' || event.type === 'agent_todo_started'
         || event.type === 'agent_todo_completed' || event.type === 'agent_todo_failed' || event.type === 'agent_action'
         || event.type === 'agent_reasoning' || event.type === 'agent_observation'
+        || event.type === 'agent_skill_action' || event.type === 'agent_skill_observation'
         || event.type === 'agent_command_approval_required' || event.type === 'agent_command_approval_decision') {
         handlers.onTrace(event as AgentTraceEvent)
       }
