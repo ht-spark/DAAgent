@@ -561,6 +561,11 @@ export function skillExportUrl(skillId: string): string {
   return `/api/skills/${encodeURIComponent(skillId)}/export`
 }
 
+export async function deleteSkill(skillId: string): Promise<void> {
+  const res = await fetch(`/api/skills/${encodeURIComponent(skillId)}`, { method: 'DELETE' })
+  if (!res.ok) throw new Error(await extractDetail(res, '删除技能失败'))
+}
+
 export type AgentTraceEvent = {
   type: 'agent_started'
   run_id: string

@@ -272,6 +272,7 @@ export default function App() {
             discussionId={discussionId}
             projectId={activeProjectId}
             onDiscussionId={setDiscussionId}
+            onManageSkills={() => setSection('skills')}
           />
         )}
         {section === 'brainstorm' && brainstormView === 'knowledge-hub' && (

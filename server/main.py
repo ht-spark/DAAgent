@@ -1779,6 +1779,16 @@ async def export_skill_endpoint(skill_id: str) -> Response:
     )
 
 
+@app.delete("/api/skills/{skill_id}")
+async def delete_skill_endpoint(skill_id: str) -> dict[str, str]:
+    """卸载一个已安装 Skill，删除其在 data_analysis/skills 下的目录。"""
+    try:
+        await asyncio.to_thread(_skill_registry.uninstall, skill_id)
+    except SkillRegistryError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"removed": skill_id}
+
+
 @app.post("/api/agent/chat/stream")
 @app.post("/api/agent/profile/stream", include_in_schema=False)
 async def agent_profile_stream_endpoint(

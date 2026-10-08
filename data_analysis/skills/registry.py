@@ -149,6 +149,14 @@ class SkillRegistry:
                     archive.write(path, f"{metadata.skill_id}/{path.relative_to(directory).as_posix()}")
         return buffer.getvalue()
 
+    def uninstall(self, skill_id: str) -> None:
+        """删除一个已安装 Skill 的目录，供前端卸载使用。"""
+        directory = self._skill_directory(skill_id)
+        # 目录必须已经是一个合法 Skill，避免误删同名的空目录或普通文件
+        if not (directory / "SKILL.md").is_file():
+            raise SkillRegistryError(f"Skill 不存在: {skill_id}")
+        shutil.rmtree(directory)
+
     def _load_metadata(self, directory: Path) -> SkillMetadata:
         skill_file = directory / "SKILL.md"
         front_matter, _ = _parse_skill_markdown(skill_file)

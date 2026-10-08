@@ -170,3 +170,27 @@ def test_uploaded_skill_is_exportable_and_forces_script_approval(tmp_path: Path)
 
     assert metadata.scripts[0].requires_approval is True
     assert registry.export_archive("demo-skill").startswith(b"PK")
+
+
+def test_registry_uninstall_removes_skill_directory(tmp_path: Path) -> None:
+    """卸载应删除已安装目录，重复卸载同一 Skill 需要报错。"""
+    root = tmp_path / "skills"
+    _write_skill(root)
+    registry = SkillRegistry(root)
+
+    registry.uninstall("demo-skill")
+
+    assert registry.discover() == []
+    assert not (root / "demo-skill").exists()
+    with pytest.raises(SkillRegistryError, match="不存在"):
+        registry.uninstall("demo-skill")
+
+
+def test_registry_uninstall_rejects_illegal_identifier(tmp_path: Path) -> None:
+    """非法标识不得触发目录删除，避免越界删除其他路径。"""
+    root = tmp_path / "skills"
+    _write_skill(root)
+
+    with pytest.raises(SkillRegistryError, match="不合法"):
+        SkillRegistry(root).uninstall("../demo-skill")
+    assert (root / "demo-skill").is_dir()

@@ -8,6 +8,7 @@ import {
   fetchProjectFilePreview,
   fetchProjectFileTree,
   getKnowledgeBases,
+  importSkill,
   listSkills,
   openProjectFolder,
   projectFilePreviewUrl,
@@ -142,6 +143,22 @@ const CLIPBOARD_IMAGE_EXTENSIONS: Record<string, string> = {
   'image/jpeg': 'jpg',
   'image/png': 'png',
   'image/webp': 'webp',
+}
+
+/** 技能头像取色盘：与稿纸暖色主题协调的六种柔和底色 */
+const SKILL_AVATAR_COLORS = ['#5b6db4', '#4f9a90', '#b8892d', '#a45a78', '#6c8a5e', '#8c6bae']
+
+/** 取技能名首字符作为头像字母（英文名统一转大写） */
+function skillAvatarLabel(name: string, fallback: string): string {
+  const source = name.trim() || fallback.trim()
+  return source ? source.slice(0, 1).toUpperCase() : '·'
+}
+
+/** 按技能 ID 稳定取色，保证同一技能每次渲染得到相同的头像颜色 */
+function skillAvatarColor(skillId: string): string {
+  let hash = 0
+  for (const char of skillId) hash = (hash * 31 + (char.codePointAt(0) ?? 0)) % 9973
+  return SKILL_AVATAR_COLORS[hash % SKILL_AVATAR_COLORS.length]
 }
 
 /** 收集目录路径，用于「全部展开 / 全部收起」 */
@@ -962,6 +979,8 @@ type Props = {
   onDiscussionId: (id: string) => void
   resumeRunId?: string | null
   onViewResult: (runId: string) => void
+  /** 跳转到「技能」管理页（「+」菜单底部“管理技能”） */
+  onManageSkills?: () => void
 }
 
 /** 将选中知识库收敛到真实存在的 ID：去重并过滤无效项。 */
@@ -981,6 +1000,7 @@ export default function NewChat({
   onDiscussionId,
   resumeRunId,
   onViewResult,
+  onManageSkills,
 }: Props) {
   const [mode, setMode] = useState<Mode>(resumeRunId ? 'modeling' : 'agent')
   const [draft, setDraft] = useState('')
@@ -991,6 +1011,10 @@ export default function NewChat({
   const [files, setFiles] = useState<File[]>([])
   const [skills, setSkills] = useState<SkillInfo[]>([])
   const [selectedSkillIds, setSelectedSkillIds] = useState<string[]>([])
+  // 「+」菜单：技能搜索关键词、导入中标记与导入失败提示
+  const [skillQuery, setSkillQuery] = useState('')
+  const [skillImporting, setSkillImporting] = useState(false)
+  const [skillImportError, setSkillImportError] = useState('')
   const [title, setTitle] = useState('新讨论')
   const [agentTrace, setAgentTrace] = useState<AgentTraceEvent[]>([])
   const [agentRunTerminated, setAgentRunTerminated] = useState(false)
@@ -1016,6 +1040,10 @@ export default function NewChat({
   const [expandedKnowledgeBaseId, setExpandedKnowledgeBaseId] = useState<string | null>(null)
   const knowledgeBasesRef = useRef<KnowledgeBaseSummary[]>([])
   const fileInputRef = useRef<HTMLInputElement>(null)
+  // 「+」菜单：主弹层、技能飞层与「从本地添加技能」文件输入
+  const addPickerRef = useRef<HTMLDetailsElement>(null)
+  const skillSubRef = useRef<HTMLDetailsElement>(null)
+  const skillImportInputRef = useRef<HTMLInputElement>(null)
   const listRef = useRef<HTMLDivElement>(null)
   const chatBodyRef = useRef<HTMLDivElement>(null)
   const projectSidebarWidthRef = useRef(projectSidebarWidth)
@@ -1244,6 +1272,56 @@ export default function NewChat({
       })
       .catch(() => setSkills([]))
   }, [])
+
+  // 技能飞层搜索过滤：名称 / ID / 描述任一命中即可
+  const filteredSkills = useMemo(() => {
+    const keyword = skillQuery.trim().toLowerCase()
+    if (!keyword) return skills
+    return skills.filter((skill) => (
+      skill.name.toLowerCase().includes(keyword)
+      || skill.skill_id.toLowerCase().includes(keyword)
+      || skill.description.toLowerCase().includes(keyword)
+    ))
+  }, [skills, skillQuery])
+
+  // 「+」菜单：点击外部或按 Esc 收起，避免弹层滞留遮挡输入区
+  useEffect(() => {
+    function handlePointerDown(event: PointerEvent) {
+      const picker = addPickerRef.current
+      if (!picker?.open) return
+      const target = event.target
+      if (target instanceof Node && picker.contains(target)) return
+      picker.open = false
+    }
+    function handleKeyDown(event: KeyboardEvent) {
+      const picker = addPickerRef.current
+      if (picker?.open && event.key === 'Escape') picker.open = false
+    }
+    document.addEventListener('pointerdown', handlePointerDown)
+    document.addEventListener('keydown', handleKeyDown)
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown)
+      document.removeEventListener('keydown', handleKeyDown)
+    }
+  }, [])
+
+  /** 从本地 ZIP 包导入技能：成功后刷新列表并默认勾选新技能 */
+  async function importSkillArchive(file: File) {
+    setSkillImporting(true)
+    setSkillImportError('')
+    try {
+      const imported = await importSkill(file)
+      setSkills(await listSkills())
+      setSelectedSkillIds((current) => (
+        current.includes(imported.skill_id) ? current : [...current, imported.skill_id]
+      ))
+    } catch (reason) {
+      setSkillImportError(reason instanceof Error ? reason.message : '导入技能失败')
+    } finally {
+      setSkillImporting(false)
+      if (skillImportInputRef.current) skillImportInputRef.current.value = ''
+    }
+  }
 
   useEffect(() => {
     if (discussionId && runningDiscussionRef.current === discussionId) return
@@ -1660,44 +1738,164 @@ export default function NewChat({
                     })}
                   </div>
                 </details>
-                <details className="rag-add-picker">
+                <details
+                  className="rag-add-picker"
+                  ref={addPickerRef}
+                  onToggle={(event) => {
+                    // 收起主菜单时同步复位技能飞层，避免下次打开残留展开状态
+                    if (event.currentTarget.open) return
+                    if (skillSubRef.current) skillSubRef.current.open = false
+                    setSkillQuery('')
+                    setSkillImportError('')
+                  }}
+                >
                   <summary
                     className={isSubmitting ? 'is-disabled' : undefined}
-                    aria-label="添加附件或加载技能"
-                    title="添加附件或加载技能"
+                    aria-label="添加文件或加载技能"
+                    title="添加文件或加载技能"
                   >
                     +
                   </summary>
                   <div className="rag-add-menu">
                     <button
                       type="button"
+                      className="rag-add-item"
                       disabled={isSubmitting}
                       onClick={(event) => {
                         fileInputRef.current?.click()
-                        const details = event.currentTarget.closest('details')
+                        const details = event.currentTarget.closest('details.rag-add-picker')
                         if (details instanceof HTMLDetailsElement) details.open = false
                       }}
                     >
-                      上传附件{files.length ? ` · ${files.length}` : ''}
+                      {/* 曲别针：选择本地文件作为附件 */}
+                      <svg className="rag-add-item-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                        <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+                      </svg>
+                      <span className="rag-add-item-label">添加文件</span>
+                      {files.length > 0 && <span className="rag-add-item-count">{files.length}</span>}
                     </button>
-                    <div className="rag-add-menu-title">加载已有技能</div>
-                    {skills.length === 0 ? (
-                      <p>暂无已安装技能</p>
-                    ) : skills.map((skill) => (
-                      <label key={skill.skill_id} title={skill.description}>
-                        <input
-                          type="checkbox"
-                          checked={selectedSkillIds.includes(skill.skill_id)}
-                          disabled={isSubmitting}
-                          onChange={() => setSelectedSkillIds((current) => (
-                            current.includes(skill.skill_id)
-                              ? current.filter((id) => id !== skill.skill_id)
-                              : [...current, skill.skill_id]
-                          ))}
-                        />
-                        <span>{skill.name}</span>
-                      </label>
-                    ))}
+                    <details className="rag-add-sub" ref={skillSubRef}>
+                      <summary className="rag-add-item" aria-label="加载技能" title="加载技能">
+                        {/* 魔法棒：加载已有技能 */}
+                        <svg className="rag-add-item-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                          <path d="M5 19L14.5 9.5" />
+                          <path d="M18.6 3.4l.8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8.8-2.2z" />
+                          <path d="M6.5 3.8l.6 1.6 1.6.6-1.6.6-.6 1.6-.6-1.6-1.6-.6 1.6-.6.6-1.6z" />
+                        </svg>
+                        <span className="rag-add-item-label">技能</span>
+                        {selectedSkillIds.length > 0 && (
+                          <span className="rag-add-item-count">{selectedSkillIds.length}</span>
+                        )}
+                        <svg className="rag-add-item-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                          <path d="M9 6l6 6-6 6" />
+                        </svg>
+                      </summary>
+                      <div className="rag-skill-flyout">
+                        <div className="rag-skill-search">
+                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" aria-hidden="true">
+                            <circle cx="11" cy="11" r="6" />
+                            <path d="M16 16l4 4" />
+                          </svg>
+                          <input
+                            type="search"
+                            value={skillQuery}
+                            onChange={(event) => setSkillQuery(event.target.value)}
+                            placeholder="搜索技能"
+                            aria-label="搜索技能"
+                          />
+                        </div>
+                        <div className="rag-skill-list">
+                          {skills.length === 0 ? (
+                            <p className="rag-skill-empty">暂无已安装技能</p>
+                          ) : filteredSkills.length === 0 ? (
+                            <p className="rag-skill-empty">没有匹配「{skillQuery.trim()}」的技能</p>
+                          ) : filteredSkills.map((skill) => {
+                            const selected = selectedSkillIds.includes(skill.skill_id)
+                            return (
+                              <button
+                                type="button"
+                                key={skill.skill_id}
+                                className={`rag-skill-item${selected ? ' is-selected' : ''}`}
+                                aria-pressed={selected}
+                                disabled={isSubmitting}
+                                title={skill.description || skill.name}
+                                onClick={() => setSelectedSkillIds((current) => (
+                                  current.includes(skill.skill_id)
+                                    ? current.filter((id) => id !== skill.skill_id)
+                                    : [...current, skill.skill_id]
+                                ))}
+                              >
+                                <span
+                                  className="rag-skill-avatar"
+                                  style={{ background: skillAvatarColor(skill.skill_id) }}
+                                  aria-hidden="true"
+                                >
+                                  {skillAvatarLabel(skill.name, skill.skill_id)}
+                                </span>
+                                <span className="rag-skill-meta">
+                                  <span className="rag-skill-name">{skill.name}</span>
+                                  <span className="rag-skill-desc">{skill.description || '未填写说明'}</span>
+                                </span>
+                                {selected && (
+                                  <svg className="rag-skill-check" width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                                    <path d="M5 12.5l4.5 4.5L19 7" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
+                                  </svg>
+                                )}
+                              </button>
+                            )
+                          })}
+                        </div>
+                        <div className="rag-skill-actions">
+                          <button
+                            type="button"
+                            className="rag-add-item"
+                            disabled={isSubmitting || skillImporting}
+                            onClick={() => skillImportInputRef.current?.click()}
+                          >
+                            {/* 上箭头：从本地导入 ZIP 技能包 */}
+                            <svg className="rag-add-item-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                              <path d="M17 8l-5-5-5 5" />
+                              <path d="M12 3v12" />
+                            </svg>
+                            <span className="rag-add-item-label">
+                              {skillImporting ? '正在导入…' : '从本地添加技能'}
+                            </span>
+                          </button>
+                          {onManageSkills && (
+                            <button
+                              type="button"
+                              className="rag-add-item"
+                              onClick={(event) => {
+                                const details = event.currentTarget.closest('details.rag-add-picker')
+                                if (details instanceof HTMLDetailsElement) details.open = false
+                                onManageSkills()
+                              }}
+                            >
+                              {/* 齿轮：打开技能管理页 */}
+                              <svg className="rag-add-item-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                                <circle cx="12" cy="12" r="3" />
+                                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
+                              </svg>
+                              <span className="rag-add-item-label">管理技能</span>
+                            </button>
+                          )}
+                          {skillImportError && (
+                            <p className="rag-skill-error" role="alert">{skillImportError}</p>
+                          )}
+                        </div>
+                      </div>
+                    </details>
+                    <input
+                      ref={skillImportInputRef}
+                      hidden
+                      type="file"
+                      accept=".zip,application/zip"
+                      onChange={(event) => {
+                        const file = event.target.files?.[0]
+                        if (file) void importSkillArchive(file)
+                      }}
+                    />
                   </div>
                 </details>
                 <input
