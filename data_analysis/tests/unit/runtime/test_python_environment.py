@@ -49,9 +49,15 @@ def test_resolver_accepts_explicit_interpreter(tmp_path: Path) -> None:
     assert environment.source == "custom"
 
 
-def test_resolver_rejects_invalid_explicit_path(tmp_path: Path) -> None:
-    with pytest.raises(PythonEnvironmentError, match="不存在"):
-        resolve_python_environment(tmp_path, tmp_path / "missing-venv")
+def test_resolver_creates_environment_at_missing_configured_path(tmp_path: Path) -> None:
+    # 用户指定路径不存在时，视为虚拟环境创建位置
+    target = tmp_path / "user-venv"
+
+    environment = resolve_python_environment(tmp_path, target)
+
+    assert environment.source == "created"
+    assert environment.name == "user-venv"
+    assert environment.executable == _venv_python(target).resolve()
 
 
 def test_resolver_rejects_non_python_executable(tmp_path: Path) -> None:
@@ -60,6 +66,71 @@ def test_resolver_rejects_non_python_executable(tmp_path: Path) -> None:
 
     with pytest.raises(PythonEnvironmentError, match="Python|python.exe"):
         resolve_python_environment(tmp_path, executable)
+
+
+def test_resolver_never_falls_back_to_host() -> None:
+    # 没有项目根目录且未指定环境时必须报错，禁止回退到宿主解释器
+    with pytest.raises(PythonEnvironmentError, match="项目根目录"):
+        resolve_python_environment(None)
+
+
+def test_resolver_auto_creates_project_venv(tmp_path: Path) -> None:
+    # 项目内没有环境时，自动在项目根目录创建 .venv
+    environment = resolve_python_environment(tmp_path)
+
+    assert environment.source == "created"
+    assert environment.name == ".venv"
+    assert environment.executable.is_file()
+
+
+def test_agents_md_declaration_has_highest_priority(tmp_path: Path) -> None:
+    # AGENTS.md 声明的环境优先于用户指定路径和项目内扫描结果
+    environment_root = tmp_path / "md-env"
+    executable = _venv_python(environment_root)
+    executable.parent.mkdir(parents=True)
+    executable.write_bytes(b"placeholder")
+    (environment_root / "pyvenv.cfg").write_text("home = python", encoding="utf-8")
+    (tmp_path / "AGENTS.md").write_text(
+        f"python_environment: {environment_root}\n",
+        encoding="utf-8",
+    )
+    other_root = tmp_path / ".venv"
+    other_executable = _venv_python(other_root)
+    other_executable.parent.mkdir(parents=True)
+    other_executable.write_bytes(b"placeholder")
+
+    environment = resolve_python_environment(tmp_path, other_root)
+
+    assert environment.source == "declared"
+    assert environment.name == "md-env"
+    assert environment.executable == executable.resolve()
+
+
+def test_agents_md_declaration_accepts_relative_path(tmp_path: Path) -> None:
+    environment_root = tmp_path / "custom-runtime"
+    executable = _venv_python(environment_root)
+    executable.parent.mkdir(parents=True)
+    executable.write_bytes(b"placeholder")
+    (tmp_path / "AGENTS.md").write_text(
+        "python_environment=custom-runtime\n",
+        encoding="utf-8",
+    )
+
+    environment = resolve_python_environment(tmp_path)
+
+    assert environment.source == "declared"
+    assert environment.executable == executable.resolve()
+
+
+def test_agents_md_invalid_declaration_raises(tmp_path: Path) -> None:
+    # AGENTS.md 是最高约束，声明路径无效时必须报错而不是静默回退
+    (tmp_path / "AGENTS.md").write_text(
+        "python_environment: D:/not/exist/venv\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(PythonEnvironmentError, match="不存在"):
+        resolve_python_environment(tmp_path)
 
 
 def test_execute_python_uses_selected_virtual_environment(tmp_path: Path) -> None:

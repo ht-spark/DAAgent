@@ -65,6 +65,7 @@ from data_analysis.llm import (
 from data_analysis.runtime import (
     ExecutionContext,
     Harness,
+    PythonEnvironmentError,
     SubprocessSandbox,
     resolve_python_environment,
 )
@@ -1895,7 +1896,7 @@ async def agent_profile_stream_endpoint(
             if project is not None
             else resolve_python_environment(None)
         )
-    except ProjectWorkspaceError as exc:
+    except (ProjectWorkspaceError, PythonEnvironmentError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     uploaded_paths = await _prepare_agent_data_files(files, active_discussion_id, run_id)
     runtime_dir = uploaded_paths[0].parents[1] if uploaded_paths else None
@@ -1938,13 +1939,6 @@ async def agent_profile_stream_endpoint(
             skill_context=skill_context,
         )
         system_prompt = _load_agent_system_prompt(workspace_root)
-        if workspace_root is not None and python_environment.source == "host":
-            system_prompt += (
-                "\n\n当前项目未扫描到 Python 环境。Agent 自身的 Python 仅可用于创建项目环境，"
-                "不能代表当前项目环境，也不能默认用于 execute_python 或项目依赖安装。"
-                "若已确认项目中有环境目录（包括项目根目录本身），请显式传入"
-                " python_environment；否则先创建环境或向用户说明。"
-            )
     except Exception:
         if runtime_dir is not None:
             await asyncio.to_thread(_cleanup_agent_runtime_dir, runtime_dir)

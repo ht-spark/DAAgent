@@ -70,7 +70,6 @@ class ExecutionContext:
             action.tool_name != "execute_python"
             or "python_environment" in action.arguments
             or environment is None
-            or environment.source == "host"
         ):
             return action
         arguments = dict(action.arguments)
