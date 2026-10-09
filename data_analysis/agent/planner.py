@@ -11,8 +11,13 @@ from typing import Any, Sequence
 from pydantic import ValidationError
 
 from ..tools.registry import ToolSpec
-from ..cancellation import invoke_cancellable, raise_if_cancelled
-from .loop import Finish, LlmClient, extract_model_reasoning
+from ..cancellation import raise_if_cancelled
+from .loop import (
+    Finish,
+    LlmClient,
+    ProgressCallback,
+    invoke_llm_with_public_progress,
+)
 from .state import AgentState, AnalysisPlan, clip_text
 
 _PLANNER_PROMPT_PATH = Path(__file__).resolve().parents[1] / "prompts" / "planner.md"
@@ -50,6 +55,7 @@ class Planner:
         max_todos: int = 8,
         retries: int = 2,
         cancel_check: Callable[[], bool] | None = None,
+        progress_callback: ProgressCallback | None = None,
     ) -> None:
         if max_todos < 1 or max_todos > 12:
             raise ValueError("max_todos 必须在 1 到 12 之间")
@@ -60,6 +66,8 @@ class Planner:
         self._max_todos = max_todos
         self._retries = retries
         self._cancel_check = cancel_check
+        self._progress_callback = progress_callback
+        self._progress_sequence = 0
 
     def create_plan(
         self,
@@ -80,23 +88,22 @@ class Planner:
         last_error: Exception | None = None
         for attempt in range(self._retries + 1):
             raise_if_cancelled(self._cancel_check)
-            response = invoke_cancellable(
-                lambda: self._llm.invoke(messages),
+            self._progress_sequence += 1
+            _, raw = invoke_llm_with_public_progress(
+                self._llm,
+                messages,
+                summary_key="reasoning_summary",
+                stream_id=f"planner-{self._progress_sequence}",
+                initial_text="正在理解任务并制定执行计划…",
+                progress_callback=self._progress_callback,
                 cancel_check=self._cancel_check,
             )
-            raw = _response_text(response)
-            # 抽取模型真实思考过程，挂到计划上供前端展示
-            model_reasoning = extract_model_reasoning(response, raw)
             try:
                 decision = _parse_planner_decision(raw)
                 if isinstance(decision, Finish):
                     if not allow_direct:
                         raise PlannerError("当前请求必须返回可执行计划，不能直接回答")
-                    if model_reasoning:
-                        decision = decision.model_copy(update={"reasoning": model_reasoning})
                     return decision
-                if model_reasoning:
-                    decision.model_reasoning = model_reasoning
                 if len(decision.todos) > self._max_todos:
                     raise PlannerError(
                         f"Todo 数量 {len(decision.todos)} 超过上限 {self._max_todos}"
@@ -228,7 +235,11 @@ class Planner:
                         for item in active.metadata.assets
                     ],
                     "scripts": [
-                        {"id": item.entrypoint_id, "description": item.description}
+                        {
+                            "id": item.entrypoint_id,
+                            "description": item.description,
+                            "runtime": item.runtime,
+                        }
                         for item in active.metadata.scripts
                     ],
                 }
@@ -346,21 +357,3 @@ def _parse_planner_decision(raw: str) -> AnalysisPlan | Finish:
         return AnalysisPlan.model_validate(payload)
     except ValidationError as exc:
         raise PlannerError(f"计划字段无效: {exc.errors()}") from exc
-
-
-def _response_text(response: Any) -> str:
-    """提取常见聊天模型响应中的文本。"""
-    if isinstance(response, str):
-        return response
-    content = getattr(response, "content", None)
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts = [
-            item.get("text", "")
-            for item in content
-            if isinstance(item, dict) and isinstance(item.get("text"), str)
-        ]
-        if parts:
-            return "".join(parts)
-    raise PlannerError("Planner 响应不包含文本")

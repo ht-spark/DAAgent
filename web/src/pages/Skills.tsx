@@ -69,7 +69,7 @@ export default function Skills() {
       <div className="page-head modeling-tasks-head">
         <div>
           <h1 className="page-title">技能</h1>
-          <p className="page-sub">查看、导入和删除可由用户手动加载的分析技能，点击卡片查看声明详情。</p>
+          <p className="page-sub">查看、导入和删除可由用户手动加载的分析技能，通过「查看详情」查阅技能声明。</p>
         </div>
         <button
           type="button"
@@ -100,28 +100,32 @@ export default function Skills() {
           <span>上传包含 SKILL.md 的 ZIP 包后，它会安装到 data_analysis/skills。</span>
         </div>
       ) : (
-        <div className="skills-grid">
+        // 矩形小卡片：卡片内只展示技能名称，操作收进「查看详情 / 删除」按钮
+        <ul className="skills-grid">
           {skills.map((skill) => (
-            <button
-              type="button"
-              className="skill-card"
-              key={skill.skill_id}
-              onClick={() => setDetailSkill(skill)}
-            >
-              <span className="skill-card-name">{skill.name}</span>
-              <code className="skill-card-id">{skill.skill_id}</code>
-              <span className="skill-card-desc">{skill.description}</span>
-              <span className="skill-card-foot">
-                <span className="skill-counts">
-                  <span>资料 {skill.references.length}</span>
-                  <span>资产 {skill.assets.length}</span>
-                  <span>脚本 {skill.scripts.length}</span>
-                </span>
-                <span className="skill-card-more">查看详情</span>
+            <li className="skill-card" key={skill.skill_id}>
+              <span className="skill-card-name" title={skill.name}>
+                {skill.name}
               </span>
-            </button>
+              <span className="skill-card-actions">
+                <button
+                  type="button"
+                  className="skill-action"
+                  onClick={() => setDetailSkill(skill)}
+                >
+                  查看详情
+                </button>
+                <button
+                  type="button"
+                  className="skill-action is-danger"
+                  onClick={() => setPendingDelete(skill)}
+                >
+                  删除
+                </button>
+              </span>
+            </li>
           ))}
-        </div>
+        </ul>
       )}
 
       {detailSkill ? (

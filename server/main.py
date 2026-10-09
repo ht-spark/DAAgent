@@ -1140,7 +1140,14 @@ def _compile_uploaded_attachment_context(paths: list[Path], llm: object) -> str:
     for path in paths:
         suffix = path.suffix.casefold()
         try:
-            if suffix in AGENT_PREVIEW_TEXT_SUFFIXES:
+            if supports_data_profile(path):
+                text = (
+                    f"[结构化数据附件：{path.name}（{path.stat().st_size} 字节）。"
+                    "完整数据未直接注入模型上下文；文件已授权给本轮 Agent，"
+                    "应使用 profile_data 获取字段与质量画像，并按需使用 "
+                    "inspect_data_rows 读取真实记录。]"
+                )
+            elif suffix in AGENT_PREVIEW_TEXT_SUFFIXES:
                 text = path.read_text(encoding="utf-8-sig", errors="replace")
             elif suffix in supported_documents:
                 text = to_markdown(path, max_bytes=MAX_AGENT_ATTACHMENT_BYTES)
@@ -1267,8 +1274,6 @@ def _agent_event_payload(
                 for todo in event.plan.todos
             ],
         }
-        if event.plan.model_reasoning.strip():
-            payload["model_reasoning"] = event.plan.model_reasoning
         return payload
     if isinstance(event, TodoStarted):
         return {
@@ -1289,21 +1294,16 @@ def _agent_event_payload(
             "error": event.error,
         }
     if isinstance(event, Finish):
-        payload = {
+        return {
             "type": "agent_reasoning",
             "summary": event.thought,
         }
-        if event.reasoning.strip():
-            payload["model_reasoning"] = event.reasoning
-        return payload
     if isinstance(event, Action):
         payload = {
             "type": "agent_action",
             "thought": event.thought,
             "tool_name": event.tool_name,
         }
-        if event.reasoning.strip():
-            payload["model_reasoning"] = event.reasoning
         # 只保留摘要类短参数：它们是「读取 · path」「运行命令 · command」这类
         # 单行轨迹摘要的唯一来源；完整 arguments 可能含大段正文（content、
         # old_text、new_text 等），既不适合公开展示也会撑大持久化体积。
@@ -1327,8 +1327,6 @@ def _agent_event_payload(
             "resource_id": event.resource_id,
             "entrypoint_id": event.entrypoint_id,
         }
-        if event.reasoning.strip():
-            payload["model_reasoning"] = event.reasoning
         return payload
     if isinstance(event, SkillObservation):
         return {
@@ -1901,17 +1899,7 @@ async def agent_profile_stream_endpoint(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     uploaded_paths = await _prepare_agent_data_files(files, active_discussion_id, run_id)
     runtime_dir = uploaded_paths[0].parents[1] if uploaded_paths else None
-    try:
-        attachment_context = await asyncio.to_thread(
-            _compile_uploaded_attachment_context,
-            uploaded_paths,
-            llm,
-        )
-    except Exception:
-        # 摘要或文本提取在后台任务启动前失败时，也必须回收本轮临时附件。
-        if runtime_dir is not None:
-            await asyncio.to_thread(_cleanup_agent_runtime_dir, runtime_dir)
-        raise
+    attachment_context = ""
     data_paths = uploaded_paths
     api_settings = _read_api_settings() or {}
     terminal_shell = _configured_terminal_shell(api_settings)
@@ -1935,7 +1923,8 @@ async def agent_profile_stream_endpoint(
             terminal_shell=terminal_shell,
         )
         state = AgentState(
-            user_query=compose_user_message(message, attachment_context),
+            # 附件上下文在流已启动后编译，避免前置模型调用阻塞 run_id 下发。
+            user_query=message,
             memory_summary=rolling_context.memory_summary,
             data_paths=[str(path.resolve(strict=True)) for path in data_paths],
             output_dir=str(output_dir),
@@ -1969,6 +1958,21 @@ async def agent_profile_stream_endpoint(
     def _agent_cancel_check() -> bool:
         return chat_run.cancel_requested
 
+    agent_event_loop = asyncio.get_running_loop()
+    progress_events: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+
+    def publish_agent_progress(stream_id: str, content: str, done: bool) -> None:
+        """从模型工作线程向 HTTP 事件循环传递公开思考摘要。"""
+        agent_event_loop.call_soon_threadsafe(
+            progress_events.put_nowait,
+            {
+                "type": "agent_thinking",
+                "stream_id": stream_id,
+                "content": content,
+                "done": done,
+            },
+        )
+
     loop = AgentLoop(
         llm,
         registry.specs(),
@@ -1976,8 +1980,14 @@ async def agent_profile_stream_endpoint(
         max_iterations=AGENT_MAX_DECISIONS,
         decision_retries=8,
         cancel_check=_agent_cancel_check,
+        progress_callback=publish_agent_progress,
     )
-    planner = Planner(llm, registry.specs(), cancel_check=_agent_cancel_check)
+    planner = Planner(
+        llm,
+        registry.specs(),
+        cancel_check=_agent_cancel_check,
+        progress_callback=publish_agent_progress,
+    )
     approved_terminal_actions: set[int] = set()
     approved_skill_actions: set[int] = set()
 
@@ -2026,6 +2036,7 @@ async def agent_profile_stream_endpoint(
     _agent_chat_runs[run_id] = chat_run
 
     async def event_stream():
+        nonlocal attachment_context
         started_event: dict[str, object] = {
             "type": "agent_started",
             "run_id": run_id,
@@ -2039,13 +2050,6 @@ async def agent_profile_stream_endpoint(
         yield json.dumps(started_event, ensure_ascii=False) + "\n"
         answer = ""
         knowledge_sources: list[dict[str, str]] = []
-        iterator = iter_plan_graph(
-            state,
-            planner,
-            loop,
-            harness,
-            skill_runtime=skill_runtime,
-        )
 
         async def save_stopped_run(content: str) -> str:
             """保存未完成结果，使任务切换后仍能在历史对话中看到。"""
@@ -2072,10 +2076,76 @@ async def agent_profile_stream_endpoint(
             )
 
         try:
+            if uploaded_paths:
+                attachment_progress = {
+                    "type": "agent_thinking",
+                    "stream_id": "attachment-preparation",
+                    "content": "正在读取并整理上传附件…",
+                    "done": False,
+                }
+                yield json.dumps(attachment_progress, ensure_ascii=False) + "\n"
+                try:
+                    attachment_context = await asyncio.to_thread(
+                        _compile_uploaded_attachment_context,
+                        uploaded_paths,
+                        llm,
+                    )
+                    state.user_query = compose_user_message(
+                        message,
+                        attachment_context,
+                    )
+                finally:
+                    yield json.dumps(
+                        {
+                            "type": "agent_thinking",
+                            "stream_id": "attachment-preparation",
+                            "content": "",
+                            "done": True,
+                        },
+                        ensure_ascii=False,
+                    ) + "\n"
+
+            iterator = iter_plan_graph(
+                state,
+                planner,
+                loop,
+                harness,
+                skill_runtime=skill_runtime,
+            )
             async with asyncio.timeout(AGENT_RUN_TIMEOUT_SECONDS):
                 while True:
+                    next_event_task = asyncio.create_task(
+                        asyncio.to_thread(_next_agent_event, iterator)
+                    )
                     try:
-                        event = await asyncio.to_thread(_next_agent_event, iterator)
+                        while not next_event_task.done():
+                            progress_task = asyncio.create_task(progress_events.get())
+                            completed, _ = await asyncio.wait(
+                                {next_event_task, progress_task},
+                                return_when=asyncio.FIRST_COMPLETED,
+                            )
+                            if progress_task in completed:
+                                progress_payload = progress_task.result()
+                                yield json.dumps(
+                                    progress_payload,
+                                    ensure_ascii=False,
+                                ) + "\n"
+                            else:
+                                progress_task.cancel()
+                                await asyncio.gather(
+                                    progress_task,
+                                    return_exceptions=True,
+                                )
+                        event = await next_event_task
+                        while True:
+                            try:
+                                progress_payload = progress_events.get_nowait()
+                            except asyncio.QueueEmpty:
+                                break
+                            yield json.dumps(
+                                progress_payload,
+                                ensure_ascii=False,
+                            ) + "\n"
                     except TaskCancelledError:
                         await save_stopped_run("任务已终止。")
                         yield json.dumps({"type": "cancelled", "run_id": run_id}, ensure_ascii=False) + "\n"
@@ -2087,8 +2157,8 @@ async def agent_profile_stream_endpoint(
                         yield json.dumps({"type": "cancelled", "run_id": run_id}, ensure_ascii=False) + "\n"
                         return
                     if isinstance(event, Finish):
-                        # 只要公开摘要或真实思考任一存在，就推送阶段思考事件
-                        if event.thought.strip() or event.reasoning.strip():
+                        # 最终回答前只推送模型明确生成的公开摘要。
+                        if event.thought.strip():
                             payload = _agent_event_payload(event)
                             trace.append(payload)
                             yield json.dumps(payload, ensure_ascii=False) + "\n"
@@ -2200,7 +2270,13 @@ async def agent_profile_stream_endpoint(
                         and not event.success
                         and event.error == "当前模型不支持识图"
                     ):
+                        failure_payload = {
+                            "type": "agent_failed",
+                            "error": event.error,
+                        }
+                        trace.append(failure_payload)
                         await save_stopped_run(event.error)
+                        yield json.dumps(failure_payload, ensure_ascii=False) + "\n"
                         yield json.dumps(
                             {"type": "error", "detail": event.error},
                             ensure_ascii=False,
@@ -2208,13 +2284,21 @@ async def agent_profile_stream_endpoint(
                         return
                     yield json.dumps(payload, ensure_ascii=False) + "\n"
         except TimeoutError:
-            await save_stopped_run("Agent 运行超时，请稍后重试。")
-            yield json.dumps({"type": "error", "detail": "Agent 运行超时，请稍后重试。"}, ensure_ascii=False) + "\n"
+            detail = "Agent 运行超时，请稍后重试。"
+            failure_payload = {"type": "agent_failed", "error": detail}
+            trace.append(failure_payload)
+            await save_stopped_run(detail)
+            yield json.dumps(failure_payload, ensure_ascii=False) + "\n"
+            yield json.dumps({"type": "error", "detail": detail}, ensure_ascii=False) + "\n"
             return
         except Exception as exc:  # noqa: BLE001
             logger.exception("Data agent run failed")
-            await save_stopped_run(f"Agent 运行失败：{exc}")
-            yield json.dumps({"type": "error", "detail": f"Agent 运行失败：{exc}"}, ensure_ascii=False) + "\n"
+            detail = f"Agent 运行失败：{exc}"
+            failure_payload = {"type": "agent_failed", "error": detail}
+            trace.append(failure_payload)
+            await save_stopped_run(detail)
+            yield json.dumps(failure_payload, ensure_ascii=False) + "\n"
+            yield json.dumps({"type": "error", "detail": detail}, ensure_ascii=False) + "\n"
             return
 
         if chat_run.cancel_requested:

@@ -152,6 +152,8 @@ class SkillRuntime:
             assets[asset_id] = str(materialized["runtime_path"])
         artifact_dir = self.output_dir / "skill-artifacts" / metadata.skill_id
         artifact_dir.mkdir(parents=True, exist_ok=True)
+        if script.runtime == "python-cli":
+            return self._run_cli_script(entrypoint, script, action, artifact_dir)
         payload = {
             "arguments": action.arguments,
             "runtime": {
@@ -221,6 +223,113 @@ class SkillRuntime:
             for path in artifact_paths
         ]
         return normalized
+
+    def _run_cli_script(
+        self,
+        entrypoint: Path,
+        script: SkillScript,
+        action: SkillAction,
+        artifact_dir: Path,
+    ) -> dict[str, object]:
+        """执行自动发现的传统命令行 Python 脚本。"""
+        if set(action.arguments) != {"argv"}:
+            raise ValueError("python-cli 脚本的 arguments 必须且只能包含 argv")
+        argv = action.arguments.get("argv")
+        if (
+            not isinstance(argv, list)
+            or len(argv) > 100
+            or not all(isinstance(item, str) and len(item) <= 4_000 for item in argv)
+        ):
+            raise ValueError("argv 必须是不超过 100 项的字符串数组")
+        normalized_argv = [self._validate_cli_argument(item) for item in argv]
+        before = self._snapshot_files(self.output_dir)
+        completed = run_cancellable_process(
+            [self.python_executable, "-I", str(entrypoint), *normalized_argv],
+            timeout=script.timeout_seconds,
+            cancel_check=self.cancel_check,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            cwd=str(artifact_dir),
+            env=self._process_environment(),
+            shell=False,
+        )
+        stdout = (completed.stdout or "").strip()
+        stderr = (completed.stderr or "").strip()
+        if completed.returncode != 0:
+            raise RuntimeError((stderr or stdout or "脚本执行失败")[-2_000:])
+        if len(stdout) > MAX_SCRIPT_OUTPUT_CHARS:
+            raise ValueError("Skill 脚本输出超过 2 MB")
+        after = self._snapshot_files(self.output_dir)
+        artifact_paths = [
+            path
+            for path, signature in after.items()
+            if before.get(path) != signature and ".skill-assets" not in path.parts
+        ]
+        try:
+            parsed: object = json.loads(stdout)
+        except json.JSONDecodeError:
+            parsed = stdout
+        return {
+            "ok": True,
+            "result": parsed,
+            "stderr": stderr,
+            "artifacts": [
+                path.relative_to(self.output_dir).as_posix()
+                for path in artifact_paths
+            ],
+            "artifact_details": [
+                {
+                    "path": path.relative_to(self.output_dir).as_posix(),
+                    "absolute_path": str(path),
+                }
+                for path in artifact_paths
+            ],
+        }
+
+    def _validate_cli_argument(self, value: str) -> str:
+        """允许普通参数，但限制其中的绝对路径只能位于本轮授权范围。"""
+        candidate_text = value.split("=", 1)[1] if value.startswith("-") and "=" in value else value
+        candidate = Path(candidate_text).expanduser()
+        if not candidate.is_absolute():
+            return value
+        resolved = candidate.resolve(strict=False)
+        output_root = self.output_dir.resolve(strict=False)
+        allowed_files = {Path(path).resolve(strict=True) for path in self.data_paths}
+        if resolved not in allowed_files and resolved != output_root and output_root not in resolved.parents:
+            raise ValueError(f"命令行参数包含未授权绝对路径: {candidate_text}")
+        return value
+
+    @staticmethod
+    def _snapshot_files(root: Path) -> dict[Path, tuple[int, int]]:
+        """记录输出目录中文件的大小和修改时间，用于识别脚本产物。"""
+        return {
+            path.resolve(strict=True): (path.stat().st_size, path.stat().st_mtime_ns)
+            for path in root.rglob("*")
+            if path.is_file() and not path.is_symlink()
+        }
+
+    @staticmethod
+    def _process_environment() -> dict[str, str]:
+        """返回不包含凭据的最小子进程环境。"""
+        environment = {
+            key: os.environ[key]
+            for key in (
+                "SYSTEMROOT",
+                "TEMP",
+                "TMP",
+                "PATH",
+                "PATHEXT",
+                "COMSPEC",
+                "USERPROFILE",
+                "APPDATA",
+                "LOCALAPPDATA",
+            )
+            if key in os.environ
+        }
+        environment["PYTHONIOENCODING"] = "utf-8"
+        return environment
 
     @staticmethod
     def _script(scripts: tuple[SkillScript, ...], entrypoint_id: str) -> SkillScript:

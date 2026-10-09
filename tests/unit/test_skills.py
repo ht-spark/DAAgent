@@ -172,6 +172,50 @@ def test_uploaded_skill_is_exportable_and_forces_script_approval(tmp_path: Path)
     assert registry.export_archive("demo-skill").startswith(b"PK")
 
 
+def test_conventional_skill_without_manifest_is_discovered_and_executable(tmp_path: Path) -> None:
+    """常见 Skill 包即使没有 DAAGENT.yaml，也应发现资料、资产和 CLI 脚本。"""
+    directory = tmp_path / "legacy-skill"
+    (directory / "references").mkdir(parents=True)
+    (directory / "assets").mkdir()
+    (directory / "scripts").mkdir()
+    (directory / "SKILL.md").write_text(
+        "---\nname: legacy-skill\ndescription: 传统目录技能\n---\n按需使用资源。",
+        encoding="utf-8",
+    )
+    (directory / "reference.md").write_text("根目录资料", encoding="utf-8")
+    (directory / "references" / "guide.md").write_text("目录资料", encoding="utf-8")
+    (directory / "assets" / "template.bin").write_bytes(b"template")
+    (directory / "scripts" / "echo.py").write_text(
+        (
+            '\"\"\"回显参数。\\n\\nUsage: echo.py <value>\"\"\"\n'
+            "import json, sys\nprint(json.dumps({'value': sys.argv[1]}))\n"
+        ),
+        encoding="utf-8",
+    )
+    registry = SkillRegistry(tmp_path)
+    metadata = registry.get("legacy-skill")
+    runtime = SkillRuntime(
+        registry,
+        registry.load_selected(["legacy-skill"]),
+        output_dir=tmp_path / "out",
+        approval=lambda _action: True,
+    )
+
+    observation = runtime.execute(SkillAction(
+        operation="run_script",
+        skill_id="legacy-skill",
+        entrypoint_id="echo",
+        arguments={"argv": ["hello"]},
+    ))
+
+    assert len(metadata.references) == 2
+    assert len(metadata.assets) == 1
+    assert metadata.scripts[0].runtime == "python-cli"
+    assert "Usage: echo.py <value>" in metadata.scripts[0].description
+    assert observation.success is True
+    assert observation.result["result"] == {"value": "hello"}
+
+
 def test_registry_uninstall_removes_skill_directory(tmp_path: Path) -> None:
     """卸载应删除已安装目录，重复卸载同一 Skill 需要报错。"""
     root = tmp_path / "skills"

@@ -26,7 +26,7 @@ class SkillScript(BaseModel):
     entrypoint_id: str = Field(min_length=1, max_length=80)
     path: str = Field(min_length=1)
     description: str = ""
-    runtime: Literal["python"] = "python"
+    runtime: Literal["python", "python-cli"] = "python"
     # 单次脚本最长运行秒数；限制在 1～300 秒，防止 Skill 长时间占用执行进程。
     timeout_seconds: int = Field(default=30, ge=1, le=300)
     requires_approval: bool = True

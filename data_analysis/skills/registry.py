@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import io
 import mimetypes
@@ -18,8 +19,10 @@ from .models import ActiveSkill, SkillContext, SkillMetadata, SkillResource, Ski
 SKILL_ID_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 MAX_ARCHIVE_BYTES = 50 * 1024 * 1024
 MAX_ARCHIVE_FILES = 500
-MAX_MEMBER_BYTES = 25 * 1024 * 1024
+MAX_MEMBER_BYTES = 100 * 1024 * 1024
 UPLOADED_MARKER = ".daagent-uploaded"
+AUTO_REFERENCE_SUFFIXES = {".csv", ".json", ".md", ".markdown", ".txt", ".yaml", ".yml"}
+IGNORED_ROOT_FILES = {"skill.md", "readme.md", "daagent.yaml", UPLOADED_MARKER}
 
 
 class SkillRegistryError(ValueError):
@@ -91,8 +94,12 @@ class SkillRegistry:
             raise SkillRegistryError(f"未知 Skill 资源类型: {kind}")
         for entry in entries:
             if getattr(entry, key).casefold() == identifier.casefold():
+                relative = Path(entry.path)
                 return self._safe_declared_path(
-                    self._skill_directory(metadata.skill_id), entry.path, expected_root
+                    self._skill_directory(metadata.skill_id),
+                    entry.path,
+                    expected_root,
+                    allow_root_file=len(relative.parts) == 1,
                 )
         raise SkillRegistryError(f"Skill 未声明该{kind}: {identifier}")
 
@@ -168,19 +175,23 @@ class SkillRegistry:
         description = str(front_matter.get("description") or "").strip()
         if not description:
             raise SkillRegistryError(f"Skill {skill_id} 缺少 description")
-        manifest = _read_manifest(directory / "DAAGENT.yaml")
-        references = tuple(
-            self._resource(directory, item, "references")
-            for item in _manifest_list(manifest, "references")
-        )
-        assets = tuple(
-            self._resource(directory, item, "assets")
-            for item in _manifest_list(manifest, "assets")
-        )
-        scripts = tuple(
-            self._script(directory, item)
-            for item in _manifest_list(manifest, "scripts")
-        )
+        manifest_path = directory / "DAAGENT.yaml"
+        if manifest_path.is_file():
+            manifest = _read_manifest(manifest_path)
+            references = tuple(
+                self._resource(directory, item, "references")
+                for item in _manifest_list(manifest, "references")
+            )
+            assets = tuple(
+                self._resource(directory, item, "assets")
+                for item in _manifest_list(manifest, "assets")
+            )
+            scripts = tuple(
+                self._script(directory, item)
+                for item in _manifest_list(manifest, "scripts")
+            )
+        else:
+            references, assets, scripts = self._discover_conventional_resources(directory)
         if (directory / UPLOADED_MARKER).is_file():
             scripts = tuple(
                 item.model_copy(update={"requires_approval": True})
@@ -234,6 +245,87 @@ class SkillRegistry:
             network=bool(permissions.get("network", False)),
         )
 
+    def _discover_conventional_resources(
+        self,
+        directory: Path,
+    ) -> tuple[tuple[SkillResource, ...], tuple[SkillResource, ...], tuple[SkillScript, ...]]:
+        """兼容没有 DAAGENT.yaml 的常见 Skill 目录结构。"""
+        reference_paths = self._files_under(directory / "references")
+        reference_paths.extend(
+            path
+            for path in directory.iterdir()
+            if (
+                path.is_file()
+                and not path.is_symlink()
+                and path.name.casefold() not in IGNORED_ROOT_FILES
+                and not path.name.casefold().startswith("license")
+                and path.suffix.casefold() in AUTO_REFERENCE_SUFFIXES
+            )
+        )
+        asset_paths = self._files_under(directory / "assets")
+        asset_paths.extend(
+            path
+            for path in directory.iterdir()
+            if (
+                path.is_file()
+                and not path.is_symlink()
+                and path.name.casefold() not in IGNORED_ROOT_FILES
+                and not path.name.casefold().startswith("license")
+                and path.suffix.casefold() not in AUTO_REFERENCE_SUFFIXES
+            )
+        )
+        script_paths = [
+            path
+            for path in self._files_under(directory / "scripts")
+            if (
+                path.suffix.casefold() == ".py"
+                and not path.name.casefold().startswith(("test_", "_"))
+                and not path.stem.casefold().endswith("_test")
+            )
+        ]
+        references = tuple(
+            SkillResource(
+                resource_id=_discovered_id(path, directory / "references"),
+                path=path.relative_to(directory).as_posix(),
+                description=f"自动发现的参考资料：{path.name}",
+                media_type=mimetypes.guess_type(path.name)[0],
+            )
+            for path in sorted(set(reference_paths))
+        )
+        assets = tuple(
+            SkillResource(
+                resource_id=_discovered_id(path, directory / "assets"),
+                path=path.relative_to(directory).as_posix(),
+                description=f"自动发现的资产：{path.name}",
+                media_type=mimetypes.guess_type(path.name)[0],
+            )
+            for path in sorted(set(asset_paths))
+        )
+        scripts = tuple(
+            SkillScript(
+                entrypoint_id=_discovered_id(path, directory / "scripts"),
+                path=path.relative_to(directory).as_posix(),
+                description=_python_script_description(path),
+                runtime="python-cli",
+                requires_approval=True,
+                read_data_files=True,
+                write_artifacts=True,
+            )
+            for path in sorted(script_paths)
+        )
+        return references, assets, scripts
+
+    @staticmethod
+    def _files_under(directory: Path) -> list[Path]:
+        """返回目录中的普通文件；不存在时返回空列表。"""
+        if not directory.is_dir():
+            return []
+        return [
+            path
+            for path in directory.rglob("*")
+            if path.is_file() and not path.is_symlink()
+        ]
+
     def _skill_directory(self, skill_id: str) -> Path:
         normalized = skill_id.strip()
         if not SKILL_ID_PATTERN.fullmatch(normalized):
@@ -244,11 +336,21 @@ class SkillRegistry:
         return candidate
 
     @staticmethod
-    def _safe_declared_path(directory: Path, raw_path: str, expected_root: str) -> Path:
+    def _safe_declared_path(
+        directory: Path,
+        raw_path: str,
+        expected_root: str,
+        *,
+        allow_root_file: bool = False,
+    ) -> Path:
         relative = Path(raw_path)
         if not raw_path or relative.is_absolute() or ".." in relative.parts:
             raise SkillRegistryError("Skill 资源路径必须是安全相对路径")
-        if not relative.parts or relative.parts[0].casefold() != expected_root.casefold():
+        in_expected_root = bool(
+            relative.parts
+            and relative.parts[0].casefold() == expected_root.casefold()
+        )
+        if not in_expected_root and not (allow_root_file and len(relative.parts) == 1):
             raise SkillRegistryError(f"资源必须位于 {expected_root}/ 目录")
         target = (directory / relative).resolve(strict=True)
         root = directory.resolve(strict=True)
@@ -296,6 +398,36 @@ def _require_unique(values: list[str], label: str) -> None:
     normalized = [value.casefold() for value in values]
     if any(not value for value in normalized) or len(normalized) != len(set(normalized)):
         raise SkillRegistryError(f"{label} 不能为空或重复")
+
+
+def _discovered_id(path: Path, preferred_root: Path) -> str:
+    """根据相对路径生成可重复的 kebab-case 资源标识。"""
+    try:
+        relative = path.relative_to(preferred_root)
+    except ValueError:
+        relative = Path(path.name)
+    raw = "-".join((*relative.parts[:-1], relative.stem))
+    identifier = re.sub(r"[^a-z0-9]+", "-", raw.casefold()).strip("-")
+    if not identifier:
+        raise SkillRegistryError(f"无法为资源生成稳定标识: {path.name}")
+    return identifier
+
+
+def _python_script_description(path: Path) -> str:
+    """从脚本模块文档中提取用途和 Usage，供模型正确构造 argv。"""
+    fallback = (
+        f"自动发现的命令行脚本：{path.name}。"
+        "调用时 arguments 只传 argv 字符串数组。"
+    )
+    try:
+        source = path.read_text(encoding="utf-8-sig")
+        docstring = ast.get_docstring(ast.parse(source))
+    except (OSError, SyntaxError, UnicodeError):
+        return fallback
+    if not docstring:
+        return fallback
+    compact = "\n".join(line.rstrip() for line in docstring.strip().splitlines())
+    return f"{compact[:1_500]}\n调用时 arguments 只传 argv 字符串数组。"
 
 
 def _bundle_hash(directory: Path) -> str:

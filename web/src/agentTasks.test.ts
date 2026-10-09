@@ -9,6 +9,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
 import {
+  agentRunFailed,
   countTodoStates,
   deriveTodoStates,
   hasActivityEvents,
@@ -174,4 +175,13 @@ test('已完成的实时轨迹仍保留展开入口', () => {
 
   assert.equal(hasActivityEvents(trace), true)
   assert.equal(hasActivityEvents([planEvent(['t1'])]), false)
+})
+
+test('agentRunFailed 只识别整轮失败事件', () => {
+  assert.equal(agentRunFailed([
+    { type: 'agent_todo_failed', todo_id: 't1', error: '可恢复失败' },
+  ]), false)
+  assert.equal(agentRunFailed([
+    { type: 'agent_failed', error: '整轮执行失败' },
+  ]), true)
 })

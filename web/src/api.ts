@@ -523,7 +523,7 @@ export type SkillScriptInfo = {
   entrypoint_id: string
   path: string
   description: string
-  runtime: 'python'
+  runtime: 'python' | 'python-cli'
   timeout_seconds: number
   requires_approval: boolean
   read_data_files: boolean
@@ -573,11 +573,14 @@ export type AgentTraceEvent = {
   knowledge_base_ids?: string[]
   skill_ids?: string[]
 } | {
+  type: 'agent_thinking'
+  stream_id: string
+  content: string
+  done: boolean
+} | {
   type: 'agent_plan'
   objective: string
   reasoning_summary?: string
-  /** 模型真实思考过程（reasoning_content / <think> 等） */
-  model_reasoning?: string
   todos: Array<{
     id: string
     objective: string
@@ -597,10 +600,11 @@ export type AgentTraceEvent = {
   todo_id: string
   error: string
 } | {
+  type: 'agent_failed'
+  error: string
+} | {
   type: 'agent_action'
   thought: string
-  /** 模型真实思考过程（reasoning_content / <think> 等） */
-  model_reasoning?: string
   tool_name: string
   code?: string
   /** 摘要类短参数（路径、命令、查询词等），用于生成单行轨迹摘要 */
@@ -608,8 +612,6 @@ export type AgentTraceEvent = {
 } | {
   type: 'agent_reasoning'
   summary: string
-  /** 模型真实思考过程（reasoning_content / <think> 等） */
-  model_reasoning?: string
 } | {
   type: 'agent_observation'
   tool_name: string
@@ -623,7 +625,6 @@ export type AgentTraceEvent = {
 } | {
   type: 'agent_skill_action'
   thought: string
-  model_reasoning?: string
   operation: 'read_reference' | 'read_asset' | 'materialize_asset' | 'run_script'
   skill_id: string
   resource_id?: string | null
@@ -762,8 +763,9 @@ async function consumeAgentChatStream(res: Response, handlers: AgentChatHandlers
         handlers.onTrace(event as AgentTraceEvent)
       }
       if (event.type === 'agent_plan' || event.type === 'agent_todo_started'
-        || event.type === 'agent_todo_completed' || event.type === 'agent_todo_failed' || event.type === 'agent_action'
-        || event.type === 'agent_reasoning' || event.type === 'agent_observation'
+        || event.type === 'agent_todo_completed' || event.type === 'agent_todo_failed' || event.type === 'agent_failed'
+        || event.type === 'agent_action'
+        || event.type === 'agent_thinking' || event.type === 'agent_reasoning' || event.type === 'agent_observation'
         || event.type === 'agent_skill_action' || event.type === 'agent_skill_observation'
         || event.type === 'agent_command_approval_required' || event.type === 'agent_command_approval_decision') {
         handlers.onTrace(event as AgentTraceEvent)

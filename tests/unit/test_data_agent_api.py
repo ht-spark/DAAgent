@@ -419,8 +419,8 @@ def test_final_answer_is_split_into_streaming_chunks_without_content_loss():
     assert "".join(chunks) == answer
 
 
-def test_agent_events_expose_model_reasoning_when_present():
-    """模型真实思考过程应随决策事件透传给前端。"""
+def test_agent_events_only_expose_public_thought_summary():
+    """决策事件只公开 thought 摘要，不透传模型私有推理链。"""
     action = Action(
         thought="读取数据",
         tool_name="profile_data",
@@ -436,8 +436,10 @@ def test_agent_events_expose_model_reasoning_when_present():
     action_payload = main._agent_event_payload(action)
     finish_payload = main._agent_event_payload(finish)
 
-    assert action_payload["model_reasoning"] == "先确认字段类型，再决定画像指标。"
-    assert finish_payload["model_reasoning"] == "已有足够观察，可以作答。"
+    assert action_payload["thought"] == "读取数据"
+    assert finish_payload["summary"] == "信息充分"
+    assert "model_reasoning" not in action_payload
+    assert "model_reasoning" not in finish_payload
 
 
 def test_agent_artifacts_only_include_generated_outputs(monkeypatch, tmp_path):
@@ -629,6 +631,29 @@ def test_agent_compiles_text_attachment_into_context(tmp_path):
 
     assert "notes.txt" in context
     assert "指标口径：含税销售额" in context
+
+
+def test_agent_structured_data_attachment_skips_llm_summary(tmp_path):
+    """大型结构化数据应交给数据工具读取，启动阶段不得调用模型做全文摘要。"""
+    source = tmp_path / "orders.csv"
+    source.write_text(
+        "order_id,amount\n"
+        + "\n".join(f"{index},{index * 2}" for index in range(20_000)),
+        encoding="utf-8",
+    )
+
+    class RejectingLlm:
+        """一旦附件编译错误调用模型，就立即暴露回归。"""
+
+        def invoke(self, _messages):
+            raise AssertionError("结构化数据附件不应在启动阶段调用模型")
+
+    context = main._compile_uploaded_attachment_context([source], RejectingLlm())
+
+    assert "结构化数据附件：orders.csv" in context
+    assert "profile_data" in context
+    assert "inspect_data_rows" in context
+    assert "0,0" not in context
 
 
 def test_attachment_metadata_does_not_persist_temporary_path(tmp_path):

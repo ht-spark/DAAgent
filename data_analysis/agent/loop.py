@@ -85,6 +85,9 @@ class LlmClient(Protocol):
         """Return one model response for the supplied chat messages."""
 
 
+ProgressCallback: TypeAlias = Callable[[str, str, bool], None]
+
+
 class Action(BaseModel):
     """A request for the runtime harness to execute one registered tool."""
 
@@ -94,7 +97,7 @@ class Action(BaseModel):
     thought: str = ""
     tool_name: str = Field(min_length=1)
     arguments: dict[str, Any] = Field(default_factory=dict)
-    # 模型真实思考过程（reasoning_content / <think> 等），供前端展示；与 thought 摘要区分
+    # 兼容旧状态模型的内部字段；对外只公开 thought 摘要。
     reasoning: str = ""
 
     @field_validator("tool_name")
@@ -120,7 +123,7 @@ class Finish(BaseModel):
     type: Literal["finish"] = "finish"
     thought: str = ""
     answer: str = Field(min_length=1)
-    # 模型真实思考过程（reasoning_content / <think> 等），供前端展示；与 thought 摘要区分
+    # 兼容旧状态模型的内部字段；对外只公开 thought 摘要。
     reasoning: str = ""
 
     @field_validator("answer")
@@ -153,6 +156,7 @@ class AgentLoop:
         max_iterations: int = 50,
         decision_retries: int = 5,
         cancel_check: Callable[[], bool] | None = None,
+        progress_callback: ProgressCallback | None = None,
     ) -> None:
         """Initialize the decision-only loop.
 
@@ -163,6 +167,7 @@ class AgentLoop:
             max_iterations: Maximum number of decisions in one graph run.
             decision_retries: 决策格式错误或工具名无效时的纠错重试次数。
             cancel_check: 用户请求终止时返回 True；将在调用 LLM 前后检查。
+            progress_callback: 接收可公开思考摘要的流式更新。
 
         Raises:
             ValueError: If configuration is empty, duplicated, or out of range.
@@ -184,6 +189,8 @@ class AgentLoop:
         self._max_iterations = max_iterations
         self._decision_retries = decision_retries
         self._cancel_check = cancel_check
+        self._progress_callback = progress_callback
+        self._progress_sequence = 0
 
     def step(self, state: AgentStateView) -> Decision:
         """Return the next decision without executing the selected tool.
@@ -211,13 +218,17 @@ class AgentLoop:
         last_error: DecisionParseError | None = None
         for attempt in range(self._decision_retries + 1):
             raise_if_cancelled(self._cancel_check)
-            raw_response = invoke_cancellable(
-                lambda: self._llm.invoke(messages),
+            self._progress_sequence += 1
+            progress_id = f"react-{self._progress_sequence}"
+            _, response_text = invoke_llm_with_public_progress(
+                self._llm,
+                messages,
+                summary_key="thought",
+                stream_id=progress_id,
+                initial_text="正在分析当前状态并决定下一步…",
+                progress_callback=self._progress_callback,
                 cancel_check=self._cancel_check,
             )
-            response_text = _response_text(raw_response)
-            # 先抽出真实思考过程，再解析决策，避免 <think> 被 parse 丢弃后无法展示
-            reasoning = extract_model_reasoning(raw_response, response_text)
             try:
                 decision = parse_decision(response_text)
                 if (
@@ -229,16 +240,12 @@ class AgentLoop:
                         f"LLM 选择了未注册工具: {decision.tool_name}；"
                         f"可用工具: {available}"
                     )
-                if reasoning:
-                    decision = decision.model_copy(update={"reasoning": reasoning})
                 return decision
             except DecisionParseError as exc:
                 last_error = exc
                 if attempt >= self._decision_retries:
                     fallback = _recover_plain_text_finish(response_text)
                     if fallback is not None:
-                        if reasoning:
-                            fallback = fallback.model_copy(update={"reasoning": reasoning})
                         return fallback
                     raise
                 messages.extend(
@@ -281,9 +288,12 @@ class AgentLoop:
             "\n\n可用工具（仅可选择其中之一，不要自行执行）：\n"
             f"{json.dumps(tools, ensure_ascii=False, indent=2)}\n\n"
             "只输出一个 JSON 对象，不要附加解释。需要工具时输出："
-            '{"type":"action","thought":"一至两句可公开的判断与下一步摘要","tool_name":"工具名",'
+            '{"type":"action","thought":"面向用户的详细公开工作记录：已知事实、关键判断、'
+            '下一步动作与必要不确定性","tool_name":"工具名",'
             '"arguments":{}}。信息充分时输出：'
-            '{"type":"finish","thought":"一至两句可公开的结论摘要","answer":"带引用的最终回答"}。'
+            '{"type":"finish","thought":"面向用户的详细公开结论依据","answer":"带引用的最终回答"}。'
+            "thought 应与任务复杂度相称，通常写成二至六句或若干短段，"
+            "可使用换行和项目符号；它是可公开的工作说明，不是隐藏推理链。"
             "tool_name 必须逐字复制可用工具中的 name，禁止创造或改写工具名；"
             "没有可用工具时只能输出 finish。answer 中的换行必须按 JSON 规则转义。"
             "answer 中出现的双引号也必须转义。"
@@ -292,7 +302,7 @@ class AgentLoop:
         if skill_context.active_skills:
             protocol += (
                 "\n\n本轮还启用了 Skill。需要 Skill 资料、资产或脚本时输出："
-                '{"type":"skill_action","thought":"公开判断摘要",'
+                '{"type":"skill_action","thought":"详细公开工作记录",'
                 '"operation":"read_reference|read_asset|materialize_asset|run_script",'
                 '"skill_id":"已启用 Skill 标识","resource_id":"资源标识或 null",'
                 '"entrypoint_id":"脚本入口标识或 null","arguments":{}}。'
@@ -399,7 +409,16 @@ def _active_skills_view(context: SkillContext) -> list[dict[str, Any]]:
                 for item in active.metadata.assets
             ],
             "scripts": [
-                {"id": item.entrypoint_id, "description": item.description}
+                {
+                    "id": item.entrypoint_id,
+                    "description": item.description,
+                    "runtime": item.runtime,
+                    "arguments": (
+                        {"argv": ["按脚本用法排列的命令行参数"]}
+                        if item.runtime == "python-cli"
+                        else {"按 DAAGENT.yaml 约定传参": "值"}
+                    ),
+                }
                 for item in active.metadata.scripts
             ],
         }
@@ -508,6 +527,126 @@ def _jsonable(value: Any) -> Any:
     if isinstance(value, BaseModel):
         return value.model_dump(mode="json")
     return value
+
+
+def invoke_llm_with_public_progress(
+    llm: LlmClient,
+    messages: Sequence[tuple[str, str]],
+    *,
+    summary_key: str,
+    stream_id: str,
+    initial_text: str,
+    progress_callback: ProgressCallback | None,
+    cancel_check: Callable[[], bool] | None,
+) -> tuple[Any, str]:
+    """调用模型并流式发送结构化输出中的可公开摘要字段。"""
+    if progress_callback is None:
+        response = invoke_cancellable(
+            lambda: llm.invoke(messages),
+            cancel_check=cancel_check,
+        )
+        return response, _response_text(response)
+
+    progress_callback(stream_id, initial_text, False)
+    stream_method = getattr(llm, "stream", None)
+    if not callable(stream_method):
+        try:
+            response = invoke_cancellable(
+                lambda: llm.invoke(messages),
+                cancel_check=cancel_check,
+            )
+            return response, _response_text(response)
+        finally:
+            progress_callback(stream_id, "", True)
+
+    try:
+        def consume_stream() -> str:
+            """在可取消工作线程中消费模型流，并推送公开摘要。"""
+            chunks: list[str] = []
+            last_summary = ""
+            stream = stream_method(messages)
+            for chunk in stream:
+                raise_if_cancelled(cancel_check)
+                text = _safe_response_text(chunk)
+                if not text:
+                    continue
+                chunks.append(text)
+                summary = _partial_json_string("".join(chunks), summary_key).strip()
+                if summary and summary != last_summary:
+                    progress_callback(stream_id, summary, False)
+                    last_summary = summary
+            return "".join(chunks)
+
+        try:
+            response_text = invoke_cancellable(
+                consume_stream,
+                cancel_check=cancel_check,
+            )
+        except (AttributeError, NotImplementedError):
+            response = invoke_cancellable(
+                lambda: llm.invoke(messages),
+                cancel_check=cancel_check,
+            )
+            return response, _response_text(response)
+        if not response_text.strip():
+            progress_callback(
+                stream_id,
+                "模型流式通道未返回正文，正在切换兼容模式…",
+                False,
+            )
+            if hasattr(llm, "disable_streaming"):
+                try:
+                    setattr(llm, "disable_streaming", True)
+                except (AttributeError, TypeError, ValueError):
+                    pass
+            response = invoke_cancellable(
+                lambda: llm.invoke(messages),
+                cancel_check=cancel_check,
+            )
+            return response, _response_text(response)
+        return response_text, response_text
+    finally:
+        progress_callback(stream_id, "", True)
+
+
+def _partial_json_string(text: str, key: str) -> str:
+    """从尚未闭合的 JSON 中安全提取一个字符串字段的已生成部分。"""
+    match = re.search(rf'"{re.escape(key)}"\s*:\s*"', text)
+    if match is None:
+        return ""
+    result: list[str] = []
+    index = match.end()
+    escapes = {
+        '"': '"',
+        "\\": "\\",
+        "/": "/",
+        "b": "\b",
+        "f": "\f",
+        "n": "\n",
+        "r": "\r",
+        "t": "\t",
+    }
+    while index < len(text):
+        char = text[index]
+        if char == '"':
+            break
+        if char != "\\":
+            result.append(char)
+            index += 1
+            continue
+        if index + 1 >= len(text):
+            break
+        escaped = text[index + 1]
+        if escaped == "u":
+            code = text[index + 2:index + 6]
+            if len(code) < 4 or not re.fullmatch(r"[0-9a-fA-F]{4}", code):
+                break
+            result.append(chr(int(code, 16)))
+            index += 6
+            continue
+        result.append(escapes.get(escaped, escaped))
+        index += 2
+    return "".join(result)
 
 
 def extract_model_reasoning(response: Any, raw_text: str = "") -> str:

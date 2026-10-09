@@ -2,6 +2,7 @@ import { memo, useEffect, useId, useMemo, useRef, useState } from 'react'
 
 import { buildAgentTraceRows, type AgentTraceRow } from '../agentTraceRows'
 import {
+  agentRunFailed,
   hasActivityEvents,
   isActivityEvent,
   summarizeTodoObjective,
@@ -10,6 +11,7 @@ import {
   type TodoStatus,
 } from '../agentTasks'
 import type { AgentTraceEvent } from '../api'
+import MarkdownContent from './MarkdownContent'
 import { TraceIcon } from './TraceIcon'
 
 type Props = {
@@ -24,10 +26,55 @@ type Props = {
 /**
  * 单行轨迹：图标 + 动作 · 摘要 + 行尾次要信息。
  *
- * 摘要是这一行的主体信息（命令、路径、查询词、思考首句），
- * 完整代码与命令输出收进可展开的详情，保证默认只有一行高度。
+ * 工具摘要保持单行；思考行默认展开并完整展示流式 Markdown 内容。
  */
 const TraceRowItem = memo(function TraceRowItem({ row }: { row: AgentTraceRow }) {
+  const thinkingStartedAtRef = useRef<number | null>(
+    row.kind === 'thinking' && row.status === 'running' ? Date.now() : null,
+  )
+  const [thinkingSeconds, setThinkingSeconds] = useState(0)
+
+  useEffect(() => {
+    if (row.kind !== 'thinking') return undefined
+    if (row.status !== 'running') {
+      const startedAt = thinkingStartedAtRef.current
+      if (startedAt !== null) {
+        setThinkingSeconds(Math.max(0, Math.round((Date.now() - startedAt) / 1000)))
+      }
+      return undefined
+    }
+    if (thinkingStartedAtRef.current === null) thinkingStartedAtRef.current = Date.now()
+    const updateElapsed = () => {
+      const startedAt = thinkingStartedAtRef.current
+      if (startedAt !== null) {
+        setThinkingSeconds(Math.max(0, Math.round((Date.now() - startedAt) / 1000)))
+      }
+    }
+    updateElapsed()
+    const timer = window.setInterval(updateElapsed, 1000)
+    return () => window.clearInterval(timer)
+  }, [row.kind, row.status])
+
+  if (row.kind === 'thinking') {
+    const label = row.status === 'running' ? '思考中' : '已思考'
+    const duration = thinkingSeconds > 0
+      ? `${row.status === 'running' ? '已用时' : '用时'} ${thinkingSeconds} 秒`
+      : ''
+    return (
+      <details className="agent-trace-details agent-thinking-details" defaultOpen>
+        <summary title="展开或收起完整思考">
+          <TraceIcon name={row.icon} />
+          <span className="agent-trace-action">{label}</span>
+          {duration && <span className="agent-trace-meta">（{duration}）</span>}
+          <span className="agent-trace-chevron" aria-hidden="true" />
+        </summary>
+        <div className="agent-thinking-body">
+          <MarkdownContent content={row.content ?? row.summary ?? ''} />
+        </div>
+      </details>
+    )
+  }
+
   const body = (
     <>
       <TraceIcon name={row.icon} />
@@ -77,6 +124,7 @@ const AgentTrace = memo(function AgentTrace({ trace, running, plan, todoState }:
   const startedAtRef = useRef<number | null>(null)
   const [elapsedSeconds, setElapsedSeconds] = useState(0)
   const rows = useMemo(() => buildAgentTraceRows(trace, { running }), [trace, running])
+  const failed = useMemo(() => agentRunFailed(trace), [trace])
   const listId = useId()
 
   useEffect(() => {
@@ -142,6 +190,10 @@ const AgentTrace = memo(function AgentTrace({ trace, running, plan, todoState }:
           <span>
             {running
               ? '正在执行…'
+              : failed
+                ? elapsedSeconds > 0
+                  ? `执行失败，用时 ${elapsedSeconds} 秒`
+                  : '执行失败'
               : elapsedSeconds > 0
                 ? `已完成，用时 ${elapsedSeconds} 秒`
                 : '已完成'}

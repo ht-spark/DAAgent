@@ -117,3 +117,8 @@ export function isActivityEvent(
 export function hasActivityEvents(trace: AgentTraceEvent[]): boolean {
   return trace.some(isActivityEvent)
 }
+
+/** 判断整轮 Agent 是否以失败结束，区别于单个 Todo 的可恢复失败。 */
+export function agentRunFailed(trace: AgentTraceEvent[]): boolean {
+  return trace.some((event) => event.type === 'agent_failed')
+}

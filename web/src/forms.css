@@ -5256,7 +5256,7 @@
 }
 .rag-skill-chip { border-style: dashed; }
 
-/* ---------- 技能管理页：小卡片列表 + 详情弹窗 ---------- */
+/* ---------- 技能管理页：矩形小卡片 + 详情弹窗 ---------- */
 /* 撑满整个内容区（覆盖 modeling-tasks-page 的 980px 列宽），使"上传 Skill"按钮贴到内容区右上角 */
 .skills-page { max-width: none; overflow-y: auto; }
 .skills-upload-button {
@@ -5277,57 +5277,57 @@
   color: #7e7565;
   text-align: center;
 }
+/* 技能列表：矩形小卡片，卡片内只展示技能名称与操作按钮 */
 .skills-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(232px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
   gap: 14px;
-  padding-bottom: 28px;
+  margin: 0;
+  padding: 0 0 28px;
+  list-style: none;
 }
-/* 整张卡片本身就是按钮：点击打开技能详情弹窗 */
 .skill-card {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  padding: 14px 16px;
+  gap: 14px;
+  padding: 16px 18px;
   border: 1px solid rgba(116, 91, 43, 0.2);
   border-radius: 12px;
   background: rgba(255, 253, 246, 0.72);
-  font: inherit;
-  text-align: left;
-  color: inherit;
-  cursor: pointer;
-  transition: border-color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease;
+  transition: border-color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease;
 }
 .skill-card:hover {
   border-color: rgba(189, 139, 46, 0.55);
   background: #fffdf6;
   box-shadow: 0 10px 22px rgba(116, 91, 43, 0.12);
-  transform: translateY(-1px);
 }
-.skill-card:focus-visible { outline: 2px solid rgba(184, 137, 45, 0.55); outline-offset: 2px; }
-.skill-card-name { font-size: calc(15px * var(--app-font-ratio)); font-weight: 700; color: #2a2416; }
-.skill-card-id { font-size: calc(12px * var(--app-font-ratio)); color: #948b7c; }
-/* 介绍最多显示三行，保证同排小卡片高度一致 */
-.skill-card-desc {
-  display: -webkit-box;
-  -webkit-line-clamp: 3;
-  -webkit-box-orient: vertical;
+/* 名称过长时省略号截断，悬停 title 查看全名 */
+.skill-card-name {
   overflow: hidden;
-  margin-top: 2px;
-  color: #6e6658;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: calc(16px * var(--app-font-ratio));
+  font-weight: 700;
+  color: #2a2416;
+}
+/* 操作按钮固定在卡片底部右侧 */
+.skill-card-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: auto; }
+.skill-action {
+  padding: 5px 12px;
+  border: 1px solid rgba(92, 72, 28, 0.16);
+  border-radius: 8px;
+  background: transparent;
+  color: #9b6c17;
+  font: inherit;
   font-size: calc(12.5px * var(--app-font-ratio));
-  line-height: 1.55;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
 }
-.skill-card-foot {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 6px 10px;
-  margin-top: auto;
-  padding-top: 10px;
-}
-.skill-card-more { color: #9b6c17; font-size: calc(12px * var(--app-font-ratio)); }
+.skill-action:hover { background: rgba(189, 139, 46, 0.12); border-color: rgba(184, 137, 45, 0.5); }
+.skill-action:focus-visible { outline: 2px solid rgba(184, 137, 45, 0.55); outline-offset: 2px; }
+/* 删除为危险操作，与错误提示同用朱砂红 */
+.skill-action.is-danger { color: #a33d31; border-color: rgba(163, 61, 49, 0.26); }
+.skill-action.is-danger:hover { background: rgba(163, 61, 49, 0.08); border-color: rgba(163, 61, 49, 0.5); }
 .skill-counts { display: flex; flex-wrap: wrap; gap: 6px; }
 .skill-counts span {
   padding: 3px 8px;
@@ -5337,8 +5337,8 @@
   font-size: calc(11.5px * var(--app-font-ratio));
 }
 
-/* 详情弹窗复用 confirm 弹窗外壳，仅加宽并补充头部/底部元素样式 */
-.skill-detail-dialog { width: min(560px, 100%); }
+/* 详情弹窗复用 confirm 弹窗外壳，加宽加高并补充头部/底部元素样式 */
+.skill-detail-dialog { width: min(760px, 100%); max-height: min(92vh, 780px); }
 .skill-detail-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .skill-detail-id { display: inline-block; margin-top: 6px; color: #948b7c; font-size: calc(12px * var(--app-font-ratio)); }
 .skill-detail-close {
@@ -6165,6 +6165,39 @@
   line-height: 1.6;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+/* 流式思考：标题保持紧凑，正文完整展开并随增量事件持续增长。 */
+.agent-thinking-details {
+  width: 100%;
+}
+
+.agent-thinking-details > summary {
+  width: fit-content;
+  color: var(--rag-text-secondary);
+}
+
+.agent-thinking-details > summary .agent-trace-meta {
+  margin-left: -3px;
+}
+
+.agent-thinking-body {
+  margin: 2px 10px 8px 11px;
+  padding: 4px 12px 5px 15px;
+  border-left: 1px solid color-mix(in srgb, var(--rag-text-muted) 28%, transparent);
+  color: var(--rag-text-secondary);
+  font-size: calc(12.5px * var(--app-font-ratio));
+}
+
+.agent-thinking-body .markdown-content p {
+  margin: 5px 0;
+  line-height: 1.72;
+}
+
+.agent-thinking-body .markdown-content ul,
+.agent-thinking-body .markdown-content ol {
+  margin: 5px 0;
+  padding-left: 20px;
 }
 
 /* 任务卡片：固定在输入框上方，标题栏可展开/收起任务列表 */

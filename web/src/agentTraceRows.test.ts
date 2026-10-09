@@ -87,6 +87,41 @@ test('一次工具调用只产生「思考行 + 工具行」，观测并入工�
   assert.equal(rows[1].details?.[0].text, '文件内容')
 })
 
+test('流式思考在同一展开块更新并在完成后保留完整内容', () => {
+  const streaming: AgentTraceEvent[] = [
+    { type: 'agent_thinking', stream_id: 'react-1', content: '正在分析…', done: false },
+    { type: 'agent_thinking', stream_id: 'react-1', content: '准备读取附件。\n\n- 检查字段\n- 核对缺失值', done: false },
+  ]
+  const activeRows = buildAgentTraceRows(streaming, { running: true })
+
+  assert.equal(activeRows.length, 1)
+  assert.equal(activeRows[0].action, '思考')
+  assert.equal(activeRows[0].kind, 'thinking')
+  assert.equal(activeRows[0].content, '准备读取附件。\n\n- 检查字段\n- 核对缺失值')
+  assert.equal(activeRows[0].status, 'running')
+
+  const completedRows = buildAgentTraceRows([
+    ...streaming,
+    { type: 'agent_thinking', stream_id: 'react-1', content: '', done: true },
+  ])
+  assert.equal(completedRows.length, 1)
+  assert.equal(completedRows[0].status, 'idle')
+  assert.match(completedRows[0].content ?? '', /核对缺失值/)
+})
+
+test('流式思考完成后不与行动携带的相同 thought 重复', () => {
+  const thought = '字段和缺失值已经确认。\n\n下一步读取真实样例。'
+  const rows = buildAgentTraceRows([
+    { type: 'agent_thinking', stream_id: 'react-1', content: thought, done: false },
+    { type: 'agent_thinking', stream_id: 'react-1', content: '', done: true },
+    action('inspect_data_rows', { file_name: 'sales.csv' }, { thought }),
+    observation('inspect_data_rows'),
+  ])
+
+  assert.equal(rows.filter((row) => row.kind === 'thinking').length, 1)
+  assert.deepEqual(rows.map((row) => row.action), ['思考', '查看数据行'])
+})
+
 test('工具行按白名单参数与代码注释取摘要', () => {
   const rows = buildAgentTraceRows([
     action('run_terminal_command', { command: 'python -m pytest' }),

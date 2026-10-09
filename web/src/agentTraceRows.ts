@@ -53,6 +53,10 @@ export type AgentTraceRow = {
   details?: TraceDetail[]
   /** 可展开行的展开提示文案 */
   detailLabel?: string
+  /** 完整流式思考使用独立的展开式正文，而不是单行摘要 */
+  kind?: 'thinking'
+  /** 思考正文保留完整 Markdown，不做单行截断 */
+  content?: string
 }
 
 /** 单行摘要的最大字符数：超出部分省略，保证每行一行高度 */
@@ -174,23 +178,28 @@ function toolSummary(
 function thinkingRow(
   id: string,
   text: string,
-  modelReasoning: string | undefined,
   status: TraceRowStatus = 'idle',
 ): AgentTraceRow | undefined {
-  const summary = summarizeText(text)
-  if (!summary && status !== 'running') return undefined
-  const reasoning = modelReasoning?.trim() ?? ''
+  const content = text.trim()
+  if (!content && status !== 'running') return undefined
   return {
     id,
     icon: 'think',
     action: '思考',
-    summary: summary || '正在继续分析…',
+    summary: content ? summarizeText(content) : '正在继续分析…',
     status,
-    details: reasoning && reasoning !== text.trim()
-      ? [{ label: '模型思考过程', text: reasoning }]
-      : undefined,
-    detailLabel: '查看本轮思考原文',
+    kind: 'thinking',
+    content: content || '正在继续分析…',
   }
+}
+
+/** 判断流式思考是否已经完整覆盖随后决策携带的公开 thought。 */
+function previousThinkingMatches(rows: AgentTraceRow[], thought: string): boolean {
+  const previous = rows[rows.length - 1]
+  return Boolean(
+    previous?.kind === 'thinking'
+    && previous.content?.trim() === thought.trim(),
+  )
 }
 
 /**
@@ -223,12 +232,31 @@ export function buildAgentTraceRows(
         pendingTool = null
         break
       }
+      case 'agent_thinking': {
+        const streamRowId = `agent-thinking-${event.stream_id}`
+        const existingIndex = rows.findIndex((row) => row.id === streamRowId)
+        if (event.done) {
+          if (existingIndex >= 0) {
+            rows[existingIndex] = {
+              ...rows[existingIndex],
+              status: 'idle',
+            }
+          }
+          break
+        }
+        const row = thinkingRow(streamRowId, event.content, 'running')
+        if (!row) break
+        if (existingIndex >= 0) {
+          rows[existingIndex] = row
+        } else {
+          rows.push(row)
+        }
+        break
+      }
       case 'agent_plan': {
         const reasoning = event.reasoning_summary?.trim() ?? ''
-        const modelReasoning = event.model_reasoning?.trim() ?? ''
         const details: TraceDetail[] = []
         if (reasoning) details.push({ label: '规划说明', text: reasoning })
-        if (modelReasoning) details.push({ label: '模型思考过程', text: modelReasoning })
         if (event.todos.length) {
           details.push({
             label: '任务清单',
@@ -250,9 +278,9 @@ export function buildAgentTraceRows(
         break
       }
       case 'agent_action': {
-        const thought = (event.thought || event.model_reasoning || '').trim()
-        const row = thinkingRow(`${id}-think`, thought, event.model_reasoning)
-        if (row) rows.push(row)
+        const thought = event.thought.trim()
+        const row = thinkingRow(`${id}-think`, thought)
+        if (row && !previousThinkingMatches(rows, thought)) rows.push(row)
 
         const presentation = TOOL_PRESENTATION[event.tool_name]
         const summary = toolSummary(event.tool_name, event.arguments ?? {}, event.code)
@@ -272,9 +300,9 @@ export function buildAgentTraceRows(
         break
       }
       case 'agent_skill_action': {
-        const thought = (event.thought || event.model_reasoning || '').trim()
-        const thoughtRow = thinkingRow(`${id}-think`, thought, event.model_reasoning)
-        if (thoughtRow) rows.push(thoughtRow)
+        const thought = event.thought.trim()
+        const thoughtRow = thinkingRow(`${id}-think`, thought)
+        if (thoughtRow && !previousThinkingMatches(rows, thought)) rows.push(thoughtRow)
         const labels = {
           read_reference: '读取技能资料',
           read_asset: '读取技能资产',
@@ -294,7 +322,7 @@ export function buildAgentTraceRows(
         break
       }
       case 'agent_reasoning': {
-        const row = thinkingRow(id, event.summary, event.model_reasoning)
+        const row = thinkingRow(id, event.summary)
         if (row) rows.push(row)
         break
       }
@@ -381,6 +409,7 @@ export function buildAgentTraceRows(
       case 'agent_todo_started':
       case 'agent_todo_completed':
       case 'agent_todo_failed':
+      case 'agent_failed':
         break
       default:
         break

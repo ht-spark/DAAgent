@@ -50,6 +50,33 @@ class SequencedLlm:
         return next(self._responses)
 
 
+class StreamingLlm:
+    def __init__(self, chunks: list[str]) -> None:
+        self.chunks = chunks
+
+    def stream(self, _messages: list[tuple[str, str]]):
+        for chunk in self.chunks:
+            yield SimpleNamespace(content=chunk)
+
+    def invoke(self, _messages: list[tuple[str, str]]) -> str:
+        raise AssertionError("支持 stream 时不应回退 invoke")
+
+
+class EmptyStreamingLlm:
+    def __init__(self, response: str) -> None:
+        self.response = response
+        self.invoke_calls = 0
+        self.disable_streaming = False
+
+    def stream(self, _messages: list[tuple[str, str]]):
+        yield SimpleNamespace(content="")
+        yield SimpleNamespace(content=[])
+
+    def invoke(self, _messages: list[tuple[str, str]]) -> str:
+        self.invoke_calls += 1
+        return self.response
+
+
 @dataclass
 class FakeState:
     user_query: str = "退款政策有什么优势？"
@@ -95,6 +122,54 @@ def test_step_returns_finish_from_content_blocks() -> None:
     loop = AgentLoop(FakeLlm(response), [], "回答必须带引用。")
 
     assert loop.step(FakeState()) == Finish(thought="信息充分", answer="结论[1]")
+
+
+def test_step_streams_public_thought_before_returning_decision() -> None:
+    updates: list[tuple[str, str, bool]] = []
+    loop = AgentLoop(
+        StreamingLlm([
+            '{"type":"action","thought":"先读取',
+            '数据，再检查字段。","tool_name":"retrieve",',
+            '"arguments":{"query":"字段"}}',
+        ]),
+        [ToolSpec("retrieve", "检索", {"type": "object"})],
+        "按证据回答。",
+        progress_callback=lambda stream_id, content, done: updates.append(
+            (stream_id, content, done)
+        ),
+    )
+
+    decision = loop.step(FakeState())
+
+    assert isinstance(decision, Action)
+    assert decision.thought == "先读取数据，再检查字段。"
+    assert updates[0][1] == "正在分析当前状态并决定下一步…"
+    assert any(content == "先读取数据，再检查字段。" for _, content, _ in updates)
+    assert updates[-1][2] is True
+
+
+def test_step_falls_back_to_invoke_when_stream_has_no_text() -> None:
+    updates: list[tuple[str, str, bool]] = []
+    llm = EmptyStreamingLlm(
+        '{"type":"finish","thought":"兼容模式已返回", "answer":"完成"}'
+    )
+    loop = AgentLoop(
+        llm,
+        [],
+        "按证据回答。",
+        progress_callback=lambda stream_id, content, done: updates.append(
+            (stream_id, content, done)
+        ),
+    )
+
+    decision = loop.step(FakeState())
+
+    assert isinstance(decision, Finish)
+    assert decision.answer == "完成"
+    assert llm.invoke_calls == 1
+    assert llm.disable_streaming is True
+    assert any("兼容模式" in content for _, content, _ in updates)
+    assert updates[-1][2] is True
 
 
 def test_parse_decision_accepts_one_fenced_json_object() -> None:
@@ -452,7 +527,7 @@ def test_extract_model_reasoning_reads_thinking_content_blocks() -> None:
     assert extract_model_reasoning(response) == "先拆分子任务。"
 
 
-def test_step_attaches_model_reasoning_to_decision() -> None:
+def test_step_keeps_private_think_block_out_of_decision() -> None:
     llm = FakeLlm(
         SimpleNamespace(
             content=(
@@ -472,10 +547,10 @@ def test_step_attaches_model_reasoning_to_decision() -> None:
 
     assert isinstance(decision, Action)
     assert decision.thought == "读取数据"
-    assert decision.reasoning == "应该先读取授权数据再画像。"
+    assert decision.reasoning == ""
 
 
-def test_step_attaches_reasoning_content_to_finish() -> None:
+def test_step_keeps_private_reasoning_content_out_of_finish() -> None:
     response = SimpleNamespace(
         content='{"type":"finish","thought":"信息充分","answer":"结论[1]"}',
         additional_kwargs={"reasoning_content": "已有足够观察，可以直接作答。"},
@@ -485,7 +560,7 @@ def test_step_attaches_reasoning_content_to_finish() -> None:
     decision = loop.step(FakeState())
 
     assert isinstance(decision, Finish)
-    assert decision.reasoning == "已有足够观察，可以直接作答。"
+    assert decision.reasoning == ""
 
 
 def test_step_raises_task_cancelled_during_llm_invoke() -> None:

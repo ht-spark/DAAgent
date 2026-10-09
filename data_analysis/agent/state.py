@@ -64,7 +64,7 @@ class AnalysisPlan(BaseModel):
 
     objective: str
     reasoning_summary: str = ""
-    # 模型真实思考过程（reasoning_content / <think> 等），供前端展示
+    # 兼容旧计划快照的内部字段；对外只公开 reasoning_summary。
     model_reasoning: str = ""
     todos: list[TodoItem] = Field(min_length=1, max_length=12)
 
