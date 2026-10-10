@@ -55,10 +55,12 @@ def test_discussion_remembers_selected_model_config():
     first_id = store.create_session("会话一")
     second_id = store.create_session("会话二", model_config_id="cfg_second")
 
-    assert store.set_session_model_config(first_id, "cfg_first") is True
+    assert store.set_session_model_config(first_id, "cfg_first", "xhigh") is True
     assert store.get_session(first_id)["model_config_id"] == "cfg_first"
+    assert store.get_session(first_id)["reasoning_effort"] == "xhigh"
     assert store.get_session(second_id)["model_config_id"] == "cfg_second"
     assert discussions.get_discussion(first_id)["model_config_id"] == "cfg_first"
+    assert discussions.get_discussion(first_id)["reasoning_effort"] == "xhigh"
     listed = {item["id"]: item for item in discussions.list_discussions()}
     assert listed[second_id]["model_config_id"] == "cfg_second"
 

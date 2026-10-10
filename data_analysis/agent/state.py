@@ -17,6 +17,7 @@ from pydantic import (
     model_validator,
 )
 
+from ..experts.models import ExpertContext
 from ..skills.models import SkillContext, SkillObservation
 
 
@@ -705,6 +706,7 @@ class AgentState(BaseModel):
     available_artifacts: list[ArtifactReference] = Field(default_factory=list)
     messages: list[AgentMessage] = Field(default_factory=list)
     observations: list[Observation] = Field(default_factory=list)
+    expert_context: ExpertContext = Field(default_factory=ExpertContext)
     skill_context: SkillContext = Field(default_factory=SkillContext)
     skill_observations: list[SkillObservation] = Field(default_factory=list)
     iteration: int = Field(default=0, ge=0)

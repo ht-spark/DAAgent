@@ -9,6 +9,7 @@ import {
   fetchProjectFileTree,
   getKnowledgeBases,
   importSkill,
+  listExperts,
   listSkills,
   openProjectFolder,
   projectFilePreviewUrl,
@@ -20,13 +21,14 @@ import {
   type AgentTraceEvent,
   type AgentChatHandlers,
   type ContextUsage,
+  type ExpertInfo,
   type KnowledgeBaseSummary,
   type KnowledgeSourceCitation,
   type ProjectFilePreview,
   type ProjectFileNode,
   type SkillInfo,
 } from '../api'
-import { loadConfigs, type ApiConfig } from '../apiConfigs'
+import { isReasoningEffort, loadConfigs, type ApiConfig, type ReasoningEffort } from '../apiConfigs'
 import type { TerminalType } from '../settings'
 import {
   TODO_STATUS_LABELS,
@@ -50,6 +52,16 @@ const PROJECT_SIDEBAR_MIN_WIDTH = 280
 const PROJECT_SIDEBAR_MAX_WIDTH = 720
 const PROJECT_SIDEBAR_MIN_CHAT_WIDTH = 480
 const PROJECT_SIDEBAR_WIDTH_STORAGE_KEY = 'daagent-project-sidebar-width'
+
+/** 对话模型菜单沿用接口支持的全部思考档位，避免已有配置被降级。 */
+const REASONING_EFFORT_OPTIONS: Array<{ value: ReasoningEffort; label: string }> = [
+  { value: 'close', label: 'close' },
+  { value: 'low', label: 'low' },
+  { value: 'medium', label: 'medium' },
+  { value: 'high', label: 'high' },
+  { value: 'xhigh', label: 'xhigh' },
+  { value: 'max', label: 'max' },
+]
 
 function clampProjectSidebarWidth(width: number, containerWidth?: number): number {
   const availableWidth = containerWidth ?? (
@@ -193,11 +205,18 @@ function filterFileTree(nodes: ProjectFileNode[], keyword: string): ProjectFileN
   return walk(nodes)
 }
 
-type ProjectPreviewKind = 'image' | 'markdown' | 'python' | 'pdf' | 'docx' | 'xlsx' | 'unsupported'
+type ProjectPreviewKind = 'image' | 'markdown' | 'python' | 'pdf' | 'html' | 'docx' | 'xlsx' | 'unsupported'
 
 const PROJECT_IMAGE_SUFFIXES = new Set([
   '.bmp', '.gif', '.jpeg', '.jpg', '.png', '.svg', '.tif', '.tiff', '.webp',
 ])
+
+const HTML_PREVIEW_CONTENT_SECURITY_POLICY = "default-src 'none'; img-src data:; style-src 'unsafe-inline'; font-src data:; base-uri 'none'; form-action 'none'"
+
+/** 为不受信任的 HTML 预览补齐独立文档与资源限制。 */
+function createSandboxedHtmlPreviewDocument(content: string): string {
+  return `<!doctype html><html><head><meta http-equiv="Content-Security-Policy" content="${HTML_PREVIEW_CONTENT_SECURITY_POLICY}"></head><body>${content}</body></html>`
+}
 
 function projectPreviewKind(fileName: string): ProjectPreviewKind {
   const dotIndex = fileName.lastIndexOf('.')
@@ -206,6 +225,7 @@ function projectPreviewKind(fileName: string): ProjectPreviewKind {
   if (suffix === '.md' || suffix === '.markdown') return 'markdown'
   if (suffix === '.py') return 'python'
   if (suffix === '.pdf') return 'pdf'
+  if (suffix === '.htm' || suffix === '.html') return 'html'
   if (suffix === '.docx') return 'docx'
   if (suffix === '.xlsx') return 'xlsx'
   return 'unsupported'
@@ -223,6 +243,7 @@ function projectPreviewLabel(kind: ProjectPreviewKind): string {
   if (kind === 'markdown') return 'Markdown'
   if (kind === 'python') return 'Python'
   if (kind === 'pdf') return 'PDF'
+  if (kind === 'html') return 'HTML'
   if (kind === 'docx') return 'Word'
   if (kind === 'xlsx') return 'Excel'
   return '文件'
@@ -304,7 +325,7 @@ function ProjectFilePreviewPane({
     return (
       <div className="proj-preview-state">
         <strong>此格式暂不支持侧栏预览</strong>
-        <p>当前支持图片、Markdown、Excel（.xlsx）、PDF、Word（.docx）和 Python 文件。</p>
+        <p>当前支持图片、HTML、Markdown、Excel（.xlsx）、PDF、Word（.docx）和 Python 文件。</p>
       </div>
     )
   }
@@ -336,6 +357,20 @@ function ProjectFilePreviewPane({
     )
   }
   if (!preview) return null
+
+  if (kind === 'html' && preview.kind === 'text') {
+    return (
+      <div className="proj-preview-media is-html">
+        <iframe
+          srcDoc={createSandboxedHtmlPreviewDocument(preview.content)}
+          sandbox=""
+          referrerPolicy="no-referrer"
+          title={`${file.name} HTML 预览`}
+        />
+        {preview.truncated && <p className="proj-preview-note">文件较大，仅显示前部内容</p>}
+      </div>
+    )
+  }
 
   if (kind === 'markdown' && preview.kind === 'text') {
     return (
@@ -979,6 +1014,8 @@ type Props = {
   onDiscussionId: (id: string) => void
   resumeRunId?: string | null
   onViewResult: (runId: string) => void
+  /** 由任务专家入口选中的专家；空值表示通用 Agent。 */
+  expertId?: string | null
   /** 跳转到「技能」管理页（「+」菜单底部“管理技能”） */
   onManageSkills?: () => void
 }
@@ -1000,17 +1037,23 @@ export default function NewChat({
   onDiscussionId,
   resumeRunId,
   onViewResult,
+  expertId,
   onManageSkills,
 }: Props) {
   const [mode, setMode] = useState<Mode>(resumeRunId ? 'modeling' : 'agent')
   const [draft, setDraft] = useState('')
   const [messages, setMessages] = useState<Message[]>([])
+  const [isMessageScrollbarVisible, setIsMessageScrollbarVisible] = useState(false)
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [activeRunId, setActiveRunId] = useState<string | null>(null)
   const [isStopping, setIsStopping] = useState(false)
   const [files, setFiles] = useState<File[]>([])
   const [skills, setSkills] = useState<SkillInfo[]>([])
   const [selectedSkillIds, setSelectedSkillIds] = useState<string[]>([])
+  const [experts, setExperts] = useState<ExpertInfo[]>([])
+  const [expertsLoading, setExpertsLoading] = useState(true)
+  const [expertLoadError, setExpertLoadError] = useState('')
+  const [selectedExpertId, setSelectedExpertId] = useState<string | null>(expertId ?? null)
   // 「+」菜单：技能搜索关键词、导入中标记与导入失败提示
   const [skillQuery, setSkillQuery] = useState('')
   const [skillImporting, setSkillImporting] = useState(false)
@@ -1033,6 +1076,9 @@ export default function NewChat({
   const [projectSidebarWidth, setProjectSidebarWidth] = useState(loadProjectSidebarWidth)
   const [apiConfigs, setApiConfigs] = useState<ApiConfig[]>([])
   const [selectedConfigId, setSelectedConfigId] = useState<string>('')
+  // null 表示沿用模型配置的默认思考程度；选中任一档后只覆盖当前会话。
+  const [selectedReasoningEffort, setSelectedReasoningEffort] = useState<ReasoningEffort | null>(null)
+  const [hoveredModelConfigId, setHoveredModelConfigId] = useState<string | null>(null)
   const apiConfigsRef = useRef<ApiConfig[]>([])
   const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBaseSummary[]>([])
   // 不预选知识库，用户可以选择零个或多个
@@ -1040,11 +1086,13 @@ export default function NewChat({
   const [expandedKnowledgeBaseId, setExpandedKnowledgeBaseId] = useState<string | null>(null)
   const knowledgeBasesRef = useRef<KnowledgeBaseSummary[]>([])
   const fileInputRef = useRef<HTMLInputElement>(null)
-  // 「+」菜单：主弹层、技能飞层与「从本地添加技能」文件输入
+  // 「+」菜单：主弹层、技能/专家飞层与「从本地添加技能」文件输入
   const addPickerRef = useRef<HTMLDetailsElement>(null)
   const skillSubRef = useRef<HTMLDetailsElement>(null)
+  const expertSubRef = useRef<HTMLDetailsElement>(null)
   const skillImportInputRef = useRef<HTMLInputElement>(null)
   const listRef = useRef<HTMLDivElement>(null)
+  const messageScrollbarTimerRef = useRef<number | null>(null)
   const chatBodyRef = useRef<HTMLDivElement>(null)
   const projectSidebarWidthRef = useRef(projectSidebarWidth)
   const projectSidebarResizeRef = useRef<{
@@ -1068,6 +1116,23 @@ export default function NewChat({
       if (approvalResolveRef.current) approvalResolveRef.current(false)
     }
   }, [])
+
+  useEffect(() => () => {
+    if (messageScrollbarTimerRef.current !== null) {
+      window.clearTimeout(messageScrollbarTimerRef.current)
+    }
+  }, [])
+
+  function revealMessageScrollbar() {
+    setIsMessageScrollbarVisible(true)
+    if (messageScrollbarTimerRef.current !== null) {
+      window.clearTimeout(messageScrollbarTimerRef.current)
+    }
+    messageScrollbarTimerRef.current = window.setTimeout(() => {
+      setIsMessageScrollbarVisible(false)
+      messageScrollbarTimerRef.current = null
+    }, 700)
+  }
 
   function setProjectSidebarCssWidth(width: number): number {
     const containerWidth = chatBodyRef.current?.getBoundingClientRect().width
@@ -1273,6 +1338,23 @@ export default function NewChat({
       .catch(() => setSkills([]))
   }, [])
 
+  useEffect(() => {
+    setExpertsLoading(true)
+    setExpertLoadError('')
+    void listExperts()
+      .then((items) => {
+        setExperts(items)
+        setSelectedExpertId((current) => (
+          current && items.some((item) => item.expert_id === current) ? current : null
+        ))
+      })
+      .catch((reason: unknown) => {
+        setExperts([])
+        setExpertLoadError(reason instanceof Error ? reason.message : '获取专家列表失败')
+      })
+      .finally(() => setExpertsLoading(false))
+  }, [])
+
   // 技能飞层搜索过滤：名称 / ID / 描述任一命中即可
   const filteredSkills = useMemo(() => {
     const keyword = skillQuery.trim().toLowerCase()
@@ -1336,11 +1418,14 @@ export default function NewChat({
     setIsStopping(false)
     setAgentRunTerminated(false)
     setSelectedSkillIds([])
+    setSelectedExpertId(expertId ?? null)
+    setHoveredModelConfigId(null)
     if (!discussionId) {
       setMessages([])
       setTitle('新讨论')
       setAgentTrace([])
       setSelectedConfigId(apiConfigsRef.current[0]?.id ?? '')
+      setSelectedReasoningEffort(null)
       return
     }
     let cancelled = false
@@ -1393,6 +1478,9 @@ export default function NewChat({
             ? discussion.model_config_id
             : (availableConfigs[0]?.id ?? ''),
         )
+        setSelectedReasoningEffort(
+          isReasoningEffort(discussion.reasoning_effort) ? discussion.reasoning_effort : null,
+        )
         if (activeRun) {
           const controller = new AbortController()
           streamControllerRef.current = controller
@@ -1422,7 +1510,7 @@ export default function NewChat({
         ])
       })
     return () => { cancelled = true }
-  }, [discussionId])
+  }, [discussionId, expertId])
 
   useEffect(() => {
     const el = listRef.current
@@ -1475,9 +1563,11 @@ export default function NewChat({
         attachedFiles,
         createStreamHandlers(controller),
         selectedConfigId || null,
+        selectedReasoningEffort,
         knowledgeBaseIds,
         projectId,
         selectedSkillIds,
+        selectedExpertId,
         controller.signal,
       )
     } catch (error) {
@@ -1521,12 +1611,31 @@ export default function NewChat({
 
   async function selectModel(configId: string) {
     const previousConfigId = selectedConfigId
+    const previousReasoningEffort = selectedReasoningEffort
     setSelectedConfigId(configId)
+    setSelectedReasoningEffort(null)
+    setHoveredModelConfigId(null)
     if (!discussionId) return
     try {
-      await updateBrainstormDiscussionModel(discussionId, configId)
+      await updateBrainstormDiscussionModel(discussionId, configId, null)
     } catch {
       setSelectedConfigId((current) => current === configId ? previousConfigId : current)
+      setSelectedReasoningEffort((current) => current === null ? previousReasoningEffort : current)
+    }
+  }
+
+  async function selectModelAndReasoning(configId: string, reasoningEffort: ReasoningEffort) {
+    const previousConfigId = selectedConfigId
+    const previousReasoningEffort = selectedReasoningEffort
+    setSelectedConfigId(configId)
+    setSelectedReasoningEffort(reasoningEffort)
+    setHoveredModelConfigId(null)
+    if (!discussionId) return
+    try {
+      await updateBrainstormDiscussionModel(discussionId, configId, reasoningEffort)
+    } catch {
+      setSelectedConfigId((current) => current === configId ? previousConfigId : current)
+      setSelectedReasoningEffort((current) => current === reasoningEffort ? previousReasoningEffort : current)
     }
   }
 
@@ -1588,7 +1697,11 @@ export default function NewChat({
         style={{ '--project-sidebar-width': `${projectSidebarWidth}px` } as React.CSSProperties}
       >
         <section className="rag-chat-col" aria-label="聊天消息">
-          <div className="rag-messages" ref={listRef}>
+          <div
+            className={`rag-messages${isMessageScrollbarVisible ? ' is-scrolling' : ''}`}
+            ref={listRef}
+            onScroll={revealMessageScrollbar}
+          >
             <div className="rag-messages-inner">
               {messages.map((message, index) => (
                 <ChatMessage
@@ -1642,7 +1755,7 @@ export default function NewChat({
               />
             ) : null}
             <div className="rag-composer">
-              {(files.length > 0 || selectedSkillIds.length > 0) && (
+              {(files.length > 0 || selectedSkillIds.length > 0 || selectedExpertId) && (
                 <div className="rag-file-chips">
                   {files.map((file, index) => (
                     <span className="rag-file-chip" key={`${file.name}-${index}`}>
@@ -1670,6 +1783,19 @@ export default function NewChat({
                       </button>
                     </span>
                   ))}
+                  {selectedExpertId ? (
+                    <span className="rag-file-chip rag-expert-chip">
+                      专家 · {experts.find((item) => item.expert_id === selectedExpertId)?.name ?? selectedExpertId}
+                      <button
+                        type="button"
+                        aria-label="移除专家"
+                        onClick={() => setSelectedExpertId(null)}
+                        disabled={isSubmitting}
+                      >
+                        ×
+                      </button>
+                    </span>
+                  ) : null}
                 </div>
               )}
               <textarea
@@ -1742,17 +1868,18 @@ export default function NewChat({
                   className="rag-add-picker"
                   ref={addPickerRef}
                   onToggle={(event) => {
-                    // 收起主菜单时同步复位技能飞层，避免下次打开残留展开状态
+                    // 收起主菜单时同步复位子层，避免下次打开残留展开状态
                     if (event.currentTarget.open) return
                     if (skillSubRef.current) skillSubRef.current.open = false
+                    if (expertSubRef.current) expertSubRef.current.open = false
                     setSkillQuery('')
                     setSkillImportError('')
                   }}
                 >
                   <summary
                     className={isSubmitting ? 'is-disabled' : undefined}
-                    aria-label="添加文件或加载技能"
-                    title="添加文件或加载技能"
+                    aria-label="添加文件、技能或专家"
+                    title="添加文件、技能或专家"
                   >
                     +
                   </summary>
@@ -1774,7 +1901,15 @@ export default function NewChat({
                       <span className="rag-add-item-label">添加文件</span>
                       {files.length > 0 && <span className="rag-add-item-count">{files.length}</span>}
                     </button>
-                    <details className="rag-add-sub" ref={skillSubRef}>
+                    <details
+                      className="rag-add-sub"
+                      ref={skillSubRef}
+                      onToggle={(event) => {
+                        if (event.currentTarget.open && expertSubRef.current) {
+                          expertSubRef.current.open = false
+                        }
+                      }}
+                    >
                       <summary className="rag-add-item" aria-label="加载技能" title="加载技能">
                         {/* 魔法棒：加载已有技能 */}
                         <svg className="rag-add-item-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -1886,6 +2021,74 @@ export default function NewChat({
                         </div>
                       </div>
                     </details>
+                    <details
+                      className="rag-add-sub"
+                      ref={expertSubRef}
+                      onToggle={(event) => {
+                        if (event.currentTarget.open && skillSubRef.current) {
+                          skillSubRef.current.open = false
+                        }
+                      }}
+                    >
+                      <summary className="rag-add-item" aria-label="加载专家" title="加载专家">
+                        {/* 用户轮廓：为本轮任务加载一个专家角色 */}
+                        <svg className="rag-add-item-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                          <circle cx="12" cy="8" r="3.2" />
+                          <path d="M5.5 20c.7-4 3-6 6.5-6s5.8 2 6.5 6" />
+                          <path d="M18.5 4.5v3M17 6h3" />
+                        </svg>
+                        <span className="rag-add-item-label">专家</span>
+                        {selectedExpertId ? <span className="rag-add-item-count">1</span> : null}
+                        <svg className="rag-add-item-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                          <path d="M9 6l6 6-6 6" />
+                        </svg>
+                      </summary>
+                      <div className="rag-skill-flyout rag-expert-flyout">
+                        <div className="rag-skill-list">
+                          {expertsLoading ? (
+                            <p className="rag-skill-empty">正在读取专家…</p>
+                          ) : expertLoadError ? (
+                            <p className="rag-skill-error" role="alert">{expertLoadError}</p>
+                          ) : experts.length === 0 ? (
+                            <p className="rag-skill-empty">暂无可用专家</p>
+                          ) : experts.map((expert) => {
+                            const selected = selectedExpertId === expert.expert_id
+                            return (
+                              <button
+                                type="button"
+                                key={expert.expert_id}
+                                className={`rag-skill-item${selected ? ' is-selected' : ''}`}
+                                aria-pressed={selected}
+                                disabled={isSubmitting}
+                                title={expert.description}
+                                onClick={() => {
+                                  setSelectedExpertId(expert.expert_id)
+                                  if (expertSubRef.current) expertSubRef.current.open = false
+                                  if (addPickerRef.current) addPickerRef.current.open = false
+                                }}
+                              >
+                                <span
+                                  className="rag-skill-avatar rag-expert-avatar"
+                                  style={{ background: skillAvatarColor(expert.expert_id) }}
+                                  aria-hidden="true"
+                                >
+                                  {expert.glyph}
+                                </span>
+                                <span className="rag-skill-meta">
+                                  <span className="rag-skill-name">{expert.name}</span>
+                                  <span className="rag-skill-desc">{expert.description}</span>
+                                </span>
+                                {selected ? (
+                                  <svg className="rag-skill-check" width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                                    <path d="M5 12.5l4.5 4.5L19 7" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
+                                  </svg>
+                                ) : null}
+                              </button>
+                            )
+                          })}
+                        </div>
+                      </div>
+                    </details>
                     <input
                       ref={skillImportInputRef}
                       hidden
@@ -1903,7 +2106,7 @@ export default function NewChat({
                   hidden
                   type="file"
                   multiple
-                  accept=".csv,.xlsx,.xls,.json,.jsonl,.ndjson,.pdf,.docx,.md,.markdown,.py,.txt,.png,.jpg,.jpeg,.webp,.gif,.bmp,.tif,.tiff"
+                  accept=".csv,.xlsx,.xls,.json,.jsonl,.ndjson,.pdf,.docx,.htm,.html,.md,.markdown,.py,.txt,.png,.jpg,.jpeg,.webp,.gif,.bmp,.tif,.tiff"
                   onChange={(event) => setFiles(Array.from(event.target.files ?? []))}
                 />
                 <ContextUsageRing usage={[...messages].reverse().find((item) => item.contextUsage)?.contextUsage} />
@@ -1911,22 +2114,40 @@ export default function NewChat({
                   const activeModelConfig = apiConfigs.find((config) => config.id === selectedConfigId)
                     ?? apiConfigs[0]
                   const activeModelLabel = activeModelConfig.model || activeModelConfig.name || '未命名模型'
+                  const effectiveReasoningEffort = selectedReasoningEffort
+                    ?? (isReasoningEffort(activeModelConfig.reasoningEffort) ? activeModelConfig.reasoningEffort : 'close')
+                  const activeModelDisplay = `${activeModelLabel} ${effectiveReasoningEffort}`
+                  const hoveredModelConfig = apiConfigs.find((config) => config.id === hoveredModelConfigId) ?? null
+                  const hoveredReasoningEffort = hoveredModelConfig
+                    ? (hoveredModelConfig.id === activeModelConfig.id
+                      ? effectiveReasoningEffort
+                      : (isReasoningEffort(hoveredModelConfig.reasoningEffort) ? hoveredModelConfig.reasoningEffort : 'close'))
+                    : null
                   return (
-                    <details className="rag-model-picker" title="选择对话使用的模型（来自 API 设置）">
-                      <summary className={isSubmitting ? 'is-disabled' : undefined} aria-label="选择模型">
+                    <details
+                      className={`rag-model-picker${hoveredModelConfig ? ' is-reasoning-effort-open' : ''}`}
+                      title="Select the model and reasoning effort for this conversation"
+                      onToggle={(event) => {
+                        if (!event.currentTarget.open) setHoveredModelConfigId(null)
+                      }}
+                    >
+                      <summary className={isSubmitting ? 'is-disabled' : undefined} aria-label="Select model">
                         <span className="rag-model-badge" aria-hidden="true">
                           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
                             <path d="M12 3l1.8 4.8L19 9.6l-4.2 3.2L16.2 18 12 15.2 7.8 18l1.4-5.2L5 9.6l5.2-1.8L12 3z" strokeLinejoin="round" />
                           </svg>
                         </span>
-                        <span className="rag-model-name">{activeModelLabel}</span>
+                        <span className="rag-model-name">{activeModelDisplay}</span>
                         <span className="rag-kb-chevron" aria-hidden="true" />
                       </summary>
-                      <div className="rag-model-menu" role="listbox" aria-label="可用模型">
-                        <div className="rag-model-menu-head">选择模型</div>
+                      <div className="rag-model-menu" role="listbox" aria-label="Available models">
+                        <div className="rag-model-menu-head">Select model</div>
                         {apiConfigs.map((config) => {
                           const label = config.model || config.name || '未命名模型'
                           const isActive = config.id === activeModelConfig.id
+                          const optionReasoningEffort = isActive
+                            ? effectiveReasoningEffort
+                            : (isReasoningEffort(config.reasoningEffort) ? config.reasoningEffort : 'close')
                           return (
                             <button
                               key={config.id}
@@ -1935,6 +2156,8 @@ export default function NewChat({
                               aria-selected={isActive}
                               className={`rag-model-option${isActive ? ' is-active' : ''}`}
                               disabled={isSubmitting}
+                              onMouseEnter={() => setHoveredModelConfigId(config.id)}
+                              onFocus={() => setHoveredModelConfigId(config.id)}
                               onClick={(event) => {
                                 void selectModel(config.id)
                                 const details = event.currentTarget.closest('details')
@@ -1943,9 +2166,7 @@ export default function NewChat({
                             >
                               <span className="rag-model-option-main">
                                 <span className="rag-model-option-name">{label}</span>
-                                {config.reasoningEffort && config.reasoningEffort !== 'close' ? (
-                                  <span className="rag-model-effort">思考 {config.reasoningEffort}</span>
-                                ) : null}
+                                <span className="rag-model-effort">思考程度 {optionReasoningEffort}</span>
                               </span>
                               {isActive ? (
                                 <svg className="rag-model-check" width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
@@ -1956,11 +2177,38 @@ export default function NewChat({
                           )
                         })}
                       </div>
+                      {hoveredModelConfig && hoveredReasoningEffort && (
+                        <div id="rag-model-effort-flyout" className="rag-model-effort-flyout" role="listbox" aria-label="思考程度">
+                          <div className="rag-model-effort-flyout-head">思考程度</div>
+                          {REASONING_EFFORT_OPTIONS.map((option) => (
+                            <button
+                              key={option.value}
+                              type="button"
+                              role="option"
+                              aria-selected={option.value === hoveredReasoningEffort}
+                              className={option.value === hoveredReasoningEffort ? 'is-active' : ''}
+                              disabled={isSubmitting}
+                              onClick={(event) => {
+                                void selectModelAndReasoning(hoveredModelConfig.id, option.value)
+                                const details = event.currentTarget.closest('details')
+                                if (details instanceof HTMLDetailsElement) details.open = false
+                              }}
+                            >
+                              <span>{option.label}</span>
+                              {option.value === hoveredReasoningEffort && (
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                                  <path d="M5 12.5l4.5 4.5L19 7" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
+                                </svg>
+                              )}
+                            </button>
+                          ))}
+                        </div>
+                      )}
                     </details>
                   )
                 })() : (
-                  <span className="rag-model-empty" title="尚未在设置中配置模型">
-                    未配置模型
+                  <span className="rag-model-empty" title="No model is configured in Settings">
+                    No model configured
                   </span>
                 )}
                 <button

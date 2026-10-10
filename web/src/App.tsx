@@ -121,6 +121,7 @@ export default function App() {
   const [taskViewEpoch, setTaskViewEpoch] = useState(0)
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null)
   const [activeKnowledgeBaseId, setActiveKnowledgeBaseId] = useState<string | undefined>()
+  const [activeExpertId, setActiveExpertId] = useState<string | null>(null)
   // 标记资料统计是从「知识库统计」打开，以便返回正确页面
   const [statsFromHistory, setStatsFromHistory] = useState(false)
   const [chunkEmbeddingOptions, setChunkEmbeddingOptions] = useState<ChunkEmbeddingOptions>({
@@ -147,6 +148,16 @@ export default function App() {
   function startNew() {
     setTaskViewEpoch((value) => value + 1)
     setDiscussionId(null)
+    setActiveExpertId(null)
+    setTask({ step: 'submit', runId: null })
+    setSection('modeling')
+    setModelingView('new')
+  }
+
+  function startWithExpert(expertId: string) {
+    setTaskViewEpoch((value) => value + 1)
+    setDiscussionId(null)
+    setActiveExpertId(expertId)
     setTask({ step: 'submit', runId: null })
     setSection('modeling')
     setModelingView('new')
@@ -204,8 +215,9 @@ export default function App() {
         }}
         onOpenDiscussion={(id, projectId) => {
           setTaskViewEpoch((value) => value + 1)
-          setActiveProjectId(projectId)
-          setDiscussionId(id)
+            setActiveProjectId(projectId)
+            setDiscussionId(id)
+            setActiveExpertId(null)
           setTask({ step: 'submit', runId: null })
           setSection('modeling')
           setModelingView('new')
@@ -271,6 +283,7 @@ export default function App() {
             onHistory={() => setModelingView('history')}
             discussionId={discussionId}
             projectId={activeProjectId}
+            expertId={activeExpertId}
             onDiscussionId={setDiscussionId}
             onManageSkills={() => setSection('skills')}
           />
@@ -330,7 +343,7 @@ export default function App() {
         )}
         {section === 'modeling' && modelingView === 'history' && <History onOpen={openFromHistory} />}
         {section === 'converter' && <DocConverter />}
-        {section === 'task-expert' && <TaskExpert />}
+        {section === 'task-expert' && <TaskExpert onSelect={startWithExpert} />}
         {section === 'skills' && <Skills />}
       </main>
     </div>

@@ -306,7 +306,6 @@ export default function DocConverter() {
     <div className="page conv-page">
       <header className="conv-head">
         <div>
-          <p className="conv-eyebrow">DAAgent · 文档工具</p>
           <h1 className="conv-title">文档转换</h1>
           <p className="conv-sub">
             把 PDF、Word、PPT、Excel、网页等文档排成 Markdown 文本，可预览、另存到本机或复制全文。

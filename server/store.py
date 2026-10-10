@@ -47,6 +47,7 @@ def _connect() -> sqlite3.Connection:
                 project_id TEXT,
                 cwd TEXT,
                 model_config_id TEXT,
+                reasoning_effort TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
@@ -76,6 +77,8 @@ def _connect() -> sqlite3.Connection:
             conn.execute("ALTER TABLE sessions ADD COLUMN cwd TEXT")
         if "model_config_id" not in session_columns:
             conn.execute("ALTER TABLE sessions ADD COLUMN model_config_id TEXT")
+        if "reasoning_effort" not in session_columns:
+            conn.execute("ALTER TABLE sessions ADD COLUMN reasoning_effort TEXT")
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_sessions_project "
             "ON sessions(project_id, updated_at)"
@@ -200,6 +203,7 @@ def create_session(
     project_id: str | None = None,
     cwd: str | None = None,
     model_config_id: str | None = None,
+    reasoning_effort: str | None = None,
 ) -> str:
     """创建会话，可选地固定到一个已注册项目。"""
     sid = session_id or uuid.uuid4().hex
@@ -210,10 +214,10 @@ def create_session(
         conn.execute(
             """
             INSERT INTO sessions
-                (id, title, project_id, cwd, model_config_id, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+                (id, title, project_id, cwd, model_config_id, reasoning_effort, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (sid, title, project_id, cwd, model_config_id, ts, ts),
+            (sid, title, project_id, cwd, model_config_id, reasoning_effort, ts, ts),
         )
         conn.commit()
     return sid
@@ -234,6 +238,7 @@ def get_session(session_id: str) -> dict[str, Any] | None:
         "project_id": row["project_id"],
         "cwd": row["cwd"],
         "model_config_id": row["model_config_id"],
+        "reasoning_effort": row["reasoning_effort"],
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
         "messages": [_message_dict(m) for m in messages],
@@ -268,6 +273,7 @@ def list_sessions(
             "project_id": row["project_id"],
             "cwd": row["cwd"],
             "model_config_id": row["model_config_id"],
+            "reasoning_effort": row["reasoning_effort"],
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
         }
@@ -289,16 +295,20 @@ def rename_session(session_id: str, title: str) -> bool:
         return cur.rowcount > 0
 
 
-def set_session_model_config(session_id: str, config_id: str) -> bool:
-    """保存当前会话固定使用的 API 模型配置。"""
+def set_session_model_config(
+    session_id: str,
+    config_id: str,
+    reasoning_effort: str | None = None,
+) -> bool:
+    """保存当前会话固定使用的 API 模型配置和思考程度。"""
     normalized = config_id.strip()[:200]
     if not normalized:
         return False
     with _lock:
         conn = _connect()
         cursor = conn.execute(
-            "UPDATE sessions SET model_config_id=? WHERE id=?",
-            (normalized, session_id),
+            "UPDATE sessions SET model_config_id=?, reasoning_effort=?, updated_at=? WHERE id=?",
+            (normalized, reasoning_effort, now_iso(), session_id),
         )
         conn.commit()
         return cursor.rowcount > 0

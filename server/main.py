@@ -43,6 +43,7 @@ from data_analysis.agent.state import (
     collect_work_trajectory_from_session,
     discover_artifacts,
 )
+from data_analysis.experts import ExpertRegistry, ExpertRegistryError
 from data_analysis.skills import (
     SkillAction,
     SkillObservation,
@@ -141,6 +142,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 ARTIFACTS_ROOT = PROJECT_ROOT / "artifacts"
 AGENT_RUNTIME_ROOT = PROJECT_ROOT / ".runtime" / "agent_uploads"
 SKILLS_ROOT = PROJECT_ROOT / "data_analysis" / "skills"
+EXPERTS_ROOT = PROJECT_ROOT / "data_analysis" / "experts"
 # 启动时只清理超过 24 小时的附件运行目录，避免误删另一个仍在运行的服务实例。
 AGENT_RUNTIME_MAX_AGE_SECONDS = 24 * 60 * 60
 WEB_DIST = PROJECT_ROOT / "web" / "dist"
@@ -151,6 +153,7 @@ AGENT_MAX_DECISIONS = 160                         # 整轮运行共享的决策�
 AGENT_COMMAND_APPROVAL_TIMEOUT_SECONDS = 300      # 单次终端命令等待人工批准的上限
 _pending_agent_commands: dict[str, asyncio.Future[bool]] = {}
 _skill_registry = SkillRegistry(SKILLS_ROOT)
+_expert_registry = ExpertRegistry(EXPERTS_ROOT, _skill_registry)
 
 
 @dataclass
@@ -973,7 +976,10 @@ def _document_chunk_counts(source_chunk_counts: dict[str, int]) -> dict[str, int
     }
 
 
-def _create_llm_from_api_config(config: dict) -> object | None:
+def _create_llm_from_api_config(
+    config: dict,
+    reasoning_effort: str | None = None,
+) -> object | None:
     """Build an LLM client from one persisted API settings entry."""
     return create_llm(
         provider=config.get("provider"),
@@ -982,7 +988,11 @@ def _create_llm_from_api_config(config: dict) -> object | None:
         model=config.get("model"),
         max_tokens=config.get("maxTokens"),
         temperature=config.get("temperature"),
-        reasoning_effort=config.get("reasoningEffort"),
+        reasoning_effort=(
+            reasoning_effort
+            if reasoning_effort is not None
+            else config.get("reasoningEffort")
+        ),
         fallback_env=False,
     )
 
@@ -1003,7 +1013,10 @@ def _active_discussion_llm():
     return _create_llm_from_api_config(config)
 
 
-def _discussion_llm_by_id(config_id: str | None):
+def _discussion_llm_by_id(
+    config_id: str | None,
+    reasoning_effort: str | None = None,
+):
     """Create the LLM for a requested API config id, falling back to the active one."""
     if not isinstance(config_id, str) or not config_id:
         return _active_discussion_llm()
@@ -1017,7 +1030,7 @@ def _discussion_llm_by_id(config_id: str | None):
     )
     if config is None:
         return None
-    return _create_llm_from_api_config(config)
+    return _create_llm_from_api_config(config, reasoning_effort)
 
 
 def _agent_context_window_tokens(config_id: str | None) -> int | None:
@@ -1751,6 +1764,32 @@ async def list_skills_endpoint() -> dict[str, object]:
     return {"skills": [item.model_dump(mode="json") for item in skills]}
 
 
+@app.get("/api/experts")
+async def list_experts_endpoint() -> dict[str, object]:
+    """返回当前可启动的内置专家定义。"""
+    try:
+        experts = await asyncio.to_thread(_expert_registry.discover)
+    except ExpertRegistryError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "experts": [
+            item.model_dump(mode="json") for item in experts if item.enabled
+        ]
+    }
+
+
+@app.get("/api/experts/{expert_id}")
+async def get_expert_endpoint(expert_id: str) -> dict[str, object]:
+    """返回一个可启动专家的完整版本定义。"""
+    try:
+        expert = await asyncio.to_thread(_expert_registry.get, expert_id)
+    except ExpertRegistryError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if not expert.enabled:
+        raise HTTPException(status_code=404, detail=f"专家已禁用: {expert_id}")
+    return expert.model_dump(mode="json")
+
+
 @app.post("/api/skills/import")
 async def import_skill_endpoint(file: UploadFile = File(...)) -> dict[str, object]:
     """从用户选择的 ZIP 包安装或更新一个 Skill。"""
@@ -1796,9 +1835,11 @@ async def agent_profile_stream_endpoint(
     title: str | None = Form(None),
     files: list[UploadFile] | None = File(None),
     config_id: str | None = Form(None),
+    reasoning_effort: str | None = Form(None),
     knowledge_base_id: str | None = Form(None),
     knowledge_base_ids: list[str] | None = Form(None),
     skill_ids: list[str] | None = Form(None),
+    expert_id: str | None = Form(None),
     project_id: str | None = Form(None),
 ) -> StreamingResponse:
     """启动自主决策 Agent，并流式返回回答及工具运行轨迹。"""
@@ -1812,7 +1853,15 @@ async def agent_profile_stream_endpoint(
     effective_config_id = config_id or (
         stored_session.get("model_config_id") if stored_session else None
     )
-    llm = _discussion_llm_by_id(effective_config_id)
+    valid_reasoning_efforts = {"close", "low", "medium", "high", "xhigh", "max"}
+    if reasoning_effort is not None and reasoning_effort not in valid_reasoning_efforts:
+        raise HTTPException(status_code=422, detail="不支持的思考程度")
+    effective_reasoning_effort = (
+        reasoning_effort
+        if reasoning_effort is not None
+        else stored_session.get("reasoning_effort") if stored_session else None
+    )
+    llm = _discussion_llm_by_id(effective_config_id, effective_reasoning_effort)
     if llm is None:
         raise HTTPException(status_code=400, detail="尚未配置可用的当前 API 模型")
     try:
@@ -1826,10 +1875,16 @@ async def agent_profile_stream_endpoint(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     selected_base_ids = [base.id for base in bases]
     try:
-        skill_context = await asyncio.to_thread(
-            _skill_registry.load_selected, skill_ids or []
+        expert_context = await asyncio.to_thread(
+            _expert_registry.load_selected, expert_id
         )
-    except SkillRegistryError as exc:
+        requested_skill_ids = list(skill_ids or [])
+        if expert_context.expert is not None:
+            requested_skill_ids.extend(expert_context.expert.default_skill_ids)
+        skill_context = await asyncio.to_thread(
+            _skill_registry.load_selected, requested_skill_ids
+        )
+    except (ExpertRegistryError, SkillRegistryError) as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     run_id = uuid.uuid4().hex
 
@@ -1856,12 +1911,14 @@ async def agent_profile_stream_endpoint(
             project_id=str(project["id"]) if project else None,
             cwd=str(workspace_root) if workspace_root else None,
             model_config_id=effective_config_id,
+            reasoning_effort=effective_reasoning_effort,
         )
     elif config_id:
         await asyncio.to_thread(
             store.set_session_model_config,
             active_discussion_id,
             config_id,
+            effective_reasoning_effort,
         )
     session_entries = stored_session.get("messages", []) if stored_session else []
     context_window_tokens = _agent_context_window_tokens(effective_config_id)
@@ -1936,6 +1993,7 @@ async def agent_profile_stream_endpoint(
             project_id=str(project["id"]) if project else None,
             messages=history,
             work_trajectory=prior_trajectory,
+            expert_context=expert_context,
             skill_context=skill_context,
         )
         system_prompt = _load_agent_system_prompt(workspace_root)
@@ -2038,6 +2096,13 @@ async def agent_profile_stream_endpoint(
             "message": message,
             "files": [path.name for path in data_paths],
             "knowledge_base_ids": selected_base_ids,
+            "expert_id": expert_context.expert_id,
+            "expert_version": (
+                expert_context.expert.version if expert_context.expert else None
+            ),
+            "expert_bundle_hash": (
+                expert_context.expert.bundle_hash if expert_context.expert else None
+            ),
             "skill_ids": list(skill_context.active_ids),
         }
         trace: list[dict[str, object]] = [started_event]
@@ -2436,6 +2501,7 @@ async def get_brainstorm_discussion_endpoint(
         title=discussion["title"],
         project_id=discussion.get("project_id"),
         model_config_id=discussion.get("model_config_id"),
+        reasoning_effort=discussion.get("reasoning_effort"),
         updated_at=discussion["updated_at"],
         messages=messages,
     )
@@ -2478,16 +2544,22 @@ async def update_brainstorm_discussion_model_endpoint(
     discussion_id: str,
     body: dict,
 ) -> dict[str, bool]:
-    """保存当前会话默认使用的 API 模型配置。"""
+    """保存当前会话默认使用的 API 模型配置和思考程度。"""
     config_id = body.get("config_id")
     if not isinstance(config_id, str) or not config_id.strip():
         raise HTTPException(status_code=400, detail="模型配置标识不能为空")
     if len(config_id.strip()) > 200:
         raise HTTPException(status_code=400, detail="模型配置标识过长")
+    reasoning_effort = body.get("reasoning_effort")
+    if reasoning_effort is not None and reasoning_effort not in {
+        "close", "low", "medium", "high", "xhigh", "max",
+    }:
+        raise HTTPException(status_code=400, detail="不支持的思考程度")
     updated = await asyncio.to_thread(
         store.set_session_model_config,
         discussion_id,
         config_id,
+        reasoning_effort,
     )
     if not updated:
         raise HTTPException(status_code=404, detail="未找到该讨论记录")

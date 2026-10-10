@@ -100,6 +100,20 @@ def test_project_file_preview_endpoint_reads_markdown(tmp_path):
     assert response.media_type == "text/plain"
 
 
+def test_project_file_preview_endpoint_returns_html_as_plain_text(tmp_path):
+    """HTML 保持纯文本响应，由前端沙箱负责渲染。"""
+    target = tmp_path / "report.html"
+    target.write_text("<h1>项目报告</h1><script>window.parent.postMessage('x', '*')</script>", encoding="utf-8")
+    project = create_project(str(tmp_path), "项目")
+
+    response = asyncio.run(
+        main.preview_project_file_endpoint(project["id"], "report.html")
+    )
+
+    assert response.body.decode("utf-8").startswith("<h1>项目报告</h1>")
+    assert response.media_type == "text/plain"
+
+
 def test_project_api_registers_existing_folder(tmp_path):
     result = asyncio.run(
         main.create_project_endpoint(ProjectCreateBody(root_path=str(tmp_path), title="数据项目"))

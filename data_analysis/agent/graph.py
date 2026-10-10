@@ -486,6 +486,7 @@ def _todo_state(state: AgentState, todo: TodoItem) -> AgentState:
         current_todo_id=todo.id,
         work_trajectory=state.work_trajectory.model_copy(deep=True),
         run_budget=state.run_budget,
+        expert_context=state.expert_context,
         skill_context=state.skill_context,
         skill_observations=list(state.skill_observations),
     )
@@ -512,6 +513,7 @@ def _final_state(state: AgentState, plan: AnalysisPlan) -> AgentState:
         analysis_plan=plan,
         work_trajectory=state.work_trajectory.model_copy(deep=True),
         run_budget=state.run_budget,
+        expert_context=state.expert_context,
         skill_context=state.skill_context,
         skill_observations=list(state.skill_observations),
     )

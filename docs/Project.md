@@ -716,3 +716,41 @@ Loop 只决定「调什么」；Harness 负责「能不能调、在哪调、失�
 完整加载过程：
 
 ![1791441129751](image/Project/1791441129751.png)
+
+### 3）具体实现
+
+Skill 的实现遵循“发现时只建立索引、运行时仅加载用户选中的 Skill、资源按需受控访问”的原则，避免把全部 Skill 内容和脚本一次性注入上下文。
+
+1. **发现与校验**
+
+   服务启动时以 `data_analysis/skills/` 作为 Skill 根目录，并创建 `SkillRegistry`。注册表扫描其一级子目录；只有包含 `SKILL.md` 的目录才会被识别为 Skill。`SKILL.md` 必须包含 YAML frontmatter，其中 `name` 与目录名一致、使用 kebab-case，并提供 `description`。注册表同时计算整个目录的 `bundle_hash`，作为版本快照和运行期间完整性校验依据。
+
+   Skill 可通过 `DAAGENT.yaml` 显式声明 `references`、`assets` 和 `scripts`。未提供清单时，系统兼容约定式目录：`references/` 下的普通文件及根目录的文本类文件作为参考资料，`assets/` 下的普通文件作为资产，`scripts/` 下的非测试 Python 文件作为命令行脚本入口。发现结果只包含资源标识、描述、媒体类型和脚本权限等元数据，可经 `GET /api/skills` 提供给前端展示。
+
+2. **用户选择与运行快照**
+
+   前端在新建对话页获取已安装 Skill 列表，用户通过“+”菜单显式勾选需要的 Skill；上传 ZIP Skill 成功后也会默认勾选。提交请求时，选中的 `skill_ids` 随 `/api/agent/chat/stream` 发送到后端。
+
+   后端调用 `SkillRegistry.load_selected()`：去重后读取这些 Skill 的 `SKILL.md` 正文及其已校验元数据，并固化为本轮 `SkillContext`。未被用户选择的 Skill 不会进入上下文，也不能被 Agent 调用。后续每次资源解析都会再次核验 `bundle_hash`；若运行期间 Skill 内容发生改变，本轮访问会被拒绝，要求重新加载。
+
+3. **模型上下文与按需操作**
+
+   Agent 每轮决策会收到已启用 Skill 的说明正文、参考资料/资产/脚本的稳定标识及用途说明，但不会收到资料全文、二进制资产或脚本源码。系统在决策协议中提供 `skill_action`，要求模型只能针对已激活的 Skill 选择以下操作：
+
+   * `read_reference`、`read_asset`：读取文本资源，支持 `offset` 分段读取；单次默认最多返回 8,000 字符，最大为 32,000 字符。
+   * `materialize_asset`：将资产复制到当前运行输出目录的 `.skill-assets/<skill-id>/`，并把该路径登记为普通工具可访问的运行级授权资源。
+   * `run_script`：执行 Skill 声明的固定脚本入口，并将标准化结果和合法产物路径作为观察结果返回给模型。
+
+   Agent 不允许借助普通工具或终端直接读取、复制或执行 Skill 目录内容，从而保证 Skill 的资源访问统一经由 `SkillRuntime` 控制。相同阶段内参数完全一致的 Skill 操作会被拦截，避免无效重复调用。
+
+4. **脚本执行边界**
+
+   `SkillRuntime` 只解析清单中声明的资源和脚本路径，并限制它们位于对应的 `references/`、`assets/`、`scripts/` 安全目录内。脚本运行在独立 Python 子进程中，使用最小环境变量；数据附件、可读取资产、产物目录、超时时间等能力由清单权限决定。当前运行时拒绝 `network: true` 的脚本。
+
+   对标准 Python 脚本，输入通过 stdin 传递单个 JSON 对象，stdout 必须且只能输出一个 JSON 对象；脚本产物仅可写入 `skill-artifacts/<skill-id>/`。对自动发现的 `python-cli` 脚本，仅允许传入 `argv`，且绝对路径只能指向本轮已授权附件或当前输出目录。所有上传导入的 Skill 脚本都会强制要求逐次人工审批。
+
+5. **导入、导出与安全限制**
+
+   前端可通过 ZIP 导入、导出和卸载 Skill。导入时，后端限制压缩包大小、文件数量和单文件大小，拒绝绝对路径与 `..` 路径穿越；压缩包必须且只能包含一个 `SKILL.md`。安装新版本时采用暂存目录校验后替换目标目录。卸载前会确认目标为合法 Skill 目录，避免误删普通文件。
+
+   核心实现位于 `data_analysis/skills/registry.py`（发现、校验和包管理）、`data_analysis/skills/runtime.py`（运行期资源与脚本控制）、`data_analysis/agent/loop.py`（上下文注入与决策协议）、`data_analysis/agent/graph.py`（Skill 操作调度）以及 `server/main.py`（API 与运行初始化）。

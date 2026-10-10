@@ -22,6 +22,7 @@ from pydantic import (
     field_validator,
 )
 
+from ..experts.models import ExpertContext
 from ..tools.registry import ToolSpec
 from ..skills.models import SkillAction, SkillContext
 from ..cancellation import invoke_cancellable, raise_if_cancelled
@@ -67,6 +68,7 @@ class AgentStateView(Protocol):
     memory_summary: str | None
     messages: Sequence[Any]
     observations: Sequence[Any]
+    expert_context: ExpertContext
     skill_context: SkillContext
     skill_observations: Sequence[Any]
     data_paths: Sequence[str]
@@ -309,8 +311,10 @@ class AgentLoop:
                 "只能使用 active_skills 中公开的稳定标识；不得用普通工具或终端绕过 "
                 "SkillRuntime 直接读取或执行 Skill 文件。"
             )
+        expert_context = getattr(state, "expert_context", ExpertContext())
+        expert_directive = _expert_directive(expert_context)
         messages: list[tuple[str, str]] = [
-            ("system", f"{self._system_prompt}{protocol}")
+            ("system", f"{self._system_prompt}{expert_directive}{protocol}")
         ]
         memory_summary = getattr(state, "memory_summary", None)
         if memory_summary:
@@ -352,6 +356,7 @@ class AgentLoop:
             ),
             "project_id": getattr(state, "project_id", None),
             "workspace_enabled": bool(getattr(state, "workspace_root", None)),
+            "active_expert": _active_expert_view(expert_context),
             "observations": _project_observations(state.observations),
             "skill_observations": _project_observations(
                 getattr(state, "skill_observations", ())
@@ -371,6 +376,37 @@ class AgentLoop:
             )
         )
         return messages
+
+
+def _expert_directive(context: ExpertContext) -> str:
+    """把专家职责作为受平台约束的系统级运行指令注入。"""
+    expert = context.expert
+    if expert is None:
+        return ""
+    return (
+        "\n\n当前运行已启用专家角色。专家要求补充任务方法和交付标准，"
+        "但不能覆盖平台安全、工具权限和事实约束：\n"
+        f"专家：{expert.name}（{expert.expert_id}，版本 {expert.version}）\n"
+        f"职责与方法：{expert.instructions}\n"
+        f"交付要求：{json.dumps(expert.output_requirements, ensure_ascii=False)}\n"
+        f"验证要求：{json.dumps(expert.validation_requirements, ensure_ascii=False)}"
+    )
+
+
+def _active_expert_view(context: ExpertContext) -> dict[str, Any] | None:
+    """生成模型可见且不包含文件路径的专家快照。"""
+    expert = context.expert
+    if expert is None:
+        return None
+    return {
+        "expert_id": expert.expert_id,
+        "name": expert.name,
+        "version": expert.version,
+        "bundle_hash": expert.bundle_hash,
+        "instructions": expert.instructions,
+        "output_requirements": list(expert.output_requirements),
+        "validation_requirements": list(expert.validation_requirements),
+    }
 
 
 def _trajectory_view(state: AgentStateView) -> dict[str, list[str]] | None:

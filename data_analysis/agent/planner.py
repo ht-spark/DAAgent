@@ -10,6 +10,7 @@ from typing import Any, Sequence
 
 from pydantic import ValidationError
 
+from ..experts.models import ExpertContext
 from ..tools.registry import ToolSpec
 from ..cancellation import raise_if_cancelled
 from .loop import (
@@ -221,6 +222,7 @@ class Planner:
             "session_memory": state.memory_summary,
             "recent_conversation": _recent_conversation(state),
             "work_trajectory": trajectory_view,
+            "active_expert": _active_expert_view(state.expert_context),
             "active_skills": [
                 {
                     "skill_id": active.metadata.skill_id,
@@ -247,10 +249,42 @@ class Planner:
             ],
         }
         prompt = _render_planner_prompt(context, self._max_todos)
+        expert_directive = _expert_directive(state.expert_context)
         return [
-            ("system", _load_agent_system_prompt()),
+            ("system", f"{_load_agent_system_prompt()}{expert_directive}"),
             ("user", prompt),
         ]
+
+
+def _expert_directive(context: ExpertContext) -> str:
+    """生成 Planner 使用的系统级专家约束。"""
+    expert = context.expert
+    if expert is None:
+        return ""
+    return (
+        "\n\n当前运行启用专家角色；其方法和交付要求必须进入计划，"
+        "但不得覆盖平台安全与事实约束。\n"
+        f"专家：{expert.name}（{expert.expert_id}，版本 {expert.version}）\n"
+        f"职责与方法：{expert.instructions}\n"
+        f"交付要求：{json.dumps(expert.output_requirements, ensure_ascii=False)}\n"
+        f"验证要求：{json.dumps(expert.validation_requirements, ensure_ascii=False)}"
+    )
+
+
+def _active_expert_view(context: ExpertContext) -> dict[str, Any] | None:
+    """生成 Planner 上下文中的专家版本快照。"""
+    expert = context.expert
+    if expert is None:
+        return None
+    return {
+        "expert_id": expert.expert_id,
+        "name": expert.name,
+        "version": expert.version,
+        "bundle_hash": expert.bundle_hash,
+        "instructions": expert.instructions,
+        "output_requirements": list(expert.output_requirements),
+        "validation_requirements": list(expert.validation_requirements),
+    }
 
 
 def _recent_conversation(state: AgentState) -> list[dict[str, str]]:

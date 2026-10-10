@@ -101,6 +101,7 @@ class BrainstormDiscussionSummary(BaseModel):
     title: str
     project_id: str | None = None
     model_config_id: str | None = None
+    reasoning_effort: str | None = None
     updated_at: str
 
 
@@ -119,6 +120,7 @@ class BrainstormDiscussion(BaseModel):
     title: str
     project_id: str | None = None
     model_config_id: str | None = None
+    reasoning_effort: str | None = None
     updated_at: str
     messages: list[BrainstormDiscussionMessage] = Field(default_factory=list)
 

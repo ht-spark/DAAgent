@@ -468,6 +468,7 @@ export type BrainstormDiscussionSummary = {
   title: string
   project_id?: string | null
   model_config_id?: string | null
+  reasoning_effort?: string | null
   updated_at: string
 }
 
@@ -566,11 +567,36 @@ export async function deleteSkill(skillId: string): Promise<void> {
   if (!res.ok) throw new Error(await extractDetail(res, '删除技能失败'))
 }
 
+export type ExpertInfo = {
+  expert_id: string
+  name: string
+  description: string
+  version: string
+  bundle_hash: string
+  enabled: boolean
+  glyph: string
+  tags: string[]
+  instructions: string
+  default_skill_ids: string[]
+  output_requirements: string[]
+  validation_requirements: string[]
+}
+
+export async function listExperts(): Promise<ExpertInfo[]> {
+  const res = await fetch('/api/experts')
+  if (!res.ok) throw new Error(await extractDetail(res, '获取专家列表失败'))
+  const data = await res.json() as { experts?: ExpertInfo[] }
+  return data.experts ?? []
+}
+
 export type AgentTraceEvent = {
   type: 'agent_started'
   run_id: string
   files: string[]
   knowledge_base_ids?: string[]
+  expert_id?: string | null
+  expert_version?: string | null
+  expert_bundle_hash?: string | null
   skill_ids?: string[]
 } | {
   type: 'agent_thinking'
@@ -701,9 +727,11 @@ export async function streamDataAgentMessage(
   files: File[],
   handlers: AgentChatHandlers,
   configId?: string | null,
+  reasoningEffort?: string | null,
   knowledgeBaseIds?: string[],
   projectId?: string | null,
   skillIds?: string[],
+  expertId?: string | null,
   signal?: AbortSignal,
 ): Promise<void> {
   const form = new FormData()
@@ -711,8 +739,10 @@ export async function streamDataAgentMessage(
   form.append('title', title)
   if (discussionId) form.append('discussion_id', discussionId)
   if (configId) form.append('config_id', configId)
+  if (reasoningEffort) form.append('reasoning_effort', reasoningEffort)
   knowledgeBaseIds?.forEach((id) => form.append('knowledge_base_ids', id))
   skillIds?.forEach((id) => form.append('skill_ids', id))
+  if (expertId) form.append('expert_id', expertId)
   if (projectId) form.append('project_id', projectId)
   files.forEach((file) => form.append('files', file))
 
@@ -814,11 +844,12 @@ export async function renameBrainstormDiscussion(discussionId: string, title: st
 export async function updateBrainstormDiscussionModel(
   discussionId: string,
   configId: string,
+  reasoningEffort: string | null,
 ): Promise<void> {
   const res = await fetch(`/api/knowledge/discussions/${encodeURIComponent(discussionId)}/model`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ config_id: configId }),
+    body: JSON.stringify({ config_id: configId, reasoning_effort: reasoningEffort }),
   })
   if (!res.ok) throw new Error(await extractDetail(res, '保存会话模型失败'))
 }
