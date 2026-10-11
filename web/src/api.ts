@@ -420,6 +420,17 @@ export function projectFilePreviewUrl(projectId: string, filePath: string): stri
   return `/api/projects/${encodeURIComponent(projectId)}/files/previews/${encodedPath}`
 }
 
+/** 生成 Agent 产物的只读预览地址，并逐段编码以保留子目录结构。 */
+export function agentArtifactPreviewUrl(discussionId: string, filePath: string): string {
+  const encodedPath = filePath
+    .replace(/\\/g, '/')
+    .split('/')
+    .filter(Boolean)
+    .map((part) => encodeURIComponent(part))
+    .join('/')
+  return `/api/agent/discussions/${encodeURIComponent(discussionId)}/previews/${encodedPath}`
+}
+
 /** 获取文本或结构化项目文件预览；图片和 PDF 直接使用预览地址。 */
 export async function fetchProjectFilePreview(
   projectId: string,
@@ -567,19 +578,39 @@ export async function deleteSkill(skillId: string): Promise<void> {
   if (!res.ok) throw new Error(await extractDetail(res, '删除技能失败'))
 }
 
-export type ExpertInfo = {
+export type ExpertSkillBinding = {
+  skill_id: string
+  mode: 'required' | 'default' | 'optional'
+  reason: string
+}
+
+export type ExpertSopStage = {
+  stage_id: string
+  name: string
+  objective: string
+  guidance: string[]
+  required_inputs: string[]
+  blocking_conditions: string[]
+}
+
+export type ExpertDraft = {
   expert_id: string
   name: string
   description: string
   version: string
-  bundle_hash: string
   enabled: boolean
   glyph: string
   tags: string[]
   instructions: string
+  skill_bindings: ExpertSkillBinding[]
+  sop_stages: ExpertSopStage[]
   default_skill_ids: string[]
   output_requirements: string[]
   validation_requirements: string[]
+}
+
+export type ExpertInfo = ExpertDraft & {
+  bundle_hash: string
 }
 
 export async function listExperts(): Promise<ExpertInfo[]> {
@@ -587,6 +618,69 @@ export async function listExperts(): Promise<ExpertInfo[]> {
   if (!res.ok) throw new Error(await extractDetail(res, '获取专家列表失败'))
   const data = await res.json() as { experts?: ExpertInfo[] }
   return data.experts ?? []
+}
+
+export async function listExpertDrafts(): Promise<ExpertDraft[]> {
+  const res = await fetch('/api/expert-drafts')
+  if (!res.ok) throw new Error(await extractDetail(res, '获取专家草稿失败'))
+  const data = await res.json() as { drafts?: ExpertDraft[] }
+  return data.drafts ?? []
+}
+
+export async function createExpertDraft(draft: ExpertDraft): Promise<ExpertDraft> {
+  const res = await fetch('/api/expert-drafts', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(draft),
+  })
+  if (!res.ok) throw new Error(await extractDetail(res, '创建专家草稿失败'))
+  return res.json()
+}
+
+export async function updateExpertDraft(
+  expertId: string,
+  draft: ExpertDraft,
+): Promise<ExpertDraft> {
+  const res = await fetch(`/api/expert-drafts/${encodeURIComponent(expertId)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(draft),
+  })
+  if (!res.ok) throw new Error(await extractDetail(res, '保存专家草稿失败'))
+  return res.json()
+}
+
+export async function deleteExpertDraft(expertId: string): Promise<void> {
+  const res = await fetch(`/api/expert-drafts/${encodeURIComponent(expertId)}`, {
+    method: 'DELETE',
+  })
+  if (!res.ok) throw new Error(await extractDetail(res, '删除专家草稿失败'))
+}
+
+export async function createDraftFromExpert(expertId: string): Promise<ExpertDraft> {
+  const res = await fetch(`/api/experts/${encodeURIComponent(expertId)}/draft`, {
+    method: 'POST',
+  })
+  if (!res.ok) throw new Error(await extractDetail(res, '创建专家草稿失败'))
+  return res.json()
+}
+
+export async function validateExpertDraft(
+  expertId: string,
+): Promise<{ valid: boolean; runtime_skill_ids: string[] }> {
+  const res = await fetch(`/api/expert-drafts/${encodeURIComponent(expertId)}/validate`, {
+    method: 'POST',
+  })
+  if (!res.ok) throw new Error(await extractDetail(res, '专家配置校验失败'))
+  return res.json()
+}
+
+export async function publishExpertDraft(expertId: string): Promise<ExpertInfo> {
+  const res = await fetch(`/api/expert-drafts/${encodeURIComponent(expertId)}/publish`, {
+    method: 'POST',
+  })
+  if (!res.ok) throw new Error(await extractDetail(res, '发布专家失败'))
+  return res.json()
 }
 
 export type AgentTraceEvent = {

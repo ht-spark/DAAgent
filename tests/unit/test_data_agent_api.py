@@ -12,6 +12,8 @@ from fastapi import HTTPException, UploadFile
 
 from data_analysis.agent.loop import Action, Finish
 from data_analysis.agent.state import Observation
+from data_analysis.experts import ExpertEditableSpec, ExpertRegistry
+from data_analysis.skills import SkillRegistry
 from server import main
 from server.schemas import AgentCommandDecisionBody
 from data_analysis import llm
@@ -26,6 +28,38 @@ def test_agent_timeout_configuration_is_separated():
     assert main.AGENT_LLM_TIMEOUT_SECONDS == 180
     assert main.AGENT_TOOL_TIMEOUT_SECONDS == 2 * 60 * 60
     assert main.AGENT_RUN_TIMEOUT_SECONDS == 3 * 60 * 60
+
+
+@pytest.mark.asyncio
+async def test_expert_draft_api_supports_create_validate_and_publish(
+    monkeypatch,
+    tmp_path,
+):
+    """专家管理接口应形成从草稿到发布版本的最小闭环。"""
+    registry = ExpertRegistry(
+        tmp_path / "experts",
+        SkillRegistry(tmp_path / "skills"),
+    )
+    monkeypatch.setattr(main, "_expert_registry", registry)
+    draft = ExpertEditableSpec(
+        expert_id="finance-expert",
+        name="财务分析专家",
+        description="执行企业财务分析流程",
+        version="1.0.0",
+        instructions="先核对会计口径，再分析指标。",
+        output_requirements=("给出数据证据",),
+        validation_requirements=("核对指标口径",),
+    )
+
+    created = await main.create_expert_draft_endpoint(draft)
+    validation = await main.validate_expert_draft_endpoint("finance-expert")
+    published = await main.publish_expert_draft_endpoint("finance-expert")
+    listed = await main.list_experts_endpoint()
+
+    assert created["expert_id"] == "finance-expert"
+    assert validation == {"valid": True, "runtime_skill_ids": []}
+    assert published["version"] == "1.0.0"
+    assert listed["experts"][0]["expert_id"] == "finance-expert"
 
 
 @pytest.mark.asyncio
@@ -218,6 +252,8 @@ def test_startup_cleanup_removes_only_stale_runtime_directories(
     [
         "report.pdf",
         "report.docx",
+        "report.htm",
+        "report.html",
         "notes.md",
         "notes.markdown",
         "notes.txt",
@@ -227,6 +263,7 @@ def test_startup_cleanup_removes_only_stale_runtime_directories(
         "figure.jpg",
         "figure.webp",
         "figure.bmp",
+        "flowchart.svg",
         "figure.tiff",
     ],
 )
@@ -467,18 +504,23 @@ def test_agent_artifacts_only_include_generated_outputs(monkeypatch, tmp_path):
     ]
 
 
-def test_agent_artifacts_are_shared_across_runs_in_same_discussion(monkeypatch, tmp_path):
+def test_agent_artifacts_only_include_current_run_outputs(monkeypatch, tmp_path):
     monkeypatch.setattr(main, "ARTIFACTS_ROOT", tmp_path)
     discussion_id = "discussion-shared"
     root = tmp_path / "agent_sessions" / discussion_id
     root.mkdir(parents=True)
     (root / "first.md").write_text("第一轮", encoding="utf-8")
+    (root / "unchanged.md").write_text("历史文件", encoding="utf-8")
 
-    first = main._list_agent_artifacts(discussion_id, "run-1")
+    before_second_run = main._snapshot_agent_artifacts(discussion_id)
+    (root / "first.md").write_text("第一轮更新结果", encoding="utf-8")
     (root / "second.md").write_text("第二轮", encoding="utf-8")
-    second = main._list_agent_artifacts(discussion_id, "run-2")
+    second = main._list_agent_artifacts(
+        discussion_id,
+        "run-2",
+        before_run=before_second_run,
+    )
 
-    assert [item["path"] for item in first] == ["first.md"]
     assert [item["path"] for item in second] == ["first.md", "second.md"]
     assert all(item["discussion_id"] == discussion_id for item in second)
 
@@ -543,22 +585,6 @@ def test_agent_artifact_preview_rejects_unsupported_type(tmp_path):
         main._agent_artifact_preview(target)
 
     assert exc.value.status_code == 415
-
-
-def test_agent_artifacts_are_shared_across_runs_in_same_discussion(monkeypatch, tmp_path):
-    monkeypatch.setattr(main, "ARTIFACTS_ROOT", tmp_path)
-    discussion_id = "discussion-shared"
-    root = tmp_path / "agent_sessions" / discussion_id
-    root.mkdir(parents=True)
-    (root / "first.md").write_text("第一轮", encoding="utf-8")
-
-    first = main._list_agent_artifacts(discussion_id, "run-1")
-    (root / "second.md").write_text("第二轮", encoding="utf-8")
-    second = main._list_agent_artifacts(discussion_id, "run-2")
-
-    assert [item["path"] for item in first] == ["first.md"]
-    assert [item["path"] for item in second] == ["first.md", "second.md"]
-    assert all(item["discussion_id"] == discussion_id for item in second)
 
 
 def test_agent_artifact_resolver_rejects_inputs_and_path_traversal(

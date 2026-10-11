@@ -12,7 +12,7 @@ import ChunkEmbedding, { type ChunkEmbeddingOptions } from './pages/ChunkEmbeddi
 import ChunkEmbeddingProgress from './pages/ChunkEmbeddingProgress'
 import KnowledgeBaseHistory from './pages/KnowledgeBaseHistory'
 import DocConverter from './pages/DocConverter'
-import TaskExpert from './pages/TaskExpert'
+import TaskExpert, { type TaskExpertView } from './pages/TaskExpert'
 import Skills from './pages/Skills'
 
 type Section = 'modeling' | 'brainstorm' | 'converter' | 'task-expert' | 'skills'
@@ -25,6 +25,7 @@ type NavTarget = {
   section: Section
   modelingView?: ModelingView
   brainstormView?: BrainstormView
+  taskExpertView?: TaskExpertView
   statsFromHistory?: boolean
 }
 
@@ -35,9 +36,18 @@ function resolveLevelNav(options: {
   section: Section
   modelingView: ModelingView
   brainstormView: BrainstormView
+  taskExpertView: TaskExpertView
+  taskExpertCanResumeEditor: boolean
   statsFromHistory: boolean
 }): { parent: NavTarget | null; next: NavTarget | null } {
-  const { section, modelingView, brainstormView, statsFromHistory } = options
+  const {
+    section,
+    modelingView,
+    brainstormView,
+    taskExpertView,
+    taskExpertCanResumeEditor,
+    statsFromHistory,
+  } = options
 
   if (section === 'modeling') {
     if (modelingView === 'history') {
@@ -52,7 +62,22 @@ function resolveLevelNav(options: {
     }
   }
 
-  if (section === 'converter' || section === 'task-expert' || section === 'skills') {
+  if (section === 'task-expert') {
+    if (taskExpertView === 'editor') {
+      return {
+        parent: { section: 'task-expert', taskExpertView: 'list' },
+        next: null,
+      }
+    }
+    return {
+      parent: null,
+      next: taskExpertCanResumeEditor
+        ? { section: 'task-expert', taskExpertView: 'editor' }
+        : null,
+    }
+  }
+
+  if (section === 'converter' || section === 'skills') {
     return { parent: null, next: null }
   }
 
@@ -104,11 +129,14 @@ const NAV_PARENT_TITLE: Record<string, string> = {
   stats: '资料统计',
   chunking: '分块与嵌入设置',
   'chunking-progress': '执行分块与嵌入',
+  'task-expert-list': '专家列表',
+  'task-expert-editor': '专家编辑',
 }
 
 function navTargetKey(target: NavTarget): string {
   if (target.section === 'modeling') return target.modelingView === 'history' ? 'modeling-history' : 'modeling-new'
   if (target.section === 'brainstorm') return target.brainstormView ?? 'knowledge-hub'
+  if (target.section === 'task-expert') return target.taskExpertView === 'editor' ? 'task-expert-editor' : 'task-expert-list'
   return target.section
 }
 
@@ -117,6 +145,8 @@ export default function App() {
   const [section, setSection] = useState<Section>('modeling')
   const [modelingView, setModelingView] = useState<ModelingView>('new')
   const [brainstormView, setBrainstormView] = useState<BrainstormView>('knowledge-hub')
+  const [taskExpertView, setTaskExpertView] = useState<TaskExpertView>('list')
+  const [taskExpertCanResumeEditor, setTaskExpertCanResumeEditor] = useState(false)
   const [discussionId, setDiscussionId] = useState<string | null>(null)
   const [taskViewEpoch, setTaskViewEpoch] = useState(0)
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null)
@@ -175,6 +205,7 @@ export default function App() {
     setSection(target.section)
     if (target.modelingView) setModelingView(target.modelingView)
     if (target.brainstormView) setBrainstormView(target.brainstormView)
+    if (target.taskExpertView) setTaskExpertView(target.taskExpertView)
     if (target.statsFromHistory !== undefined) setStatsFromHistory(target.statsFromHistory)
   }
 
@@ -182,6 +213,8 @@ export default function App() {
     section,
     modelingView,
     brainstormView,
+    taskExpertView,
+    taskExpertCanResumeEditor,
     statsFromHistory,
   })
 
@@ -223,7 +256,11 @@ export default function App() {
           setModelingView('new')
         }}
         onConverter={() => setSection('converter')}
-        onTaskExpert={() => setSection('task-expert')}
+        onTaskExpert={() => {
+          setSection('task-expert')
+          setTaskExpertView('list')
+          setTaskExpertCanResumeEditor(false)
+        }}
         onSkills={() => setSection('skills')}
         onSettings={() => setSettingsOpen(true)}
         onDiscussionDeleted={(id) => {
@@ -343,7 +380,20 @@ export default function App() {
         )}
         {section === 'modeling' && modelingView === 'history' && <History onOpen={openFromHistory} />}
         {section === 'converter' && <DocConverter />}
-        {section === 'task-expert' && <TaskExpert onSelect={startWithExpert} />}
+        {section === 'task-expert' && (
+          <TaskExpert
+            view={taskExpertView}
+            onSelect={startWithExpert}
+            onEditorOpen={() => {
+              setTaskExpertCanResumeEditor(true)
+              setTaskExpertView('editor')
+            }}
+            onEditorComplete={() => {
+              setTaskExpertCanResumeEditor(false)
+              setTaskExpertView('list')
+            }}
+          />
+        )}
         {section === 'skills' && <Skills />}
       </main>
     </div>

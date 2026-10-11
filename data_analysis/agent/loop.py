@@ -388,6 +388,9 @@ def _expert_directive(context: ExpertContext) -> str:
         "但不能覆盖平台安全、工具权限和事实约束：\n"
         f"专家：{expert.name}（{expert.expert_id}，版本 {expert.version}）\n"
         f"职责与方法：{expert.instructions}\n"
+        "业务 SOP 是可解释的执行指引，不是替代问题判断的固定算法；"
+        "若任务不适用某阶段，应说明原因。\n"
+        f"业务 SOP：{json.dumps([item.model_dump(mode='json') for item in expert.sop_stages], ensure_ascii=False)}\n"
         f"交付要求：{json.dumps(expert.output_requirements, ensure_ascii=False)}\n"
         f"验证要求：{json.dumps(expert.validation_requirements, ensure_ascii=False)}"
     )
@@ -404,6 +407,10 @@ def _active_expert_view(context: ExpertContext) -> dict[str, Any] | None:
         "version": expert.version,
         "bundle_hash": expert.bundle_hash,
         "instructions": expert.instructions,
+        "skill_bindings": [
+            item.model_dump(mode="json") for item in expert.skill_bindings
+        ],
+        "sop_stages": [item.model_dump(mode="json") for item in expert.sop_stages],
         "output_requirements": list(expert.output_requirements),
         "validation_requirements": list(expert.validation_requirements),
     }

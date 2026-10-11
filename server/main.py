@@ -43,7 +43,11 @@ from data_analysis.agent.state import (
     collect_work_trajectory_from_session,
     discover_artifacts,
 )
-from data_analysis.experts import ExpertRegistry, ExpertRegistryError
+from data_analysis.experts import (
+    ExpertEditableSpec,
+    ExpertRegistry,
+    ExpertRegistryError,
+)
 from data_analysis.skills import (
     SkillAction,
     SkillObservation,
@@ -241,6 +245,8 @@ AGENT_ATTACHMENT_SUFFIXES = frozenset(
         ".csv",
         ".docx",
         ".gif",
+        ".htm",
+        ".html",
         ".jpeg",
         ".jpg",
         ".json",
@@ -251,6 +257,7 @@ AGENT_ATTACHMENT_SUFFIXES = frozenset(
         ".pdf",
         ".png",
         ".py",
+        ".svg",
         ".tif",
         ".tiff",
         ".txt",
@@ -1566,8 +1573,9 @@ def _list_agent_artifacts(
     discussion_id: str,
     run_id: str,
     workspace_root: Path | None = None,
+    before_run: dict[str, tuple[int, int]] | None = None,
 ) -> list[dict[str, object]]:
-    """列出会话产物区内的输出文件，排除各轮用户输入附件。"""
+    """列出会话产物区内的输出文件，可限定为本轮新增或更新的文件。"""
     root = _agent_output_root(discussion_id, workspace_root)
     if not root.is_dir():
         return []
@@ -1578,16 +1586,43 @@ def _list_agent_artifacts(
         relative_path = path.relative_to(root)
         if relative_path.parts[0].casefold() in {".runs", ".runtime"}:
             continue
+        stat = path.stat()
+        artifact_path = relative_path.as_posix()
+        if before_run is not None and before_run.get(artifact_path) == (
+            stat.st_mtime_ns,
+            stat.st_size,
+        ):
+            continue
         artifacts.append(
             {
                 "discussion_id": discussion_id,
                 "run_id": run_id,
-                "path": relative_path.as_posix(),
+                "path": artifact_path,
                 "name": path.name,
-                "size_bytes": path.stat().st_size,
+                "size_bytes": stat.st_size,
             }
         )
     return artifacts
+
+
+def _snapshot_agent_artifacts(
+    discussion_id: str,
+    workspace_root: Path | None = None,
+) -> dict[str, tuple[int, int]]:
+    """记录运行开始前的产物指纹，用于区分当前轮输出与历史输出。"""
+    root = _agent_output_root(discussion_id, workspace_root)
+    if not root.is_dir():
+        return {}
+    snapshot: dict[str, tuple[int, int]] = {}
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        relative_path = path.relative_to(root)
+        if relative_path.parts[0].casefold() in {".runs", ".runtime"}:
+            continue
+        stat = path.stat()
+        snapshot[relative_path.as_posix()] = (stat.st_mtime_ns, stat.st_size)
+    return snapshot
 
 
 def _preview_cell_value(value: object) -> object:
@@ -1778,6 +1813,91 @@ async def list_experts_endpoint() -> dict[str, object]:
     }
 
 
+@app.get("/api/expert-drafts")
+async def list_expert_drafts_endpoint() -> dict[str, object]:
+    """返回全部可编辑专家草稿。"""
+    try:
+        drafts = await asyncio.to_thread(_expert_registry.list_drafts)
+    except ExpertRegistryError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"drafts": [item.model_dump(mode="json") for item in drafts]}
+
+
+@app.post("/api/expert-drafts")
+async def create_expert_draft_endpoint(
+    body: ExpertEditableSpec,
+) -> dict[str, object]:
+    """创建一个新的专家草稿。"""
+    try:
+        draft = await asyncio.to_thread(_expert_registry.create_draft, body)
+    except ExpertRegistryError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return draft.model_dump(mode="json")
+
+
+@app.put("/api/expert-drafts/{expert_id}")
+async def update_expert_draft_endpoint(
+    expert_id: str,
+    body: ExpertEditableSpec,
+) -> dict[str, object]:
+    """保存已有专家草稿。"""
+    try:
+        draft = await asyncio.to_thread(
+            _expert_registry.update_draft,
+            expert_id,
+            body,
+        )
+    except ExpertRegistryError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return draft.model_dump(mode="json")
+
+
+@app.delete("/api/expert-drafts/{expert_id}")
+async def delete_expert_draft_endpoint(expert_id: str) -> dict[str, str]:
+    """删除一个未发布专家草稿。"""
+    try:
+        await asyncio.to_thread(_expert_registry.delete_draft, expert_id)
+    except ExpertRegistryError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"deleted": expert_id}
+
+
+@app.post("/api/experts/{expert_id}/draft")
+async def create_draft_from_expert_endpoint(expert_id: str) -> dict[str, object]:
+    """从当前已发布专家创建或读取编辑草稿。"""
+    try:
+        draft = await asyncio.to_thread(
+            _expert_registry.draft_from_published,
+            expert_id,
+        )
+    except ExpertRegistryError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return draft.model_dump(mode="json")
+
+
+@app.post("/api/expert-drafts/{expert_id}/validate")
+async def validate_expert_draft_endpoint(expert_id: str) -> dict[str, object]:
+    """校验专家草稿和全部 Skill 依赖。"""
+    try:
+        draft = await asyncio.to_thread(_expert_registry.validate_draft, expert_id)
+    except ExpertRegistryError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "valid": True,
+        "runtime_skill_ids": list(draft.runtime_skill_ids),
+    }
+
+
+@app.post("/api/expert-drafts/{expert_id}/publish")
+async def publish_expert_draft_endpoint(expert_id: str) -> dict[str, object]:
+    """发布一个专家草稿并生成不可变版本归档。"""
+    try:
+        expert = await asyncio.to_thread(_expert_registry.publish_draft, expert_id)
+    except ExpertRegistryError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return expert.model_dump(mode="json")
+
+
 @app.get("/api/experts/{expert_id}")
 async def get_expert_endpoint(expert_id: str) -> dict[str, object]:
     """返回一个可启动专家的完整版本定义。"""
@@ -1880,7 +2000,7 @@ async def agent_profile_stream_endpoint(
         )
         requested_skill_ids = list(skill_ids or [])
         if expert_context.expert is not None:
-            requested_skill_ids.extend(expert_context.expert.default_skill_ids)
+            requested_skill_ids.extend(expert_context.expert.runtime_skill_ids)
         skill_context = await asyncio.to_thread(
             _skill_registry.load_selected, requested_skill_ids
         )
@@ -1947,6 +2067,10 @@ async def agent_profile_stream_endpoint(
     ]
     prior_trajectory = collect_work_trajectory_from_session(session_entries)
     output_dir = _agent_output_root(active_discussion_id, workspace_root)
+    artifacts_before_run = _snapshot_agent_artifacts(
+        active_discussion_id,
+        workspace_root,
+    )
     try:
         python_environment = (
             resolve_project_python(project)
@@ -2370,6 +2494,7 @@ async def agent_profile_stream_endpoint(
                 active_discussion_id,
                 run_id,
                 workspace_root,
+                artifacts_before_run,
             )
         except OSError:
             logger.exception("Failed to list Agent artifacts")

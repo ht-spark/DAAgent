@@ -92,6 +92,7 @@
 ## 产物
 
 - 当 `artifact_reuse_status` 为“已有产物可直接复用”时，先检查 `available_artifacts` 是否符合用户目标；符合时按 `relative_path` 使用 `inspect_artifact` 或 `inspect_generated_image` 复核并复用。只有内容不匹配、缺失或用户明确要求重做时才重新生成。
+- 当流程、架构、因果关系或步骤用图表达更清晰，或用户明确要求流程图时，使用 `expected_artifacts` 声明并在输出目录生成 SVG 或 PNG 图；生成后必须调用 `inspect_generated_image` 复核，并在最终回答中说明图的文件名。
 - 用户要求交付文件但未指定项目内位置时，使用 `write_artifact` 写入本轮产物目录；除非用户明确要求更新已有产物，否则不要设置 `overwrite=true`。
 - 用户指定项目内位置时使用项目文件工具，不要写入产物目录。
 - 产物工具使用产物相对路径，附件工具使用 Runtime 授权绝对路径，项目工具使用项目相对路径或明确的项目内绝对路径；三类路径不得混用。

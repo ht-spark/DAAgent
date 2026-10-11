@@ -1,6 +1,7 @@
 import { memo, useEffect, useMemo, useRef, useState, type ClipboardEvent } from 'react'
 
 import {
+  agentArtifactPreviewUrl,
   cancelAgentChatRun,
   decideAgentCommand,
   fetchActiveAgentChatRun,
@@ -18,6 +19,7 @@ import {
   streamDataAgentMessage,
   syncApiSettingsCache,
   updateBrainstormDiscussionModel,
+  type AgentArtifact,
   type AgentTraceEvent,
   type AgentChatHandlers,
   type ContextUsage,
@@ -100,6 +102,7 @@ type Message = {
   role: 'assistant' | 'user'
   content: string
   trace?: AgentTraceEvent[]
+  artifacts?: AgentArtifact[]
   /** 本轮检索命中的知识库来源（可收起标注） */
   sources?: KnowledgeSourceCitation[]
   contextUsage?: ContextUsage
@@ -211,6 +214,10 @@ const PROJECT_IMAGE_SUFFIXES = new Set([
   '.bmp', '.gif', '.jpeg', '.jpg', '.png', '.svg', '.tif', '.tiff', '.webp',
 ])
 
+const AGENT_OUTPUT_IMAGE_SUFFIXES = new Set([
+  '.bmp', '.gif', '.jpeg', '.jpg', '.png', '.svg', '.tif', '.tiff', '.webp',
+])
+
 const HTML_PREVIEW_CONTENT_SECURITY_POLICY = "default-src 'none'; img-src data:; style-src 'unsafe-inline'; font-src data:; base-uri 'none'; form-action 'none'"
 
 /** 为不受信任的 HTML 预览补齐独立文档与资源限制。 */
@@ -272,6 +279,21 @@ function resolveProjectMarkdownUrl(projectId: string, filePath: string, url: str
     parts.push(part)
   }
   return parts.length ? projectFilePreviewUrl(projectId, parts.join('/')) : '#'
+}
+
+/** 将 Agent 回答中的相对产物图片地址改写为受限预览地址。 */
+function resolveAgentMarkdownUrl(
+  discussionId: string | null,
+  artifacts: AgentArtifact[],
+  url: string,
+): string {
+  if (/^(?:[a-z][a-z0-9+.-]*:|#|\/|\/)/i.test(url)) return url
+  const resourcePath = url.split(/[?#]/, 1)[0].replace(/\\/g, '/').replace(/^\.\/+/, '')
+  const artifact = artifacts.find((item) => item.path.replace(/\\/g, '/') === resourcePath || item.name === resourcePath)
+  const artifactDiscussionId = artifact?.discussion_id ?? discussionId
+  return artifact && artifactDiscussionId
+    ? agentArtifactPreviewUrl(artifactDiscussionId, artifact.path)
+    : url
 }
 
 function ProjectPreviewSkeleton() {
@@ -967,25 +989,90 @@ const KnowledgeSourcePanel = memo(function KnowledgeSourcePanel({
   )
 })
 
+function ChatAvatar({ role }: { role: Message['role'] }) {
+  if (role === 'assistant') {
+    return (
+      <span className="rag-avatar assistant" aria-hidden="true">
+        <svg viewBox="0 0 32 32" fill="none">
+          <path d="m16 4.5 8.8 5.1v10.2L16 25l-8.8-5.2V9.6L16 4.5Z" stroke="currentColor" strokeWidth="1.7" strokeLinejoin="round" />
+          <path d="m16 10.2 4.7 2.7v5.4L16 21l-4.7-2.7v-5.4l4.7-2.7Z" fill="currentColor" fillOpacity="0.16" stroke="currentColor" strokeWidth="1.45" strokeLinejoin="round" />
+          <circle cx="16" cy="15.6" r="2.15" fill="currentColor" />
+          <circle cx="25.4" cy="7.2" r="1.8" fill="#D59A27" />
+          <path d="M25.4 3.7v1.3M25.4 9.4v1.3M21.9 7.2h1.3M27.6 7.2h1.3" stroke="#D59A27" strokeWidth="1.3" strokeLinecap="round" />
+        </svg>
+      </span>
+    )
+  }
+
+  return (
+    <span className="rag-avatar user" aria-hidden="true">
+      <svg viewBox="0 0 32 32" fill="none">
+        <circle cx="16" cy="11.1" r="4.15" fill="currentColor" fillOpacity="0.16" stroke="currentColor" strokeWidth="1.65" />
+        <path d="M8.1 25.7c.8-4.45 3.6-6.7 7.9-6.7s7.1 2.25 7.9 6.7" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
+        <path d="M6 15.8c.15 6.4 4.1 10.2 10 10.2 3.05 0 5.55-1.02 7.25-3.05" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" opacity="0.42" />
+        <circle cx="25.3" cy="17.1" r="1.75" fill="#D59A27" />
+      </svg>
+    </span>
+  )
+}
+
+function isAgentOutputImage(artifact: AgentArtifact): boolean {
+  const suffix = artifact.name.slice(artifact.name.lastIndexOf('.')).toLowerCase()
+  return AGENT_OUTPUT_IMAGE_SUFFIXES.has(suffix)
+}
+
+function AgentOutputImages({
+  artifacts,
+  discussionId,
+}: {
+  artifacts?: AgentArtifact[]
+  discussionId: string | null
+}) {
+  const imageArtifacts = (artifacts ?? []).filter(isAgentOutputImage)
+  const renderableArtifacts = imageArtifacts.filter((artifact) => artifact.discussion_id ?? discussionId)
+  if (!renderableArtifacts.length) return null
+
+  return (
+    <section className="agent-output-images" aria-label="生成的图片与流程图">
+      {renderableArtifacts.map((artifact) => {
+        const artifactDiscussionId = artifact.discussion_id ?? discussionId
+        const previewUrl = agentArtifactPreviewUrl(artifactDiscussionId!, artifact.path)
+        return (
+          <figure className="agent-output-image" key={`${artifact.run_id}-${artifact.path}`}>
+            <a href={previewUrl} target="_blank" rel="noreferrer" title={`打开 ${artifact.name}`}>
+              <img src={previewUrl} alt={`生成的图片：${artifact.name}`} loading="lazy" />
+            </a>
+            <figcaption>
+              <a href={previewUrl} target="_blank" rel="noreferrer">{artifact.name}</a>
+            </figcaption>
+          </figure>
+        )
+      })}
+    </section>
+  )
+}
+
 const ChatMessage = memo(function ChatMessage({
   message,
   running = false,
   plan,
   todoState,
+  discussionId,
 }: {
   message: Message
   running?: boolean
   /** 当前讨论的执行计划与任务状态（由父组件统一推导，避免每条消息重复计算） */
   plan?: AgentPlan
   todoState?: TodoStateMap
+  discussionId: string | null
 }) {
-  if (!message.content && !message.trace?.length) return null
+  if (!message.content && !message.trace?.length && !message.artifacts?.length) return null
   const sources = message.sources?.length
     ? message.sources
     : collectKnowledgeSources(message.trace)
   return (
     <div className={`rag-msg ${message.role}`}>
-      {message.role === 'assistant' && <span className="rag-avatar">M</span>}
+      {message.role === 'assistant' && <ChatAvatar role="assistant" />}
       <div className={`rag-msg-body ${message.role === 'user' ? 'bubble-user' : ''}`}>
         {message.role === 'assistant' ? (
           <div className="rag-answer">
@@ -997,13 +1084,20 @@ const ChatMessage = memo(function ChatMessage({
                 todoState={todoState}
               />
             )}
-            {message.content && <MarkdownContent content={message.content} />}
+            {message.content && (
+              <MarkdownContent
+                content={message.content}
+                transformUrl={(url) => resolveAgentMarkdownUrl(discussionId, message.artifacts ?? [], url)}
+              />
+            )}
+            <AgentOutputImages artifacts={message.artifacts} discussionId={discussionId} />
             {sources.length > 0 && <KnowledgeSourcePanel sources={sources} />}
           </div>
         ) : (
           <div className="rag-msg-plain">{message.content}</div>
         )}
       </div>
+      {message.role === 'user' && <ChatAvatar role="user" />}
     </div>
   )
 })
@@ -1258,10 +1352,15 @@ export default function NewChat({
           ? { ...item, content: `${item.content}${content}` }
           : item))
       },
-      onDone: (_discussionId, _runId, _artifacts, sources, contextUsage) => {
+      onDone: (_discussionId, _runId, artifacts, sources, contextUsage) => {
         if (!active()) return
         setMessages((current) => current.map((item, index) => index === current.length - 1
-          ? { ...item, sources: sources?.length ? sources : item.sources, contextUsage }
+          ? {
+              ...item,
+              artifacts: artifacts.length ? artifacts : item.artifacts,
+              sources: sources?.length ? sources : item.sources,
+              contextUsage,
+            }
           : item))
         setActiveRunId(null)
         setIsSubmitting(false)
@@ -1459,6 +1558,7 @@ export default function NewChat({
             role: m.role,
             content: m.content,
             trace: m.metadata?.agent_trace,
+            artifacts: m.metadata?.agent_artifacts,
             contextUsage: m.metadata?.context_usage,
             sources: m.sources?.length
               ? m.sources
@@ -1710,6 +1810,7 @@ export default function NewChat({
                   running={isSubmitting && index === messages.length - 1}
                   plan={agentPlan}
                   todoState={agentTodoState}
+                  discussionId={discussionId}
                 />
               ))}
               {messages.length === 0 && (
@@ -1722,7 +1823,7 @@ export default function NewChat({
                 && messages[messages.length - 1]?.content === ''
                 && agentTrace.length === 0 && (
                 <div className="rag-msg assistant">
-                  <span className="rag-avatar">M</span>
+                  <ChatAvatar role="assistant" />
                   <div className="rag-msg-body">
                     <span className="rag-typing" aria-label="Agent 运行中">
                       <i />
@@ -2106,7 +2207,7 @@ export default function NewChat({
                   hidden
                   type="file"
                   multiple
-                  accept=".csv,.xlsx,.xls,.json,.jsonl,.ndjson,.pdf,.docx,.htm,.html,.md,.markdown,.py,.txt,.png,.jpg,.jpeg,.webp,.gif,.bmp,.tif,.tiff"
+                  accept=".csv,.xlsx,.xls,.json,.jsonl,.ndjson,.pdf,.docx,.htm,.html,.md,.markdown,.py,.txt,.png,.jpg,.jpeg,.webp,.gif,.bmp,.svg,.tif,.tiff"
                   onChange={(event) => setFiles(Array.from(event.target.files ?? []))}
                 />
                 <ContextUsageRing usage={[...messages].reverse().find((item) => item.contextUsage)?.contextUsage} />
