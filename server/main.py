@@ -1910,6 +1910,16 @@ async def get_expert_endpoint(expert_id: str) -> dict[str, object]:
     return expert.model_dump(mode="json")
 
 
+@app.delete("/api/experts/{expert_id}")
+async def delete_expert_endpoint(expert_id: str) -> dict[str, str]:
+    """删除一个已发布专家，连同其草稿与版本归档。"""
+    try:
+        await asyncio.to_thread(_expert_registry.delete_expert, expert_id)
+    except ExpertRegistryError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"deleted": expert_id}
+
+
 @app.post("/api/skills/import")
 async def import_skill_endpoint(file: UploadFile = File(...)) -> dict[str, object]:
     """从用户选择的 ZIP 包安装或更新一个 Skill。"""

@@ -657,6 +657,13 @@ export async function deleteExpertDraft(expertId: string): Promise<void> {
   if (!res.ok) throw new Error(await extractDetail(res, '删除专家草稿失败'))
 }
 
+export async function deleteExpert(expertId: string): Promise<void> {
+  const res = await fetch(`/api/experts/${encodeURIComponent(expertId)}`, {
+    method: 'DELETE',
+  })
+  if (!res.ok) throw new Error(await extractDetail(res, '删除专家失败'))
+}
+
 export async function createDraftFromExpert(expertId: string): Promise<ExpertDraft> {
   const res = await fetch(`/api/experts/${encodeURIComponent(expertId)}/draft`, {
     method: 'POST',

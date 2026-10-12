@@ -821,7 +821,8 @@
 
 /* 任务专家：发布列表与配置工作区 */
 .task-expert-page {
-  max-width: 1180px;
+  /* 与「技能」页保持一致：撑满整个右侧内容区，页头「新建专家」按钮抵住右边界 */
+  max-width: none;
   padding-top: 52px;
 }
 

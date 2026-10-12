@@ -1,0 +1,33 @@
+expert_id: operations-expert
+name: 运营分析专家
+description: 执行企业运营分析 SOP
+version: 1.1.0
+enabled: true
+glyph: 运
+tags:
+- 运营
+- 分析
+instructions: 先确认业务口径，再进行分析。
+skill_bindings:
+- skill_id: required-skill
+  mode: required
+  reason: ''
+- skill_id: default-skill
+  mode: default
+  reason: ''
+- skill_id: optional-skill
+  mode: optional
+  reason: ''
+sop_stages:
+- stage_id: confirm-scope
+  name: 确认口径
+  objective: 确认指标、范围和约束
+  guidance:
+  - 列出仍需确认的信息
+  required_inputs: []
+  blocking_conditions: []
+default_skill_ids: []
+output_requirements:
+- 给出可追溯结论
+validation_requirements:
+- 检查指标口径一致性

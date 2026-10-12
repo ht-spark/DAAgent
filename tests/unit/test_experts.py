@@ -152,6 +152,29 @@ def test_draft_crud_and_publish_preserve_version_history(tmp_path: Path) -> None
     assert registry.list_drafts() == []
 
 
+def test_delete_expert_purges_draft_and_version_archive(tmp_path: Path) -> None:
+    """彻底删除专家后，同名草稿与版本归档一并移除且可重新发布。"""
+    skill_root = tmp_path / "skills"
+    for skill_id in ("required-skill", "default-skill", "optional-skill"):
+        _write_skill(skill_root, skill_id)
+    expert_root = tmp_path / "experts"
+    registry = ExpertRegistry(expert_root, SkillRegistry(skill_root))
+    registry.create_draft(_draft())
+    registry.publish_draft("operations-expert")
+
+    registry.delete_expert("operations-expert")
+
+    assert registry.discover() == []
+    assert registry.list_drafts() == []
+    assert not (expert_root / ".versions" / "operations-expert").exists()
+    with pytest.raises(ExpertRegistryError, match="专家不存在"):
+        registry.delete_expert("operations-expert")
+
+    # 彻底删除后同一版本可以重新发布，不被旧归档阻塞
+    registry.create_draft(_draft())
+    assert registry.publish_draft("operations-expert").version == "1.0.0"
+
+
 def test_draft_validation_checks_optional_skill_dependency(tmp_path: Path) -> None:
     """可选 Skill 虽不自动加载，发布前仍必须确认其存在。"""
     skill_root = tmp_path / "skills"

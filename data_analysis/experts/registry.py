@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import shutil
 import tempfile
 import threading
 from pathlib import Path
@@ -109,6 +110,23 @@ class ExpertRegistry:
             if not path.is_file():
                 raise ExpertRegistryError(f"专家草稿不存在: {expert_id}")
             path.unlink()
+
+    def delete_expert(self, expert_id: str) -> None:
+        """彻底删除已发布专家，连同其同名草稿与不可变版本归档。
+
+        归档只服务于发布校验与追溯，删除后同一标识可以按原版本号重新发布。
+        """
+        path = self._expert_path(self.root, expert_id)
+        with self._write_lock:
+            if not path.is_file():
+                raise ExpertRegistryError(f"专家不存在: {expert_id}")
+            path.unlink()
+            draft_path = self._expert_path(self.draft_root, expert_id)
+            if draft_path.is_file():
+                draft_path.unlink()
+            archive_dir = self.version_root / expert_id
+            if archive_dir.is_dir():
+                shutil.rmtree(archive_dir)
 
     def draft_from_published(self, expert_id: str) -> ExpertEditableSpec:
         """从已发布专家创建草稿；已有草稿时直接返回。"""

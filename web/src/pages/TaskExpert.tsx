@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import {
   createDraftFromExpert,
   createExpertDraft,
+  deleteExpert,
   deleteExpertDraft,
   listExpertDrafts,
   listExperts,
@@ -66,6 +67,7 @@ export default function TaskExpert({
   const [skills, setSkills] = useState<SkillInfo[]>([])
   const [editor, setEditor] = useState<EditorState | null>(null)
   const [pendingDelete, setPendingDelete] = useState<ExpertDraft | null>(null)
+  const [pendingExpertDelete, setPendingExpertDelete] = useState<ExpertInfo | null>(null)
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
@@ -196,6 +198,22 @@ export default function TaskExpert({
     }
   }
 
+  async function confirmDeleteExpert() {
+    if (!pendingExpertDelete || busy) return
+    setBusy(true)
+    setError('')
+    try {
+      await deleteExpert(pendingExpertDelete.expert_id)
+      await refreshListsOnly()
+      setNotice(`专家「${pendingExpertDelete.name}」已删除`)
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '删除专家失败')
+    } finally {
+      setPendingExpertDelete(null)
+      setBusy(false)
+    }
+  }
+
   if (view === 'editor' && editor) {
     return (
       <ExpertEditor
@@ -273,19 +291,8 @@ export default function TaskExpert({
                     <div className="expert-list-controls">
                       <span className="expert-list-version">版本 {expert.version}</span>
                       <div className="expert-list-actions">
-                        <button type="button" onClick={() => onSelect(expert.expert_id)}>开始任务</button>
-                        <button type="button" onClick={() => void configureExpert(expert)} disabled={busy}>配置</button>
-                        <button
-                          type="button"
-                          onClick={() => openEditor({
-                            ...normalizeDraft(expert),
-                            expert_id: '',
-                            name: `${expert.name} 副本`,
-                            version: '1.0.0',
-                          }, false)}
-                        >
-                          复制
-                        </button>
+                        <button type="button" onClick={() => void configureExpert(expert)} disabled={busy}>编辑</button>
+                        <button type="button" className="is-danger" onClick={() => setPendingExpertDelete(expert)}>删除</button>
                       </div>
                     </div>
                   </li>
@@ -336,6 +343,17 @@ export default function TaskExpert({
         tone="danger"
         onConfirm={() => void confirmDelete()}
         onCancel={() => setPendingDelete(null)}
+      />
+
+      <ConfirmDialog
+        open={pendingExpertDelete !== null}
+        title={`删除专家「${pendingExpertDelete?.name ?? ''}」`}
+        description="将移除该已发布专家及其版本记录与同名草稿；删除后无法再被新任务选择，已完成的运行不受影响。"
+        detail={pendingExpertDelete ? `${pendingExpertDelete.expert_id} · v${pendingExpertDelete.version}` : undefined}
+        confirmLabel={busy ? '正在删除…' : '删除专家'}
+        tone="danger"
+        onConfirm={() => void confirmDeleteExpert()}
+        onCancel={() => setPendingExpertDelete(null)}
       />
     </div>
   )
