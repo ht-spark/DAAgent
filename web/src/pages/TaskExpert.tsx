@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 
 import {
   createDraftFromExpert,
@@ -18,6 +18,7 @@ import {
   type SkillInfo,
 } from '../api'
 import ConfirmDialog from '../components/ConfirmDialog'
+import { pushModalLayer } from '../modalLayer'
 
 type Props = {
   view: TaskExpertView
@@ -31,6 +32,12 @@ export type TaskExpertView = 'list' | 'editor'
 type EditorState = {
   draft: ExpertDraft
   persisted: boolean
+}
+
+/** 详情弹窗展示的专家视图：已发布版本与草稿共用同一结构 */
+type ExpertDetailView = {
+  expert: ExpertDraft
+  statusLabel: string
 }
 
 const EMPTY_DRAFT: ExpertDraft = {
@@ -68,6 +75,8 @@ export default function TaskExpert({
   const [editor, setEditor] = useState<EditorState | null>(null)
   const [pendingDelete, setPendingDelete] = useState<ExpertDraft | null>(null)
   const [pendingExpertDelete, setPendingExpertDelete] = useState<ExpertInfo | null>(null)
+  // 当前在详情弹窗中查看的专家（已发布或草稿均可查看）
+  const [viewing, setViewing] = useState<ExpertDetailView | null>(null)
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
@@ -185,11 +194,11 @@ export default function TaskExpert({
     if (!pendingDelete || busy) return
     setBusy(true)
     setError('')
+    setNotice('')
     try {
       await deleteExpertDraft(pendingDelete.expert_id)
       if (editor?.draft.expert_id === pendingDelete.expert_id) setEditor(null)
       await refreshListsOnly()
-      setNotice(`草稿「${pendingDelete.name}」已删除`)
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : '删除专家草稿失败')
     } finally {
@@ -202,10 +211,10 @@ export default function TaskExpert({
     if (!pendingExpertDelete || busy) return
     setBusy(true)
     setError('')
+    setNotice('')
     try {
       await deleteExpert(pendingExpertDelete.expert_id)
       await refreshListsOnly()
-      setNotice(`专家「${pendingExpertDelete.name}」已删除`)
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : '删除专家失败')
     } finally {
@@ -291,7 +300,8 @@ export default function TaskExpert({
                     <div className="expert-list-controls">
                       <span className="expert-list-version">版本 {expert.version}</span>
                       <div className="expert-list-actions">
-                        <button type="button" onClick={() => void configureExpert(expert)} disabled={busy}>编辑</button>
+                        <button type="button" onClick={() => setViewing({ expert, statusLabel: '已发布' })}>查看</button>
+                        <button type="button" className="is-primary" onClick={() => void configureExpert(expert)} disabled={busy}>编辑</button>
                         <button type="button" className="is-danger" onClick={() => setPendingExpertDelete(expert)}>删除</button>
                       </div>
                     </div>
@@ -323,7 +333,8 @@ export default function TaskExpert({
                       <span>{draft.expert_id} · v{draft.version}</span>
                     </div>
                     <div className="expert-list-actions">
-                      <button type="button" onClick={() => openEditor(draft, true)}>继续编辑</button>
+                      <button type="button" onClick={() => setViewing({ expert: draft, statusLabel: '草稿' })}>查看</button>
+                      <button type="button" className="is-primary" onClick={() => openEditor(draft, true)}>继续编辑</button>
                       <button type="button" className="is-danger" onClick={() => setPendingDelete(draft)}>删除</button>
                     </div>
                   </li>
@@ -355,6 +366,149 @@ export default function TaskExpert({
         onConfirm={() => void confirmDeleteExpert()}
         onCancel={() => setPendingExpertDelete(null)}
       />
+
+      {viewing ? (
+        <ExpertDetailDialog
+          view={viewing}
+          skills={skills}
+          onClose={() => setViewing(null)}
+        />
+      ) : null}
+    </div>
+  )
+}
+
+/** 专家详情弹窗：只读展示已发布专家或草稿的完整配置。 */
+function ExpertDetailDialog({
+  view,
+  skills,
+  onClose,
+}: {
+  view: ExpertDetailView
+  skills: SkillInfo[]
+  onClose: () => void
+}) {
+  // onClose 为内联箭头函数，用 ref 取最新值，避免每次渲染重新注册模态层
+  const onCloseRef = useRef(onClose)
+  onCloseRef.current = onClose
+
+  // 压入模态层：统一处理滚动锁，且 Esc 只作用于最上层弹窗
+  useEffect(() => pushModalLayer(() => onCloseRef.current()), [])
+
+  const expert = view.expert
+  // skill_id 到名称的映射，未匹配到时回退展示 id
+  const skillNames = useMemo(
+    () => new Map(skills.map((skill) => [skill.skill_id, skill.name])),
+    [skills],
+  )
+
+  return (
+    <div className="expert-detail-mask" onClick={onClose} role="presentation">
+      <div
+        className="expert-detail-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="expert-detail-title"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <header className="expert-detail-head">
+          <span className="expert-card-avatar" aria-hidden="true">{expert.glyph || '专'}</span>
+          <div className="expert-detail-head-main">
+            <div className="expert-detail-title-row">
+              <h2 id="expert-detail-title">{expert.name || '未命名专家'}</h2>
+              <span className={`expert-detail-status${view.statusLabel === '已发布' ? ' is-published' : ''}`}>
+                {view.statusLabel}
+              </span>
+            </div>
+            <p className="expert-detail-meta">{expert.expert_id || 'expert-id'} · v{expert.version}</p>
+          </div>
+          <button type="button" className="expert-detail-close" onClick={onClose}>关闭</button>
+        </header>
+
+        <div className="expert-detail-body">
+          <section className="expert-detail-section">
+            <h3>简介与标签</h3>
+            <p>{expert.description || '未填写简介。'}</p>
+            <div className="expert-card-tags">
+              {expert.tags.map((tag) => <span key={tag} className="expert-card-tag">{tag}</span>)}
+              <span className="expert-card-tag is-neutral">{countBoundSkills(expert)} 个 Skill</span>
+              <span className="expert-card-tag is-neutral">{expert.sop_stages.length} 个 SOP 阶段</span>
+            </div>
+          </section>
+
+          {expert.instructions ? (
+            <section className="expert-detail-section">
+              <h3>职责与行为准则</h3>
+              <p className="is-prewrap">{expert.instructions}</p>
+            </section>
+          ) : null}
+
+          <section className="expert-detail-section">
+            <h3>Skills 装配</h3>
+            {expert.skill_bindings.length === 0 ? (
+              <p className="expert-detail-empty">未装配 Skill。</p>
+            ) : (
+              <ul className="expert-detail-card-list">
+                {expert.skill_bindings.map((binding) => (
+                  <li key={binding.skill_id}>
+                    <div className="expert-detail-card-title">
+                      <strong>{skillNames.get(binding.skill_id) ?? binding.skill_id}</strong>
+                      <span className="expert-detail-mode">{MODE_LABELS[binding.mode]}</span>
+                    </div>
+                    {binding.reason ? <p>{binding.reason}</p> : null}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+
+          <section className="expert-detail-section">
+            <h3>业务 SOP</h3>
+            {expert.sop_stages.length === 0 ? (
+              <p className="expert-detail-empty">未配置 SOP 阶段。</p>
+            ) : (
+              <ol className="expert-detail-card-list">
+                {expert.sop_stages.map((stage, index) => (
+                  <li key={`${stage.stage_id}-${index}`}>
+                    <div className="expert-detail-card-title">
+                      <strong>{index + 1}. {stage.name || stage.stage_id || '未命名阶段'}</strong>
+                    </div>
+                    {stage.objective ? <p>{stage.objective}</p> : null}
+                    <DetailList title="执行指引" items={stage.guidance} />
+                    <DetailList title="所需输入" items={stage.required_inputs} />
+                    <DetailList title="阻断条件" items={stage.blocking_conditions} />
+                  </li>
+                ))}
+              </ol>
+            )}
+          </section>
+
+          <section className="expert-detail-section">
+            <h3>交付与验证</h3>
+            {expert.output_requirements.length === 0 && expert.validation_requirements.length === 0 ? (
+              <p className="expert-detail-empty">未配置交付与验证要求。</p>
+            ) : (
+              <>
+                <DetailList title="交付要求" items={expert.output_requirements} />
+                <DetailList title="验证要求" items={expert.validation_requirements} />
+              </>
+            )}
+          </section>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/** 详情弹窗内的小节列表：带小标题的条目列表，为空时不渲染。 */
+function DetailList({ title, items }: { title: string; items: string[] }) {
+  if (items.length === 0) return null
+  return (
+    <div className="expert-detail-sublist">
+      <span>{title}</span>
+      <ul>
+        {items.map((item, index) => <li key={index}>{item}</li>)}
+      </ul>
     </div>
   )
 }
