@@ -21,6 +21,8 @@ class ExecutionContext:
     python_environment: PythonEnvironment | None = None
     authorized_paths: list[Path] = field(default_factory=list)
     skill_assets: dict[str, str] = field(default_factory=dict)
+    # 运行级沙箱后端标识（服务端注入；空串表示使用进程级默认配置）
+    sandbox_backend: str = ""
 
     def __post_init__(self) -> None:
         self.output_dir = self.output_dir.expanduser().resolve(strict=False)
@@ -47,6 +49,8 @@ class ExecutionContext:
             context["authorized_paths"] = [str(path) for path in self.authorized_paths]
         if self.skill_assets:
             context["skill_assets"] = dict(self.skill_assets)
+        if self.sandbox_backend:
+            context["sandbox_backend"] = self.sandbox_backend
         return context
 
     def register_skill_asset(

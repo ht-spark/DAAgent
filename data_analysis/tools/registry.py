@@ -1100,6 +1100,10 @@ def _run_python_code(
         isinstance(item, str) for item in expected_artifacts
     ):
         raise ToolArgumentsError("expected_artifacts 必须是字符串数组")
+    # 运行级沙箱后端标识：仅来自服务端注入的受信任上下文（Phase 1 只切换 Python 工具）
+    sandbox_backend = context.get("sandbox_backend")
+    if sandbox_backend is not None and not isinstance(sandbox_backend, str):
+        raise ToolArgumentsError("sandbox_backend 上下文必须是字符串")
     return execute_python_code(
         code,
         data_paths=raw_paths,
@@ -1114,6 +1118,7 @@ def _run_python_code(
             if isinstance(context.get("skill_assets"), Mapping)
             else {}
         ),
+        sandbox_backend=sandbox_backend or None,
     )
 
 

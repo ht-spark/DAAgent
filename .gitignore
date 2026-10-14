@@ -30,6 +30,9 @@ node_modules/
 web/node_modules/
 **/node_modules/.vite/
 
+# MXC 沙箱原生资产（二进制不入库；版本与校验和见 vendor/mxc/VERSION.md）
+vendor/mxc/bin/
+
 # 测试与覆盖率
 .pytest_cache/
 .tests/
