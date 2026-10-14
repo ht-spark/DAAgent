@@ -580,7 +580,6 @@ export async function deleteSkill(skillId: string): Promise<void> {
 
 export type ExpertSkillBinding = {
   skill_id: string
-  mode: 'required' | 'default' | 'optional'
   reason: string
 }
 

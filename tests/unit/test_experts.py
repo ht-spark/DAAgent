@@ -77,9 +77,9 @@ def _draft(*, version: str = "1.0.0") -> ExpertEditableSpec:
         tags=("运营", "分析"),
         instructions="先确认业务口径，再进行分析。",
         skill_bindings=(
-            ExpertSkillBinding(skill_id="required-skill", mode="required"),
-            ExpertSkillBinding(skill_id="default-skill", mode="default"),
-            ExpertSkillBinding(skill_id="optional-skill", mode="optional"),
+            ExpertSkillBinding(skill_id="required-skill"),
+            ExpertSkillBinding(skill_id="default-skill"),
+            ExpertSkillBinding(skill_id="optional-skill"),
         ),
         sop_stages=(
             ExpertSopStage(
@@ -131,7 +131,11 @@ def test_draft_crud_and_publish_preserve_version_history(tmp_path: Path) -> None
     validated = registry.validate_draft(created.expert_id)
     published = registry.publish_draft(created.expert_id)
 
-    assert validated.runtime_skill_ids == ("required-skill", "default-skill")
+    assert validated.runtime_skill_ids == (
+        "required-skill",
+        "default-skill",
+        "optional-skill",
+    )
     assert published.version == "1.0.0"
     assert (expert_root / ".versions/operations-expert/1.0.0.yaml").is_file()
     assert registry.load_selected(created.expert_id).expert == published
@@ -175,8 +179,8 @@ def test_delete_expert_purges_draft_and_version_archive(tmp_path: Path) -> None:
     assert registry.publish_draft("operations-expert").version == "1.0.0"
 
 
-def test_draft_validation_checks_optional_skill_dependency(tmp_path: Path) -> None:
-    """可选 Skill 虽不自动加载，发布前仍必须确认其存在。"""
+def test_draft_validation_checks_selected_skill_dependency(tmp_path: Path) -> None:
+    """已选择的 Skill 会自动加载，因此发布前必须确认其存在。"""
     skill_root = tmp_path / "skills"
     _write_skill(skill_root, "required-skill")
     _write_skill(skill_root, "default-skill")
@@ -185,6 +189,24 @@ def test_draft_validation_checks_optional_skill_dependency(tmp_path: Path) -> No
 
     with pytest.raises(ExpertRegistryError, match="optional-skill"):
         registry.validate_draft("operations-expert")
+
+
+def test_legacy_binding_modes_are_migrated_to_selected_skills() -> None:
+    """旧版三态绑定应兼容读取，并统一转换为自动加载的选择项。"""
+    draft = ExpertEditableSpec.model_validate(
+        {
+            **_draft().model_dump(mode="json"),
+            "skill_bindings": [
+                {"skill_id": "legacy-optional", "mode": "optional", "reason": "旧配置"},
+            ],
+        }
+    )
+
+    assert draft.skill_bindings == (
+        ExpertSkillBinding(skill_id="legacy-optional", reason="旧配置"),
+    )
+    assert draft.runtime_skill_ids == ("legacy-optional",)
+    assert "mode" not in draft.model_dump(mode="json")["skill_bindings"][0]
 
 
 def test_expert_is_injected_and_preserved_across_plan_states(tmp_path: Path) -> None:

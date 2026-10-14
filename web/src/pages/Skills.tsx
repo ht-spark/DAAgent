@@ -154,15 +154,15 @@ export default function Skills() {
   )
 }
 
-/** 技能详情弹窗：展示完整声明内容，并提供导出与删除入口。 */
-function SkillDetailDialog({
+/** 技能详情弹窗：展示完整声明内容，可按使用场景提供删除入口。 */
+export function SkillDetailDialog({
   skill,
   onClose,
   onRequestDelete,
 }: {
   skill: SkillInfo
   onClose: () => void
-  onRequestDelete: () => void
+  onRequestDelete?: () => void
 }) {
   // onClose 为内联箭头函数，用 ref 取最新值，避免每次渲染重新注册模态层
   const onCloseRef = useRef(onClose)
@@ -232,9 +232,11 @@ function SkillDetailDialog({
           >
             导出 ZIP
           </a>
-          <button type="button" className="confirm-ok is-danger" onClick={onRequestDelete}>
-            删除技能
-          </button>
+          {onRequestDelete ? (
+            <button type="button" className="confirm-ok is-danger" onClick={onRequestDelete}>
+              删除技能
+            </button>
+          ) : null}
         </footer>
       </div>
     </div>

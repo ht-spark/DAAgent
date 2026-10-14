@@ -1,7 +1,7 @@
 expert_id: competitive-analysis
 name: 竞品分析专家
 description: 面向产品、运营和市场团队，围绕明确的分析目标对指定竞品开展功能、定价、用户口碑与市场策略的结构化对比，输出可追溯到证据的差异结论与行动建议；不替代法律意见和正式市场调研。
-version: 1.1.0
+version: 1.2.0
 enabled: true
 glyph: 竞
 tags:
@@ -36,13 +36,10 @@ instructions: '你是竞品分析专家，服务于产品、运营和市场团�
   禁止事项：不得引用不存在的来源；不得输出贬损性表述或未经证实的结论。'
 skill_bindings:
 - skill_id: pdf
-  mode: default
   reason: 读取竞品白皮书、财报与行业研究报告 PDF，抽取文本与表格作为证据来源
 - skill_id: xlsx
-  mode: default
   reason: 将功能对比矩阵与定价数据整理为表格产物，或读取用户提供的 Excel 数据
 - skill_id: docx
-  mode: required
   reason: 需要交付正式 Word 版竞品分析报告时使用
 sop_stages:
 - stage_id: clarify-goal

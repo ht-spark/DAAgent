@@ -19,6 +19,7 @@ import {
 } from '../api'
 import ConfirmDialog from '../components/ConfirmDialog'
 import { pushModalLayer } from '../modalLayer'
+import { SkillDetailDialog } from './Skills'
 
 type Props = {
   view: TaskExpertView
@@ -56,10 +57,41 @@ const EMPTY_DRAFT: ExpertDraft = {
   validation_requirements: [],
 }
 
-const MODE_LABELS: Record<ExpertSkillBinding['mode'], string> = {
-  required: '必需',
-  default: '默认',
-  optional: '可选',
+/** 编辑器板块标识：身份与职责、业务 SOP、Skills 装配、交付与验证。 */
+type EditorSectionKey = 'identity' | 'sop' | 'skills' | 'delivery'
+
+/** 板块完成度状态：empty 未填写、partial 待完善、ready 已就绪。 */
+type SectionStatus = 'empty' | 'partial' | 'ready'
+
+/** 编辑器板块清单：顺序即展示顺序，标题与说明同时用于总览卡片和区块头。 */
+const EDITOR_SECTIONS: Array<{ key: EditorSectionKey; title: string; description: string }> = [
+  {
+    key: 'identity',
+    title: '身份与职责',
+    description: '定义专家是谁、适用什么场景，以及它应如何判断和行动。',
+  },
+  {
+    key: 'sop',
+    title: '业务 SOP',
+    description: '阶段是给模型的业务指引，不锁死建模方法；不适用时模型可说明原因后跳过。',
+  },
+  {
+    key: 'skills',
+    title: 'Skills 装配',
+    description: '勾选支撑业务 SOP 所需的能力；已选择的 Skill 会在专家运行时自动加载，未选择的不会加载。',
+  },
+  {
+    key: 'delivery',
+    title: '交付与验证',
+    description: '规定最终产物必须包含什么，以及提交前必须检查什么。',
+  },
+]
+
+/** 板块完成度状态徽标文案。 */
+const SECTION_STATUS_LABELS: Record<SectionStatus, string> = {
+  empty: '未填写',
+  partial: '待完善',
+  ready: '已就绪',
 }
 
 /** 管理专家草稿、Skill 装配和发布版本。 */
@@ -453,7 +485,7 @@ function ExpertDetailDialog({
                   <li key={binding.skill_id}>
                     <div className="expert-detail-card-title">
                       <strong>{skillNames.get(binding.skill_id) ?? binding.skill_id}</strong>
-                      <span className="expert-detail-mode">{MODE_LABELS[binding.mode]}</span>
+                      <span className="expert-detail-mode">自动加载</span>
                     </div>
                     {binding.reason ? <p>{binding.reason}</p> : null}
                   </li>
@@ -536,10 +568,17 @@ function ExpertEditor({
   onPublish: () => void
 }) {
   const draft = state.draft
+  const [detailSkill, setDetailSkill] = useState<SkillInfo | null>(null)
+  // 当前聚焦的编辑板块；为空时展示板块卡片总览
+  const [activeSection, setActiveSection] = useState<EditorSectionKey | null>(null)
   const selectedSkills = useMemo(
     () => new Map(draft.skill_bindings.map((binding) => [binding.skill_id, binding])),
     [draft.skill_bindings],
   )
+  // 当前聚焦板块的元信息，含标题与说明
+  const activeMeta = activeSection === null
+    ? null
+    : EDITOR_SECTIONS.find((section) => section.key === activeSection) ?? null
 
   function patch(values: Partial<ExpertDraft>) {
     onChange({ ...draft, ...values })
@@ -547,7 +586,7 @@ function ExpertEditor({
 
   function toggleSkill(skillId: string, selected: boolean) {
     const next = selected
-      ? [...draft.skill_bindings, { skill_id: skillId, mode: 'default' as const, reason: '' }]
+      ? [...draft.skill_bindings, { skill_id: skillId, reason: '' }]
       : draft.skill_bindings.filter((item) => item.skill_id !== skillId)
     patch({ skill_bindings: next })
   }
@@ -566,6 +605,133 @@ function ExpertEditor({
         currentIndex === index ? { ...stage, ...values } : stage
       )),
     })
+  }
+
+  /** 打开指定板块的详细编辑，并回到页面顶部。 */
+  function openSection(key: EditorSectionKey) {
+    setActiveSection(key)
+    window.scrollTo(0, 0)
+  }
+
+  /** 返回板块卡片总览。 */
+  function backToOverview() {
+    setActiveSection(null)
+    window.scrollTo(0, 0)
+  }
+
+  /** 在 SOP 板块末尾追加一个空阶段。 */
+  function addStage() {
+    patch({ sop_stages: [...draft.sop_stages, newStage(draft.sop_stages.length)] })
+  }
+
+  /** 渲染当前板块的编辑表单主体，仅在详细编辑视图中调用。 */
+  function renderSectionBody(key: EditorSectionKey): ReactNode {
+    if (key === 'identity') {
+      return (
+        <div className="expert-form-grid">
+          <Field label="专家标识" hint="系统内唯一且发布后不可修改；使用小写字母、数字和短横线，如 operations-analysis。">
+            <input value={draft.expert_id} disabled={state.persisted} placeholder="operations-analysis" onChange={(event) => patch({ expert_id: event.target.value })} />
+          </Field>
+          <Field label="版本" hint="建议使用“主版本.次版本.修订版本”，如 1.0.0；更新已发布专家时必须提高版本号。">
+            <input value={draft.version} placeholder="1.0.0" onChange={(event) => patch({ version: event.target.value })} />
+          </Field>
+          <Field label="专家名称" hint="面向用户展示的业务角色名称，建议使用“业务领域 + 专家”。">
+            <input value={draft.name} placeholder="运营分析专家" onChange={(event) => patch({ name: event.target.value })} />
+          </Field>
+          <Field label="图标文字" hint="用于专家卡片识别，建议填写 1 个有代表性的中文字符，如“运”。">
+            <input value={draft.glyph} maxLength={4} onChange={(event) => patch({ glyph: event.target.value })} />
+          </Field>
+          <Field label="简介" hint="用 1～2 句话说明适用业务、典型任务和不负责的范围，帮助用户判断何时选择该专家。" className="is-wide">
+            <textarea rows={3} value={draft.description} placeholder="例如：面向互联网运营场景，负责指标诊断、趋势分析和异常归因；不替代财务审计。" onChange={(event) => patch({ description: event.target.value })} />
+          </Field>
+          <Field label="标签" hint="填写 3～6 个业务领域或核心能力关键词，使用中文或英文逗号分隔。" className="is-wide">
+            <input value={draft.tags.join(', ')} placeholder="运营, 指标分析, 异常诊断" onChange={(event) => patch({ tags: splitComma(event.target.value) })} />
+          </Field>
+          <Field label="职责与行为准则" hint="明确角色目标、工作范围、判断原则、业务口径、信息不足时的处理方式和禁止事项。" className="is-wide">
+            <textarea rows={6} value={draft.instructions} placeholder="例如：先确认指标定义和统计口径；区分事实、推断与假设；不得编造缺失数据。" onChange={(event) => patch({ instructions: event.target.value })} />
+          </Field>
+        </div>
+      )
+    }
+
+    if (key === 'sop') {
+      return draft.sop_stages.length === 0 ? (
+        <div className="expert-empty-state">尚未配置 SOP，添加第一个业务阶段。</div>
+      ) : (
+        <div className="expert-stage-list">
+          {draft.sop_stages.map((stage, index) => (
+            <article className="expert-stage" key={`${stage.stage_id}-${index}`}>
+              <div className="expert-stage-head">
+                <span>{index + 1}</span>
+                <strong>{stage.name || '未命名阶段'}</strong>
+                <button type="button" onClick={() => patch({ sop_stages: draft.sop_stages.filter((_, currentIndex) => currentIndex !== index) })}>移除</button>
+              </div>
+              <div className="expert-form-grid">
+                <Field label="阶段标识" hint="阶段内唯一；使用小写字母、数字和短横线，如 validate-metrics。"><input value={stage.stage_id} placeholder="validate-metrics" onChange={(event) => updateStage(index, { stage_id: event.target.value })} /></Field>
+                <Field label="阶段名称" hint="使用清晰的业务动作命名，让用户一眼看懂这一阶段要做什么。"><input value={stage.name} placeholder="确认指标口径" onChange={(event) => updateStage(index, { name: event.target.value })} /></Field>
+                <Field label="阶段目标" hint="描述该阶段结束时应得到的明确结果，不要只重复阶段名称。" className="is-wide"><textarea rows={2} value={stage.objective} placeholder="例如：确认核心指标的计算方式、统计范围、时间粒度和去重规则。" onChange={(event) => updateStage(index, { objective: event.target.value })} /></Field>
+                <Field label="执行指引" hint="每行一条，按执行顺序写具体动作。"><textarea rows={4} value={stage.guidance.join('\n')} placeholder={'识别任务涉及的核心指标\n确认指标的分子、分母和过滤条件'} onChange={(event) => updateStage(index, { guidance: splitLines(event.target.value) })} /></Field>
+                <Field label="所需输入" hint="每行一条，填写进入该阶段前需要具备的数据或业务信息。"><textarea rows={4} value={stage.required_inputs.join('\n')} placeholder={'业务指标说明\n数据字段说明\n统计周期'} onChange={(event) => updateStage(index, { required_inputs: splitLines(event.target.value) })} /></Field>
+                <Field label="阻断条件" hint="每行一条，说明何时必须停止并向用户追问，条件应具体且可判断。" className="is-wide"><textarea rows={3} value={stage.blocking_conditions.join('\n')} placeholder={'核心指标存在多个口径但无法确定使用哪一个\n缺少计算核心指标所需的关键字段'} onChange={(event) => updateStage(index, { blocking_conditions: splitLines(event.target.value) })} /></Field>
+              </div>
+            </article>
+          ))}
+        </div>
+      )
+    }
+
+    if (key === 'skills') {
+      return (
+        <>
+          {skills.length === 0 ? (
+            <div className="expert-empty-state">当前没有已安装 Skill，可先在“技能”页面导入。</div>
+          ) : (
+            <ul className="skills-grid expert-skill-grid">
+              {skills.map((skill) => {
+                const binding = selectedSkills.get(skill.skill_id)
+                return (
+                  <li className={`skill-card expert-skill-card${binding ? ' is-loaded' : ''}`} key={skill.skill_id}>
+                    <span className="skill-card-name" title={skill.name}>{skill.name}</span>
+                    <span className="skill-card-actions">
+                      <button type="button" className="skill-action" onClick={() => setDetailSkill(skill)}>
+                        查看详情
+                      </button>
+                      <label className="skill-action expert-skill-load-toggle">
+                        <input
+                          type="checkbox"
+                          checked={Boolean(binding)}
+                          onChange={(event) => toggleSkill(skill.skill_id, event.target.checked)}
+                        />
+                        <span>加载</span>
+                      </label>
+                    </span>
+                    {binding ? (
+                      <label className="expert-skill-load-note">
+                        <span>加载说明</span>
+                        <textarea
+                          rows={3}
+                          value={binding.reason}
+                          placeholder="说明该 Skill 支撑哪个 SOP 阶段、主要用途和必要限制"
+                          onChange={(event) => updateBinding(skill.skill_id, { reason: event.target.value })}
+                        />
+                      </label>
+                    ) : null}
+                  </li>
+                )
+              })}
+            </ul>
+          )}
+          <p className="expert-mode-help">已勾选的 Skill 均为专家必需能力，并会在每次运行时自动加载。</p>
+        </>
+      )
+    }
+
+    return (
+      <div className="expert-form-grid">
+        <Field label="交付要求" hint="每行一条，规定最终答案或产物必须包含什么。"><textarea rows={6} value={draft.output_requirements.join('\n')} placeholder={'给出核心结论及对应的数据证据\n说明指标定义、时间范围和分析局限'} onChange={(event) => patch({ output_requirements: splitLines(event.target.value) })} /></Field>
+        <Field label="验证要求" hint="每行一条，规定提交结果前必须完成的检查。"><textarea rows={6} value={draft.validation_requirements.join('\n')} placeholder={'检查指标口径与原始数据是否一致\n检查每项核心结论是否有证据支持'} onChange={(event) => patch({ validation_requirements: splitLines(event.target.value) })} /></Field>
+      </div>
+    )
   }
 
   return (
@@ -587,105 +753,79 @@ function ExpertEditor({
 
       <div className="expert-editor-layout">
         <main className="expert-editor-main">
-          <EditorSection title="身份与职责" description="定义专家是谁、适用什么场景，以及它应如何判断和行动。">
-            <div className="expert-form-grid">
-              <Field label="专家标识" hint="系统内唯一且发布后不可修改；使用小写字母、数字和短横线，如 operations-analysis。">
-                <input value={draft.expert_id} disabled={state.persisted} placeholder="operations-analysis" onChange={(event) => patch({ expert_id: event.target.value })} />
-              </Field>
-              <Field label="版本" hint="建议使用“主版本.次版本.修订版本”，如 1.0.0；更新已发布专家时必须提高版本号。">
-                <input value={draft.version} placeholder="1.0.0" onChange={(event) => patch({ version: event.target.value })} />
-              </Field>
-              <Field label="专家名称" hint="面向用户展示的业务角色名称，建议使用“业务领域 + 专家”。">
-                <input value={draft.name} placeholder="运营分析专家" onChange={(event) => patch({ name: event.target.value })} />
-              </Field>
-              <Field label="图标文字" hint="用于专家卡片识别，建议填写 1 个有代表性的中文字符，如“运”。">
-                <input value={draft.glyph} maxLength={4} onChange={(event) => patch({ glyph: event.target.value })} />
-              </Field>
-              <Field label="简介" hint="用 1～2 句话说明适用业务、典型任务和不负责的范围，帮助用户判断何时选择该专家。" className="is-wide">
-                <textarea rows={3} value={draft.description} placeholder="例如：面向互联网运营场景，负责指标诊断、趋势分析和异常归因；不替代财务审计。" onChange={(event) => patch({ description: event.target.value })} />
-              </Field>
-              <Field label="标签" hint="填写 3～6 个业务领域或核心能力关键词，使用中文或英文逗号分隔。" className="is-wide">
-                <input value={draft.tags.join(', ')} placeholder="运营, 指标分析, 异常诊断" onChange={(event) => patch({ tags: splitComma(event.target.value) })} />
-              </Field>
-              <Field label="职责与行为准则" hint="明确角色目标、工作范围、判断原则、业务口径、信息不足时的处理方式和禁止事项。" className="is-wide">
-                <textarea rows={6} value={draft.instructions} placeholder="例如：先确认指标定义和统计口径；区分事实、推断与假设；不得编造缺失数据。" onChange={(event) => patch({ instructions: event.target.value })} />
-              </Field>
-            </div>
-          </EditorSection>
-
-          <EditorSection title="Skills 装配" description="勾选该专家可使用的能力，并决定它们是否在运行时自动加载。">
-            {skills.length === 0 ? (
-              <div className="expert-empty-state">当前没有已安装 Skill，可先在“技能”页面导入。</div>
-            ) : (
-              <div className="expert-skill-picker">
-                {skills.map((skill) => {
-                  const binding = selectedSkills.get(skill.skill_id)
+          {activeMeta === null ? (
+            <div className="expert-overview">
+              <p className="expert-overview-hint">
+                点击卡片进入对应板块的详细编辑，进入后可通过顶部标签在板块之间快速切换。
+              </p>
+              <div className="expert-overview-grid">
+                {EDITOR_SECTIONS.map((section, index) => {
+                  const progress = describeSection(draft, section.key)
                   return (
-                    <div className={`expert-skill-row${binding ? ' is-selected' : ''}`} key={skill.skill_id}>
-                      <label className="expert-skill-check">
-                        <input type="checkbox" checked={Boolean(binding)} onChange={(event) => toggleSkill(skill.skill_id, event.target.checked)} />
-                        <span><strong>{skill.name}</strong><small>{skill.description}</small></span>
-                      </label>
-                      {binding ? (
-                        <div className="expert-skill-settings">
-                          <label>
-                            <span>加载方式</span>
-                            <select value={binding.mode} onChange={(event) => updateBinding(skill.skill_id, { mode: event.target.value as ExpertSkillBinding['mode'] })}>
-                              {Object.entries(MODE_LABELS).map(([value, label]) => <option value={value} key={value}>{label}</option>)}
-                            </select>
-                            <small>必需和默认会自动加载；可选仅声明能力，需要时再手动加载。</small>
-                          </label>
-                          <label>
-                            <span>使用说明</span>
-                            <input value={binding.reason} placeholder="例如：用户上传 PDF 运营报告时使用" onChange={(event) => updateBinding(skill.skill_id, { reason: event.target.value })} />
-                            <small>说明触发场景、主要用途和必要限制，避免只写“用于处理文件”。</small>
-                          </label>
-                        </div>
-                      ) : null}
-                    </div>
+                    <button
+                      key={section.key}
+                      type="button"
+                      className="expert-overview-card"
+                      onClick={() => openSection(section.key)}
+                    >
+                      <span className="expert-overview-top">
+                        <span className="expert-overview-index">{String(index + 1).padStart(2, '0')}</span>
+                        <span className="expert-overview-rule" aria-hidden="true" />
+                        <span className={`expert-overview-status is-${progress.status}`}>
+                          {SECTION_STATUS_LABELS[progress.status]}
+                        </span>
+                      </span>
+                      <strong className="expert-overview-name">{section.title}</strong>
+                      <span className="expert-overview-desc">{section.description}</span>
+                      <span className="expert-overview-foot">
+                        <span className="expert-overview-meta">{progress.meta}</span>
+                        <span className="expert-overview-enter">
+                          进入编辑
+                          <ChevronRightIcon />
+                        </span>
+                      </span>
+                    </button>
                   )
                 })}
               </div>
-            )}
-            <p className="expert-mode-help">必需和默认 Skill 会自动加载；可选 Skill 只声明为专家能力，不自动占用上下文。</p>
-          </EditorSection>
-
-          <EditorSection
-            title="业务 SOP"
-            description="阶段是给模型的业务指引，不锁死建模方法；不适用时模型可以说明原因后跳过。"
-            action={<button type="button" className="expert-secondary-button" onClick={() => patch({ sop_stages: [...draft.sop_stages, newStage(draft.sop_stages.length)] })}>添加阶段</button>}
-          >
-            {draft.sop_stages.length === 0 ? (
-              <div className="expert-empty-state">尚未配置 SOP，添加第一个业务阶段。</div>
-            ) : (
-              <div className="expert-stage-list">
-                {draft.sop_stages.map((stage, index) => (
-                  <article className="expert-stage" key={`${stage.stage_id}-${index}`}>
-                    <div className="expert-stage-head">
-                      <span>{index + 1}</span>
-                      <strong>{stage.name || '未命名阶段'}</strong>
-                      <button type="button" onClick={() => patch({ sop_stages: draft.sop_stages.filter((_, currentIndex) => currentIndex !== index) })}>移除</button>
-                    </div>
-                    <div className="expert-form-grid">
-                      <Field label="阶段标识" hint="阶段内唯一；使用小写字母、数字和短横线，如 validate-metrics。"><input value={stage.stage_id} placeholder="validate-metrics" onChange={(event) => updateStage(index, { stage_id: event.target.value })} /></Field>
-                      <Field label="阶段名称" hint="使用清晰的业务动作命名，让用户一眼看懂这一阶段要做什么。"><input value={stage.name} placeholder="确认指标口径" onChange={(event) => updateStage(index, { name: event.target.value })} /></Field>
-                      <Field label="阶段目标" hint="描述该阶段结束时应得到的明确结果，不要只重复阶段名称。" className="is-wide"><textarea rows={2} value={stage.objective} placeholder="例如：确认核心指标的计算方式、统计范围、时间粒度和去重规则。" onChange={(event) => updateStage(index, { objective: event.target.value })} /></Field>
-                      <Field label="执行指引" hint="每行一条，按执行顺序写具体动作。"><textarea rows={4} value={stage.guidance.join('\n')} placeholder={'识别任务涉及的核心指标\n确认指标的分子、分母和过滤条件'} onChange={(event) => updateStage(index, { guidance: splitLines(event.target.value) })} /></Field>
-                      <Field label="所需输入" hint="每行一条，填写进入该阶段前需要具备的数据或业务信息。"><textarea rows={4} value={stage.required_inputs.join('\n')} placeholder={'业务指标说明\n数据字段说明\n统计周期'} onChange={(event) => updateStage(index, { required_inputs: splitLines(event.target.value) })} /></Field>
-                      <Field label="阻断条件" hint="每行一条，说明何时必须停止并向用户追问，条件应具体且可判断。" className="is-wide"><textarea rows={3} value={stage.blocking_conditions.join('\n')} placeholder={'核心指标存在多个口径但无法确定使用哪一个\n缺少计算核心指标所需的关键字段'} onChange={(event) => updateStage(index, { blocking_conditions: splitLines(event.target.value) })} /></Field>
-                    </div>
-                  </article>
-                ))}
-              </div>
-            )}
-          </EditorSection>
-
-          <EditorSection title="交付与验证" description="规定最终产物必须包含什么，以及提交前必须检查什么。">
-            <div className="expert-form-grid">
-              <Field label="交付要求" hint="每行一条，规定最终答案或产物必须包含什么。"><textarea rows={6} value={draft.output_requirements.join('\n')} placeholder={'给出核心结论及对应的数据证据\n说明指标定义、时间范围和分析局限'} onChange={(event) => patch({ output_requirements: splitLines(event.target.value) })} /></Field>
-              <Field label="验证要求" hint="每行一条，规定提交结果前必须完成的检查。"><textarea rows={6} value={draft.validation_requirements.join('\n')} placeholder={'检查指标口径与原始数据是否一致\n检查每项核心结论是否有证据支持'} onChange={(event) => patch({ validation_requirements: splitLines(event.target.value) })} /></Field>
             </div>
-          </EditorSection>
+          ) : (
+            <div className="expert-focus" key={activeMeta.key}>
+              <nav className="expert-focus-nav" aria-label="专家配置板块">
+                <button type="button" className="expert-focus-back" onClick={backToOverview}>
+                  <ChevronLeftIcon />
+                  全部板块
+                </button>
+                <div className="expert-focus-tabs">
+                  {EDITOR_SECTIONS.map((section) => {
+                    const progress = describeSection(draft, section.key)
+                    const isActive = section.key === activeMeta.key
+                    return (
+                      <button
+                        key={section.key}
+                        type="button"
+                        aria-current={isActive ? 'true' : undefined}
+                        className={`expert-focus-tab${isActive ? ' is-active' : ''}`}
+                        onClick={() => openSection(section.key)}
+                      >
+                        <span className={`expert-focus-dot is-${progress.status}`} aria-hidden="true" />
+                        {section.title}
+                      </button>
+                    )
+                  })}
+                </div>
+              </nav>
+              <EditorSection
+                title={activeMeta.title}
+                description={activeMeta.description}
+                action={activeMeta.key === 'sop' ? (
+                  <button type="button" className="expert-secondary-button" onClick={addStage}>添加阶段</button>
+                ) : undefined}
+              >
+                {renderSectionBody(activeMeta.key)}
+              </EditorSection>
+            </div>
+          )}
         </main>
 
         <aside className="expert-editor-aside">
@@ -706,6 +846,10 @@ function ExpertEditor({
           </label>
         </aside>
       </div>
+
+      {detailSkill ? (
+        <SkillDetailDialog skill={detailSkill} onClose={() => setDetailSkill(null)} />
+      ) : null}
     </div>
   )
 }
@@ -719,11 +863,14 @@ function Field({ label, hint, className = '', children }: { label: string; hint?
 }
 
 function normalizeDraft(draft: ExpertDraft): ExpertDraft {
-  const source = draft as ExpertDraft & { bundle_hash?: string }
+  const source = draft as ExpertDraft & {
+    bundle_hash?: string
+    skill_bindings?: Array<ExpertSkillBinding & { mode?: string }>
+  }
   const { bundle_hash: _bundleHash, ...editable } = source
-  const migrated = [...(editable.skill_bindings ?? [])]
+  const migrated = (editable.skill_bindings ?? []).map(({ mode: _mode, ...binding }) => binding)
   for (const skillId of editable.default_skill_ids ?? []) {
-    if (!migrated.some((item) => item.skill_id === skillId)) migrated.push({ skill_id: skillId, mode: 'default', reason: '' })
+    if (!migrated.some((item) => item.skill_id === skillId)) migrated.push({ skill_id: skillId, reason: '' })
   }
   return { ...editable, skill_bindings: migrated, sop_stages: editable.sop_stages ?? [], default_skill_ids: [] }
 }
@@ -740,10 +887,61 @@ function splitComma(value: string): string[] {
   return value.split(/[,，]/).map((item) => item.trim()).filter(Boolean)
 }
 
+/** 计算板块完成度与统计文案，用于总览卡片和板块切换标签。 */
+function describeSection(draft: ExpertDraft, key: EditorSectionKey): { status: SectionStatus; meta: string } {
+  if (key === 'identity') {
+    // 身份板块的 6 项关键信息：标识、名称、图标、简介、职责准则、标签
+    const filled = [
+      draft.expert_id.trim(),
+      draft.name.trim(),
+      draft.glyph.trim(),
+      draft.description.trim(),
+      draft.instructions.trim(),
+      draft.tags.length > 0,
+    ].filter(Boolean).length
+    return {
+      status: filled === 0 ? 'empty' : filled === 6 ? 'ready' : 'partial',
+      meta: `已填写 ${filled} / 6 项关键信息`,
+    }
+  }
+  if (key === 'sop') {
+    // 阶段写明名称与目标即视为可用，其余细项不阻断完成度
+    const total = draft.sop_stages.length
+    const described = draft.sop_stages.filter((stage) => stage.name.trim() && stage.objective.trim()).length
+    return {
+      status: total === 0 ? 'empty' : described === total ? 'ready' : 'partial',
+      meta: total === 0 ? '尚未添加阶段' : `${total} 个阶段 · ${described} 个已写明目标`,
+    }
+  }
+  if (key === 'skills') {
+    // 加载说明为空时提示补充，但不阻断装配
+    const total = draft.skill_bindings.length
+    const noted = draft.skill_bindings.filter((binding) => binding.reason.trim()).length
+    return {
+      status: total === 0 ? 'empty' : noted === total ? 'ready' : 'partial',
+      meta: total === 0 ? '尚未装配 Skill' : `已装配 ${total} 个 · ${noted} 个已写加载说明`,
+    }
+  }
+  const outputs = draft.output_requirements.length
+  const validations = draft.validation_requirements.length
+  return {
+    status: outputs + validations === 0 ? 'empty' : outputs > 0 && validations > 0 ? 'ready' : 'partial',
+    meta: outputs + validations === 0 ? '尚未填写要求' : `交付 ${outputs} 条 · 验证 ${validations} 条`,
+  }
+}
+
 function countBoundSkills(expert: ExpertDraft): number {
   return new Set([...expert.default_skill_ids, ...expert.skill_bindings.map((item) => item.skill_id)]).size
 }
 
 function PlusIcon() {
   return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
+}
+
+function ChevronRightIcon() {
+  return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6" /></svg>
+}
+
+function ChevronLeftIcon() {
+  return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 6l-6 6 6 6" /></svg>
 }

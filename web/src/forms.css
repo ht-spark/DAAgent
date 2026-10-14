@@ -1826,7 +1826,7 @@
 .expert-editor-page .expert-editor-layout,
 .expert-editor-page > .skills-error,
 .expert-editor-page > .expert-notice {
-  width: min(100%, 1440px);
+  width: 100%;
   margin-right: auto;
   margin-left: auto;
 }
@@ -1915,7 +1915,7 @@
 }
 
 .expert-editor-page .expert-editor-layout {
-  grid-template-columns: minmax(0, 1fr) minmax(250px, 276px);
+  grid-template-columns: minmax(0, 1fr) 276px;
   gap: 26px;
 }
 
@@ -2096,6 +2096,63 @@
   margin-top: 12px;
   color: var(--expert-muted);
   line-height: 1.6;
+}
+
+/* 专家 Skills 装配复用技能管理页卡片，只保留查看、加载和加载说明。 */
+.expert-editor-page .expert-skill-grid {
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  padding-bottom: 0;
+}
+
+.expert-editor-page .expert-skill-card {
+  min-height: 112px;
+}
+
+.expert-editor-page .expert-skill-card.is-loaded {
+  border-color: rgba(184, 137, 45, 0.5);
+  background: rgba(245, 235, 204, 0.46);
+}
+
+.expert-editor-page .expert-skill-load-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  user-select: none;
+}
+
+.expert-editor-page .expert-skill-load-toggle input {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: var(--expert-accent);
+}
+
+.expert-editor-page .expert-skill-load-note {
+  display: grid;
+  gap: 7px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(184, 137, 45, 0.18);
+  color: var(--expert-muted);
+  font-size: calc(12px * var(--app-font-ratio));
+}
+
+.expert-editor-page .expert-skill-load-note textarea {
+  width: 100%;
+  min-height: 76px;
+  resize: vertical;
+  padding: 10px 11px;
+  border: 1px solid var(--expert-border);
+  border-radius: 9px;
+  background: rgba(255, 253, 247, 0.94);
+  color: var(--expert-text);
+  font: inherit;
+  line-height: 1.55;
+}
+
+.expert-editor-page .expert-skill-load-note textarea:focus {
+  outline: none;
+  border-color: var(--expert-accent);
+  box-shadow: 0 0 0 3px rgba(184, 137, 45, 0.13);
 }
 
 .expert-editor-page .expert-stage-list {
@@ -2363,13 +2420,28 @@
   .expert-editor-page .expert-editor-section,
   .expert-editor-page .expert-stage,
   .expert-editor-page .expert-preview,
-  .expert-editor-page .expert-enabled-toggle {
+  .expert-editor-page .expert-enabled-toggle,
+  .expert-editor-page .expert-overview-card,
+  .expert-editor-page .expert-focus-back,
+  .expert-editor-page .expert-focus-tab,
+  .expert-editor-page .expert-overview-enter svg {
     transition: none;
+  }
+
+  .expert-editor-page .expert-overview,
+  .expert-editor-page .expert-overview-card,
+  .expert-editor-page .expert-focus {
+    animation: none;
   }
 
   .expert-editor-page .expert-editor-actions button:hover:not(:disabled),
   .expert-editor-page .expert-secondary-button:hover,
-  .expert-editor-page .expert-preview:hover {
+  .expert-editor-page .expert-preview:hover,
+  .expert-editor-page .expert-overview-card:hover {
+    transform: none;
+  }
+
+  .expert-editor-page .expert-overview-card:hover .expert-overview-enter svg {
     transform: none;
   }
 }
@@ -2379,6 +2451,303 @@
     background: #fffdf7;
     backdrop-filter: none;
     -webkit-backdrop-filter: none;
+  }
+}
+
+/* 编辑板块总览：进入编辑器先看卡片概览，点击卡片进入单板块详细编辑。 */
+.expert-editor-page .expert-overview {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  animation: expert-panel-in 260ms cubic-bezier(0.22, 0.61, 0.36, 1) both;
+}
+
+.expert-editor-page .expert-overview-hint {
+  margin: 0;
+  color: var(--expert-muted);
+  font-size: calc(12.5px * var(--app-font-ratio));
+  line-height: 1.6;
+}
+
+.expert-editor-page .expert-overview-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 20px;
+}
+
+.expert-editor-page .expert-overview-card {
+  display: flex;
+  min-height: 234px;
+  flex-direction: column;
+  gap: 10px;
+  padding: 24px 26px 20px;
+  border: 1px solid rgba(214, 203, 180, 0.78);
+  border-radius: 16px;
+  background: var(--expert-surface);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  box-shadow: 0 4px 20px rgba(92, 72, 28, 0.055);
+  animation: expert-panel-in 300ms cubic-bezier(0.22, 0.61, 0.36, 1) both;
+  transition:
+    transform 180ms ease,
+    border-color 180ms ease,
+    box-shadow 180ms ease;
+}
+
+.expert-editor-page .expert-overview-card:nth-child(2) { animation-delay: 50ms; }
+.expert-editor-page .expert-overview-card:nth-child(3) { animation-delay: 100ms; }
+.expert-editor-page .expert-overview-card:nth-child(4) { animation-delay: 150ms; }
+
+.expert-editor-page .expert-overview-card:hover {
+  transform: translateY(-3px);
+  border-color: #cfc3aa;
+  box-shadow: 0 12px 32px rgba(92, 72, 28, 0.11);
+}
+
+.expert-editor-page .expert-overview-card:active {
+  transform: translateY(-1px) scale(0.995);
+}
+
+.expert-editor-page .expert-overview-card:focus-visible {
+  outline: 2px solid rgba(184, 137, 45, 0.58);
+  outline-offset: 3px;
+}
+
+.expert-editor-page .expert-overview-top {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.expert-editor-page .expert-overview-index {
+  color: var(--expert-accent);
+  font-family: "Times New Roman", "Songti SC", serif;
+  font-size: calc(21px * var(--app-font-ratio));
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.04em;
+}
+
+.expert-editor-page .expert-overview-rule {
+  height: 1px;
+  flex: 1;
+  background: linear-gradient(90deg, rgba(184, 137, 45, 0.42), rgba(184, 137, 45, 0.06));
+}
+
+.expert-editor-page .expert-overview-status {
+  padding: 3px 10px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  font-size: calc(11px * var(--app-font-ratio));
+  font-weight: 620;
+  line-height: 1.6;
+  white-space: nowrap;
+}
+
+.expert-editor-page .expert-overview-status.is-empty {
+  border-color: #e0dacb;
+  background: #f2efe7;
+  color: #8a7f68;
+}
+
+.expert-editor-page .expert-overview-status.is-partial {
+  border-color: rgba(184, 137, 45, 0.32);
+  background: #f7efdb;
+  color: #8a6520;
+}
+
+.expert-editor-page .expert-overview-status.is-ready {
+  border-color: #cfe5d7;
+  background: #f1f8f3;
+  color: #2f6642;
+}
+
+.expert-editor-page .expert-overview-name {
+  margin-top: 2px;
+  color: var(--expert-ink);
+  font-size: calc(19px * var(--app-font-ratio));
+  font-weight: 730;
+  letter-spacing: -0.02em;
+}
+
+.expert-editor-page .expert-overview-desc {
+  color: var(--expert-muted);
+  font-size: calc(12.5px * var(--app-font-ratio));
+  line-height: 1.68;
+}
+
+.expert-editor-page .expert-overview-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: auto;
+  padding-top: 14px;
+  border-top: 1px solid #eee7d8;
+}
+
+.expert-editor-page .expert-overview-meta {
+  color: #7a7157;
+  font-size: calc(12px * var(--app-font-ratio));
+  font-variant-numeric: tabular-nums;
+}
+
+.expert-editor-page .expert-overview-enter {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--expert-accent);
+  font-size: calc(12.5px * var(--app-font-ratio));
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.expert-editor-page .expert-overview-enter svg,
+.expert-editor-page .expert-focus-back svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.expert-editor-page .expert-overview-enter svg {
+  transition: transform 180ms ease;
+}
+
+.expert-editor-page .expert-overview-card:hover .expert-overview-enter svg {
+  transform: translateX(3px);
+}
+
+/* 单板块详细编辑：顶部提供返回总览按钮与板块切换标签。 */
+.expert-editor-page .expert-focus {
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+  animation: expert-panel-in 260ms cubic-bezier(0.22, 0.61, 0.36, 1) both;
+}
+
+.expert-editor-page .expert-focus-nav {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.expert-editor-page .expert-focus-back {
+  display: inline-flex;
+  min-height: 38px;
+  align-items: center;
+  gap: 6px;
+  padding: 0 14px 0 11px;
+  border: 1px solid var(--expert-border);
+  border-radius: 10px;
+  background: rgba(255, 253, 247, 0.94);
+  color: #5f4a1f;
+  font: inherit;
+  font-size: calc(12.5px * var(--app-font-ratio));
+  font-weight: 650;
+  white-space: nowrap;
+  cursor: pointer;
+  box-shadow: 0 1px 2px rgba(92, 72, 28, 0.04);
+  transition:
+    border-color 160ms ease,
+    background 160ms ease,
+    box-shadow 160ms ease;
+}
+
+.expert-editor-page .expert-focus-back:hover {
+  border-color: #c7b47f;
+  background: #fffdf7;
+  box-shadow: 0 5px 14px rgba(92, 72, 28, 0.09);
+}
+
+.expert-editor-page .expert-focus-back:active {
+  transform: translateY(1px);
+}
+
+.expert-editor-page .expert-focus-tabs {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  align-items: center;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid rgba(214, 203, 180, 0.7);
+  border-radius: 12px;
+  background: rgba(255, 253, 247, 0.72);
+  flex-wrap: wrap;
+}
+
+.expert-editor-page .expert-focus-tab {
+  display: inline-flex;
+  min-height: 32px;
+  align-items: center;
+  gap: 7px;
+  padding: 0 12px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  background: transparent;
+  color: #6d624e;
+  font: inherit;
+  font-size: calc(12.5px * var(--app-font-ratio));
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background 150ms ease,
+    border-color 150ms ease,
+    color 150ms ease,
+    box-shadow 150ms ease;
+}
+
+.expert-editor-page .expert-focus-tab:hover {
+  background: #fbf4e3;
+  color: #4a3d22;
+}
+
+.expert-editor-page .expert-focus-tab.is-active {
+  border-color: rgba(184, 137, 45, 0.34);
+  background: #fffdf7;
+  color: #7d5c1c;
+  box-shadow: 0 2px 8px rgba(92, 72, 28, 0.09);
+}
+
+.expert-editor-page .expert-focus-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #d3cbb8;
+}
+
+.expert-editor-page .expert-focus-dot.is-partial { background: #d9b25c; }
+.expert-editor-page .expert-focus-dot.is-ready { background: #62a37c; }
+
+@keyframes expert-panel-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (max-width: 1180px) {
+  .expert-editor-page .expert-overview-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 760px) {
+  .expert-editor-page .expert-overview-card {
+    min-height: 0;
+    padding: 20px;
   }
 }
 

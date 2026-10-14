@@ -2,19 +2,28 @@
 
 from __future__ import annotations
 
-from typing import Literal
-
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class ExpertSkillBinding(BaseModel):
-    """专家对一个 Skill 的装配规则。"""
+    """专家对一个 Skill 的二元装配规则。"""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     skill_id: str = Field(min_length=1, max_length=64)
-    mode: Literal["required", "default", "optional"] = "default"
     reason: str = Field(default="", max_length=300)
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_legacy_mode(cls, value: object) -> object:
+        """兼容旧版三态配置；绑定项在新版中一律自动加载。"""
+        if not isinstance(value, dict) or "mode" not in value:
+            return value
+        migrated = dict(value)
+        legacy_mode = migrated.pop("mode")
+        if legacy_mode not in {"required", "default", "optional"}:
+            migrated["mode"] = legacy_mode
+        return migrated
 
     @field_validator("skill_id")
     @classmethod
@@ -120,13 +129,9 @@ class ExpertEditableSpec(BaseModel):
 
     @property
     def runtime_skill_ids(self) -> tuple[str, ...]:
-        """返回运行时自动加载的必需和默认 Skill。"""
+        """返回运行时自动加载的全部已装配 Skill。"""
         selected = list(self.default_skill_ids)
-        selected.extend(
-            binding.skill_id
-            for binding in self.skill_bindings
-            if binding.mode in {"required", "default"}
-        )
+        selected.extend(binding.skill_id for binding in self.skill_bindings)
         return tuple(dict.fromkeys(selected))
 
 

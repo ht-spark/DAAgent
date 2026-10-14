@@ -2,7 +2,7 @@ expert_id: prd-writer
 name: PRD 写作专家
 description: 面向互联网产品经理的 PRD 撰写专家，从 0 到 1 生成结构化 PRD 文档，覆盖背景、目标、用户、场景、功能、非功能、风险、埋点、上线计划等章节，附带评审
   checklist 与待澄清问题清单；不负责竞品分析、用户调研、技术方案、UI 设计、数据分析与项目管理。
-version: 1.0.0
+version: 1.1.0
 enabled: true
 glyph: 需
 tags:
@@ -76,9 +76,7 @@ instructions: '你是 PRD 写作专家，负责把产品经理的一句话需求
   - 不得在 PRD 中包含未经验证的技术可行性结论'
 skill_bindings:
 - skill_id: competitive-analysis
-  mode: optional
-  reason: 当 PRD 撰写过程中需要引用竞品背景、对比功能差异或参考市场定位时，可调用该 Skill 生成竞品分析片段；仅声明能力，不自动加载，避免与 PRD
-    写作主流程耦合
+  reason: 当 PRD 撰写过程中需要引用竞品背景、对比功能差异或参考市场定位时，使用该 Skill 支持竞品分析片段
 sop_stages:
 - stage_id: clarify-requirement
   name: 需求澄清与理解
