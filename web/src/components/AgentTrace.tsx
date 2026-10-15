@@ -33,6 +33,8 @@ const TraceRowItem = memo(function TraceRowItem({ row }: { row: AgentTraceRow })
     row.kind === 'thinking' && row.status === 'running' ? Date.now() : null,
   )
   const [thinkingSeconds, setThinkingSeconds] = useState(0)
+  // 思考行默认展开，让流式内容一进来就可见；仍允许用户手动收起
+  const [thinkingExpanded, setThinkingExpanded] = useState(true)
 
   useEffect(() => {
     if (row.kind !== 'thinking') return undefined
@@ -61,7 +63,14 @@ const TraceRowItem = memo(function TraceRowItem({ row }: { row: AgentTraceRow })
       ? `${row.status === 'running' ? '已用时' : '用时'} ${thinkingSeconds} 秒`
       : ''
     return (
-      <details className="agent-trace-details agent-thinking-details" defaultOpen>
+      <details
+        className="agent-trace-details agent-thinking-details"
+        /* React 没有 defaultOpen 这个属性：之前写的 defaultOpen 会被渲染成无效的
+           defaultopen 特性并被浏览器忽略，导致思考行其实并没有默认展开。
+           这里改成受控 open，首帧就是展开态，同时保留手动收起的能力。 */
+        open={thinkingExpanded}
+        onToggle={(event) => setThinkingExpanded(event.currentTarget.open)}
+      >
         <summary title="展开或收起完整思考">
           <TraceIcon name={row.icon} />
           <span className="agent-trace-action">{label}</span>

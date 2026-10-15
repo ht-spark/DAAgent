@@ -91,6 +91,8 @@ export default function Sidebar({
   const [renameDraft, setRenameDraft] = useState('')
   const [isResizing, setIsResizing] = useState(false)
   const sidebarWidthRef = useRef(SIDEBAR_DEFAULT_WIDTH)
+  // 侧栏根节点：收起时用 inert 把整棵子树移出可聚焦范围（详见下方 effect）
+  const asideRef = useRef<HTMLElement | null>(null)
   const resizeStateRef = useRef<{ pointerId: number; startX: number; startWidth: number } | null>(null)
   const [pendingDelete, setPendingDelete] = useState<BrainstormDiscussionSummary | null>(null)
   const [busy, setBusy] = useState(false)
@@ -344,8 +346,18 @@ export default function Sidebar({
     }
   }, [])
 
+  // 收起时侧栏是 0 宽且不可见，但内部按钮仍然可聚焦——键盘用户会 Tab 进一个
+  // 看不见的侧栏，焦点丢失。inert 会同时把子树移出可聚焦范围与无障碍树。
+  useEffect(() => {
+    const el = asideRef.current
+    if (!el) return
+    if (collapsed) el.setAttribute('inert', '')
+    else el.removeAttribute('inert')
+  }, [collapsed])
+
   return (
     <aside
+      ref={asideRef}
       className={`sidebar ${collapsed ? 'sidebar--collapsed' : ''} ${isResizing ? 'is-resizing' : ''}`}
       aria-hidden={collapsed}
     >
@@ -365,7 +377,20 @@ export default function Sidebar({
         onKeyDown={handleResizeKeyDown}
       />
       <div className="sidebar-top">
-        <div className="sidebar-logo" onClick={onHome} title="DAAgent 数据分析智能体">
+        <div
+          className="sidebar-logo"
+          role="button"
+          tabIndex={collapsed ? -1 : 0}
+          onClick={onHome}
+          onKeyDown={(event) => {
+            // 标志区是回到首页的入口，补上 Enter/Space 才能用键盘触发
+            if (event.key === 'Enter' || event.key === ' ') {
+              event.preventDefault()
+              onHome()
+            }
+          }}
+          title="DAAgent 数据分析智能体"
+        >
           {LOGO}
           <div className="logo-text sidebar-collapse-hide">
             <span className="logo-name sidebar-brand"><span className="sidebar-brand-prefix">DA</span>Agent</span>

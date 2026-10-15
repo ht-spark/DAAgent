@@ -1,9 +1,6 @@
 """Agent 工具执行运行时。
 
-导出按 PEP 562 惰性加载：本包位于多条导入链的交汇处
-（``tools.registry`` → ``agent.loop`` → ``runtime.harness``），
-若在 ``__init__`` 中 eager 导出，会与 ``tools.code_tools`` →
-``runtime.sandbox_backends`` 路径形成循环导入；因此统一改为按需加载，
+导出按 PEP 562 惰性加载，避免工具、Agent 和运行时模块的导入链形成循环依赖；
 首次访问后缓存于模块命名空间，行为与 direct import 等价。
 """
 

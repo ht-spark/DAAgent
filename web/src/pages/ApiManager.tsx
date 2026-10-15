@@ -63,6 +63,8 @@ export default function ApiManager({
   const persistTimerRef = useRef<number | null>(null)
   // 待落盘快照：扩展服务输入期间只更新内存，停止输入后再写缓存与后端
   const pendingPersistRef = useRef<Parameters<typeof persistApiSettings>[0] | null>(null)
+  // 编辑弹窗容器：把 Tab 焦点限制在弹窗内部
+  const apiModalRef = useRef<HTMLDivElement | null>(null)
   const editorOpen = isNew || Boolean(editing.id)
   // 编辑弹窗内联校验错误（替代浏览器 alert）
   const [formError, setFormError] = useState('')
@@ -96,10 +98,10 @@ export default function ApiManager({
     [flushPersist],
   )
 
-  // 编辑弹窗压入模态层：统一处理页面滚动锁，且 Esc 只关闭最上层弹窗
+  // 编辑弹窗压入模态层：统一处理页面滚动锁、Esc 只关闭最上层弹窗、Tab 焦点不外漏
   useEffect(() => {
     if (!editorOpen) return
-    return pushModalLayer(cancelEdit)
+    return pushModalLayer(cancelEdit, apiModalRef.current)
   }, [editorOpen, cancelEdit])
 
   // 切走分类（面板被隐藏）时收起内联弹窗与确认框，避免隐藏状态下仍占用滚动锁与 Esc
@@ -285,6 +287,7 @@ export default function ApiManager({
       {editorOpen && (
         <div className="api-modal-mask" onClick={cancelEdit} role="presentation">
           <div
+            ref={apiModalRef}
             className="api-modal"
             role="dialog"
             aria-modal="true"
@@ -418,7 +421,7 @@ export default function ApiManager({
                   ))}
                 </select>
                 <p className="api-field-hint">
-                  仅对支持 reasoning_effort 的模型生效；close 时不传该参数。
+                  仅对支持 reasoning_effort 的模型生效；选择「关闭」时不传该参数。
                 </p>
               </div>
             </div>

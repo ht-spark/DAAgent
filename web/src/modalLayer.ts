@@ -1,4 +1,4 @@
-// 模态层统一管理：页面滚动锁、氛围动画暂停、Esc 只作用于最上层弹窗。
+// 模态层统一管理：页面滚动锁、氛围动画暂停、Esc 只作用于最上层弹窗、Tab 焦点陷阱。
 //
 // 设置弹窗里可以再叠「编辑 API 配置」和「确认删除」两层弹窗。如果每层各自
 // 监听 keydown 并各自改写 body.style.overflow，就会出现两个问题：
@@ -8,6 +8,8 @@
 
 type ModalLayer = {
   onEscape: () => void
+  /** 该层的 DOM 容器；提供时 Tab 焦点被限制在容器内部循环 */
+  container?: HTMLElement | null
 }
 
 const layers: ModalLayer[] = []
@@ -15,10 +17,65 @@ const layers: ModalLayer[] = []
 let savedBodyOverflow: string | null = null
 let listening = false
 
-/** 只把 Esc 交给最上层弹窗，避免一次按键消费多层 */
+/** 参与 Tab 循环的元素集合，沿用浏览器默认可聚焦的语义 */
+const FOCUSABLE_SELECTOR = [
+  'a[href]',
+  'button:not([disabled])',
+  'input:not([disabled])',
+  'select:not([disabled])',
+  'textarea:not([disabled])',
+  '[tabindex]:not([tabindex="-1"])',
+].join(',')
+
+/**
+ * 把 Tab 焦点限制在当前最上层弹窗内部。
+ *
+ * 不设陷阱时，用户按几次 Tab 就会走到遮罩背后的页面上：焦点跑到看不见的位置，
+ * 屏幕阅读器也会跟着离开弹窗上下文。这里在首尾之间回绕，保持焦点始终在弹窗内。
+ */
+function trapTab(event: KeyboardEvent, container: HTMLElement) {
+  const focusables = Array.from(container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR))
+    .filter((el) => el.getClientRects().length > 0)
+
+  if (focusables.length === 0) {
+    // 容器内暂无可聚焦元素时把焦点就地留住，避免漏到背景
+    event.preventDefault()
+    container.focus()
+    return
+  }
+
+  const first = focusables[0]
+  const last = focusables[focusables.length - 1]
+  const active = document.activeElement as HTMLElement | null
+  const inside = active !== null && container.contains(active)
+
+  if (event.shiftKey) {
+    if (!inside || active === first) {
+      event.preventDefault()
+      last.focus()
+    }
+    return
+  }
+
+  if (!inside || active === last) {
+    event.preventDefault()
+    first.focus()
+  }
+}
+
+/** 键盘总入口：Esc 交给最上层弹窗，Tab 交给最上层弹窗的焦点陷阱 */
 function handleKeyDown(event: KeyboardEvent) {
-  if (event.key !== 'Escape' || layers.length === 0) return
-  layers[layers.length - 1].onEscape()
+  if (layers.length === 0) return
+  const layer = layers[layers.length - 1]
+
+  if (event.key === 'Escape') {
+    layer.onEscape()
+    return
+  }
+
+  if (event.key === 'Tab' && layer.container) {
+    trapTab(event, layer.container)
+  }
 }
 
 function syncDom() {
@@ -47,13 +104,27 @@ function syncDom() {
 }
 
 /**
+ * 当前是否有模态层处于打开状态。
+ *
+ * 供「非模态」浮层使用：这类浮层（例如聊天里的命令批准卡片）自己监听 Esc，
+ * 但当上层还有真正的模态弹窗时，Esc 应当只作用于模态层，浮层不能抢走它。
+ */
+export function hasOpenModalLayer(): boolean {
+  return layers.length > 0
+}
+
+/**
  * 注册一个模态层。
  *
  * @param onEscape 该层处于最上层时按下 Esc 的回调
+ * @param container 该层的 DOM 容器；传入后 Tab 焦点会被限制在容器内部
  * @returns 注销函数，组件卸载或弹窗关闭时调用
  */
-export function pushModalLayer(onEscape: () => void): () => void {
-  const layer: ModalLayer = { onEscape }
+export function pushModalLayer(
+  onEscape: () => void,
+  container?: HTMLElement | null,
+): () => void {
+  const layer: ModalLayer = { onEscape, container }
   layers.push(layer)
   syncDom()
 

@@ -167,15 +167,18 @@ export function SkillDetailDialog({
   // onClose 为内联箭头函数，用 ref 取最新值，避免每次渲染重新注册模态层
   const onCloseRef = useRef(onClose)
   onCloseRef.current = onClose
+  // 弹窗容器：把 Tab 焦点限制在弹窗内部
+  const dialogRef = useRef<HTMLDivElement | null>(null)
 
-  // 压入模态层：统一处理页面滚动锁，且 Esc 只作用于最上层弹窗
-  useEffect(() => pushModalLayer(() => onCloseRef.current()), [])
+  // 压入模态层：统一处理页面滚动锁、Esc 只作用于最上层弹窗、Tab 焦点不外漏
+  useEffect(() => pushModalLayer(() => onCloseRef.current(), dialogRef.current), [])
 
   const hasResources = Boolean(skill.references.length || skill.assets.length || skill.scripts.length)
 
   return (
     <div className="confirm-mask" onClick={onClose} role="presentation">
       <div
+        ref={dialogRef}
         className="confirm-dialog skill-detail-dialog"
         role="dialog"
         aria-modal="true"

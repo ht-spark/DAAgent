@@ -30,7 +30,14 @@ import {
   type ProjectFileNode,
   type SkillInfo,
 } from '../api'
-import { isReasoningEffort, loadConfigs, type ApiConfig, type ReasoningEffort } from '../apiConfigs'
+import {
+  isReasoningEffort,
+  loadConfigs,
+  REASONING_EFFORT_OPTIONS,
+  reasoningEffortLabel,
+  type ApiConfig,
+  type ReasoningEffort,
+} from '../apiConfigs'
 import type { TerminalType } from '../settings'
 import {
   TODO_STATUS_LABELS,
@@ -54,16 +61,6 @@ const PROJECT_SIDEBAR_MIN_WIDTH = 280
 const PROJECT_SIDEBAR_MAX_WIDTH = 720
 const PROJECT_SIDEBAR_MIN_CHAT_WIDTH = 480
 const PROJECT_SIDEBAR_WIDTH_STORAGE_KEY = 'daagent-project-sidebar-width'
-
-/** 对话模型菜单沿用接口支持的全部思考档位，避免已有配置被降级。 */
-const REASONING_EFFORT_OPTIONS: Array<{ value: ReasoningEffort; label: string }> = [
-  { value: 'close', label: 'close' },
-  { value: 'low', label: 'low' },
-  { value: 'medium', label: 'medium' },
-  { value: 'high', label: 'high' },
-  { value: 'xhigh', label: 'xhigh' },
-  { value: 'max', label: 'max' },
-]
 
 function clampProjectSidebarWidth(width: number, containerWidth?: number): number {
   const availableWidth = containerWidth ?? (
@@ -2217,7 +2214,7 @@ export default function NewChat({
                   const activeModelLabel = activeModelConfig.model || activeModelConfig.name || '未命名模型'
                   const effectiveReasoningEffort = selectedReasoningEffort
                     ?? (isReasoningEffort(activeModelConfig.reasoningEffort) ? activeModelConfig.reasoningEffort : 'close')
-                  const activeModelDisplay = `${activeModelLabel} ${effectiveReasoningEffort}`
+                  const activeModelDisplay = `${activeModelLabel} ${reasoningEffortLabel(effectiveReasoningEffort)}`
                   const hoveredModelConfig = apiConfigs.find((config) => config.id === hoveredModelConfigId) ?? null
                   const hoveredReasoningEffort = hoveredModelConfig
                     ? (hoveredModelConfig.id === activeModelConfig.id
@@ -2227,12 +2224,12 @@ export default function NewChat({
                   return (
                     <details
                       className={`rag-model-picker${hoveredModelConfig ? ' is-reasoning-effort-open' : ''}`}
-                      title="Select the model and reasoning effort for this conversation"
+                      title="选择本次对话使用的模型与思考程度"
                       onToggle={(event) => {
                         if (!event.currentTarget.open) setHoveredModelConfigId(null)
                       }}
                     >
-                      <summary className={isSubmitting ? 'is-disabled' : undefined} aria-label="Select model">
+                      <summary className={isSubmitting ? 'is-disabled' : undefined} aria-label="选择模型">
                         <span className="rag-model-badge" aria-hidden="true">
                           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
                             <path d="M12 3l1.8 4.8L19 9.6l-4.2 3.2L16.2 18 12 15.2 7.8 18l1.4-5.2L5 9.6l5.2-1.8L12 3z" strokeLinejoin="round" />
@@ -2241,8 +2238,8 @@ export default function NewChat({
                         <span className="rag-model-name">{activeModelDisplay}</span>
                         <span className="rag-kb-chevron" aria-hidden="true" />
                       </summary>
-                      <div className="rag-model-menu" role="listbox" aria-label="Available models">
-                        <div className="rag-model-menu-head">Select model</div>
+                      <div className="rag-model-menu" role="listbox" aria-label="可用模型">
+                        <div className="rag-model-menu-head">选择模型</div>
                         {apiConfigs.map((config) => {
                           const label = config.model || config.name || '未命名模型'
                           const isActive = config.id === activeModelConfig.id
@@ -2267,7 +2264,7 @@ export default function NewChat({
                             >
                               <span className="rag-model-option-main">
                                 <span className="rag-model-option-name">{label}</span>
-                                <span className="rag-model-effort">思考程度 {optionReasoningEffort}</span>
+                                <span className="rag-model-effort">思考程度 {reasoningEffortLabel(optionReasoningEffort)}</span>
                               </span>
                               {isActive ? (
                                 <svg className="rag-model-check" width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
@@ -2308,8 +2305,8 @@ export default function NewChat({
                     </details>
                   )
                 })() : (
-                  <span className="rag-model-empty" title="No model is configured in Settings">
-                    No model configured
+                  <span className="rag-model-empty" title="设置中尚未配置模型">
+                    未配置模型
                   </span>
                 )}
                 <button

@@ -33,6 +33,8 @@ export default function SettingsModal({ open, onClose }: Props) {
   // 用 ref 取最新值，避免监听器每次渲染都重新注册。
   const onCloseRef = useRef(onClose)
   onCloseRef.current = onClose
+  // 弹窗容器：把 Tab 焦点限制在弹窗内部
+  const dialogRef = useRef<HTMLDivElement | null>(null)
 
   useEffect(() => {
     if (!open) return
@@ -41,7 +43,7 @@ export default function SettingsModal({ open, onClose }: Props) {
     setTab('general')
     setApiMounted(false)
     // 压入模态层：统一接管 Esc 与页面滚动锁，并让氛围背景动画停下来
-    return pushModalLayer(() => onCloseRef.current())
+    return pushModalLayer(() => onCloseRef.current(), dialogRef.current)
   }, [open])
 
   const q = query.trim().toLowerCase()
@@ -86,6 +88,7 @@ export default function SettingsModal({ open, onClose }: Props) {
   return (
     <div className="settings-mask" onClick={onClose} role="presentation">
       <div
+        ref={dialogRef}
         className="settings-dialog"
         role="dialog"
         aria-modal="true"

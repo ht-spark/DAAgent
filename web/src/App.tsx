@@ -29,8 +29,6 @@ type NavTarget = {
   statsFromHistory?: boolean
 }
 
-const SYMBOLS = ['∫', '∑', '∏', '∂', '∇', '∞', 'π', 'σ', 'μ', 'λ', 'α', 'β', 'γ', 'θ', 'Δ', 'Ω']
-
 /** 当前页在信息架构中的上一级与下一级；无则为 null（箭头禁用） */
 function resolveLevelNav(options: {
   section: Section
@@ -220,14 +218,9 @@ export default function App() {
 
   return (
     <div className="shell">
-      {/* Animated background (shared across all views) */}
+      {/* 静态背景层（全站共用）：网格点阵 + 暖色渐变，不做持续动画 */}
       <div className="bg-grid" />
       <div className="bg-glow" />
-      <div className="floating-symbols">
-        {SYMBOLS.map((s, i) => (
-          <span key={i}>{s}</span>
-        ))}
-      </div>
 
       <Sidebar
         section={section}

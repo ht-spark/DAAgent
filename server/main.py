@@ -2198,8 +2198,6 @@ async def agent_profile_stream_endpoint(
         workspace_root=workspace_root,
         python_environment=python_environment,
         authorized_paths=[Path(path) for path in state.data_paths],
-        # 运行级沙箱后端标识：从服务端环境配置读取（取值合法性由 SandboxService 裁决）
-        sandbox_backend=os.environ.get("DAAGENT_SANDBOX_BACKEND", "").strip().lower(),
     )
     harness = Harness(
         registry,

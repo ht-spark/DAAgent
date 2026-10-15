@@ -136,8 +136,10 @@ function MermaidDiagram({ code }: { code: string }) {
 function MermaidFullscreen({ svg, onClose }: { svg: string; onClose: () => void }) {
   const onCloseRef = useRef(onClose)
   onCloseRef.current = onClose
+  // 弹窗容器：把 Tab 焦点限制在弹窗内部
+  const dialogRef = useRef<HTMLElement | null>(null)
 
-  useEffect(() => pushModalLayer(() => onCloseRef.current()), [])
+  useEffect(() => pushModalLayer(() => onCloseRef.current(), dialogRef.current), [])
 
   useEffect(() => {
     function handleFullscreenChange() {
@@ -150,6 +152,7 @@ function MermaidFullscreen({ svg, onClose }: { svg: string; onClose: () => void 
   return createPortal(
     <div className="mermaid-fullscreen-mask" onClick={onClose} role="presentation">
       <section
+        ref={dialogRef}
         className="mermaid-fullscreen-dialog"
         role="dialog"
         aria-modal="true"

@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState } from 'react'
-import { cancelRun, confirmBudget, createRun, checkBackendOnline, getRun, getRunMonitor, getPaper, getFigures, renameRun, submitClarification, type KnowledgeBaseSummary, type RunMonitor } from '../api'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { cancelRun, confirmBudget, createRun, checkBackendOnline, getRun, getRunLog, getRunMonitor, getPaper, getFigures, renameRun, submitClarification, type KnowledgeBaseSummary, type RunMonitor } from '../api'
 import type { ApiConfig } from '../apiConfigs'
 import { NODE_CN, fmtQid, formatCurrentStep, formatProgressLine, nextProgressQuestionId } from '../progressFormat'
+import MarkdownContent from '../components/MarkdownContent'
 
 type MsgKind = 'info' | 'progress' | 'error' | 'success' | 'warn' | 'result'
 
@@ -276,6 +277,70 @@ function buildTimeline(events: any[], phase: Phase, currentStep: string): Timeli
   return items.slice(-12)
 }
 
+/**
+ * 运行视图的派生数据：已用时、求解时间线、已完成节点数。
+ *
+ * TaskWorkflow（完整工作台）与 RunMonitorPanel（对话内监视器）是两种刻意的布局，
+ * 但它们必须共用同一份计算口径，否则同一个任务会在两处显示不同的耗时或节点状态。
+ */
+function useRunViewState(
+  run: any | null,
+  now: number,
+  phase: Phase,
+  currentStep: string,
+) {
+  return useMemo(() => {
+    const startedAt = run?.created_at ? Date.parse(run.created_at) : NaN
+    // 任务结束后应冻结计时：用服务端 updated_at 作为结束时间，
+    // 避免前端 `now` 继续走导致数字持续上涨。
+    const endedAt = run?.updated_at ? Date.parse(run.updated_at) : NaN
+    const referenceTime = phase === 'done' && Number.isFinite(endedAt) ? endedAt : now
+    const elapsed = Number.isFinite(startedAt)
+      ? Math.max(0, Math.floor((referenceTime - startedAt) / 1000))
+      : null
+    const timeline = buildTimeline(run?.progress || [], phase, currentStep)
+    return {
+      elapsed,
+      timeline,
+      completedCount: timeline.filter((item) => item.status === 'done').length,
+    }
+  }, [run, now, phase, currentStep])
+}
+
+/**
+ * 交付物卡片图标：沿用全站 24×24 线性图形。
+ *
+ * 之前这里用的是 emoji（📄/🐍/🖼️）：emoji 在不同平台的字形差异很大，
+ * 而且自带颜色、不继承文字色，和页面其它图标不是同一套视觉语言。
+ */
+function ResultIcon({ name }: { name: 'paper' | 'code' | 'figure' }) {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      {name === 'paper' && (
+        <>
+          <path d="M7 3.5h6.5L18.5 8v12.5h-11z" strokeLinejoin="round" />
+          <path d="M13 3.5V8h5" strokeLinejoin="round" />
+          <path d="M9.5 12h5M9.5 15.5h5" strokeLinecap="round" />
+        </>
+      )}
+      {name === 'code' && (
+        <>
+          <path d="M9 8.5L5 12l4 3.5" strokeLinecap="round" strokeLinejoin="round" />
+          <path d="M15 8.5l4 3.5-4 3.5" strokeLinecap="round" strokeLinejoin="round" />
+          <path d="M13 5.5l-2.5 13" strokeLinecap="round" />
+        </>
+      )}
+      {name === 'figure' && (
+        <>
+          <rect x="3.5" y="5.5" width="17" height="13" rx="2" />
+          <circle cx="9" cy="10.5" r="1.6" />
+          <path d="M4.5 16.5l4.5-4 4 3.5 3-2.5 3.5 3" strokeLinejoin="round" />
+        </>
+      )}
+    </svg>
+  )
+}
+
 function RunMonitorPanel({
   run,
   monitor,
@@ -291,15 +356,7 @@ function RunMonitorPanel({
   phase: Phase
   currentStep: string
 }) {
-  const startedAt = run?.created_at ? Date.parse(run.created_at) : NaN
-  // 任务结束后应冻结计时：以前端 `now` 计算会让计时器持续上涨，
-  // 改为用服务端的 `updated_at` 作为冻结的结束时间戳。
-  const endedAt = run?.updated_at ? Date.parse(run.updated_at) : NaN
-  const referenceTime = phase === 'done' && Number.isFinite(endedAt) ? endedAt : now
-  const elapsed = Number.isFinite(startedAt)
-    ? Math.max(0, Math.floor((referenceTime - startedAt) / 1000))
-    : null
-  const timeline = buildTimeline(run?.progress || [], phase, currentStep)
+  const { elapsed, timeline } = useRunViewState(run, now, phase, currentStep)
   const logLines = log.split(/\r?\n/).filter(Boolean).slice(-80)
 
   return (
@@ -377,15 +434,9 @@ function TaskWorkflow({
   onBudgetSubmit: (useDefaults: boolean) => void
   onViewResult: () => void
 }) {
-  const timeline = buildTimeline(run?.progress || [], phase, currentStep)
-  const startedAt = run?.created_at ? Date.parse(run.created_at) : NaN
-  // 任务结束后应冻结计时：用服务端 updated_at 作为结束时间，避免前端 `now` 继续走导致数字持续上涨。
-  const endedAt = run?.updated_at ? Date.parse(run.updated_at) : NaN
-  const referenceTime = phase === 'done' && Number.isFinite(endedAt) ? endedAt : now
-  const elapsed = Number.isFinite(startedAt) ? Math.max(0, Math.floor((referenceTime - startedAt) / 1000)) : null
+  const { elapsed, timeline, completedCount } = useRunViewState(run, now, phase, currentStep)
   const inputFiles = (run?.artifacts || []).filter((path: string) => path.startsWith('input/'))
   const resultFiles = (run?.artifacts || []).filter((path: string) => !path.startsWith('input/'))
-  const completedCount = timeline.filter((item) => item.status === 'done').length
 
   return (
     <main className="workflow-workspace">
@@ -590,7 +641,7 @@ export default function ChatModeling({
     } else {
       push(
         'assistant',
-        '你好，我是 MMAgent 建模助手。\n请在下方输入任务文本，或用按钮上传「任务文件」；可同时附加若干「数据附件」。准备好后点击「开始建模」，我会把建模进度实时推送到这里。',
+        '你好，我是 DAAgent 数据分析智能体。\n请在下方输入任务文本，或用按钮上传「任务文件」；可同时附加若干「数据附件」。准备好后点击「开始建模」，我会把建模进度实时推送到这里。',
         'info',
       )
     }
@@ -627,12 +678,21 @@ export default function ChatModeling({
       if (snapshot) setRunSnapshot(snapshot)
       if (monitor) setRunMonitor(monitor)
     }
+    // run.log 是「过程可核验」的证据，用比资源统计更快的节奏跟进，
+    // 让面板真的反映任务写入的日志而不是一直停在占位文案。
+    const refreshLog = async () => {
+      const log = await getRunLog(runId).catch(() => '')
+      if (!cancelled) setRunLog(log)
+    }
     void refresh()
+    void refreshLog()
     const refreshTimer = window.setInterval(() => void refresh(), 30_000)
+    const logTimer = window.setInterval(() => void refreshLog(), 5_000)
     const clockTimer = window.setInterval(() => setMonitorNow(Date.now()), 1_000)
     return () => {
       cancelled = true
       window.clearInterval(refreshTimer)
+      window.clearInterval(logTimer)
       window.clearInterval(clockTimer)
     }
   }, [runId])
@@ -789,7 +849,7 @@ export default function ChatModeling({
         push('assistant', '✅ 建模完成！正在加载结果…', 'success')
         loadResults(id)
       } else if (status === 'cancelled') {
-        push('assistant', '⚠️ 任务已被中断。', 'warn')
+        push('assistant', '⚠️ 任务已被终止。', 'warn')
       } else {
         push('assistant', `❌ 建模失败：${error || '未知错误'}`, 'error')
       }
@@ -878,7 +938,7 @@ export default function ChatModeling({
         push('assistant', `❌ 建模失败：${run.error || '未知错误'}`, 'error')
       } else if (status === 'cancelled') {
         setPhase('done')
-        push('assistant', '⚠️ 任务已被中断。', 'warn')
+        push('assistant', '⚠️ 任务已被终止。', 'warn')
       } else {
         // 仍在运行：接管实时流，跳过已加载的事件
         attachStream(id, events.length)
@@ -1322,7 +1382,7 @@ export default function ChatModeling({
                         runId: runId!,
                       })}
                     >
-                      <span className="result-card-icon">📄</span>
+                      <span className="result-card-icon"><ResultIcon name="paper" /></span>
                       <span className="result-card-label">paper.md</span>
                       <span className="result-card-hint">点击预览</span>
                     </button>
@@ -1333,13 +1393,13 @@ export default function ChatModeling({
                         target="_blank"
                         rel="noreferrer"
                       >
-                        <span className="result-card-icon">📄</span>
+                        <span className="result-card-icon"><ResultIcon name="paper" /></span>
                         <span className="result-card-label">paper.docx</span>
                         <span className="result-card-hint">点击下载</span>
                       </a>
                     ) : (
                       <div className="result-card result-card-disabled">
-                        <span className="result-card-icon">📄</span>
+                        <span className="result-card-icon"><ResultIcon name="paper" /></span>
                         <span className="result-card-label">paper.docx</span>
                         <span className="result-card-hint">未生成</span>
                       </div>
@@ -1370,13 +1430,13 @@ export default function ChatModeling({
                           }
                         }}
                       >
-                        <span className="result-card-icon">🐍</span>
+                        <span className="result-card-icon"><ResultIcon name="code" /></span>
                         <span className="result-card-label">解题代码</span>
                         <span className="result-card-hint">点击预览</span>
                       </button>
                     ) : (
                       <div className="result-card result-card-disabled">
-                        <span className="result-card-icon">🐍</span>
+                        <span className="result-card-icon"><ResultIcon name="code" /></span>
                         <span className="result-card-label">解题代码</span>
                         <span className="result-card-hint">未生成</span>
                       </div>
@@ -1393,13 +1453,13 @@ export default function ChatModeling({
                           runId: runId!,
                         })}
                       >
-                        <span className="result-card-icon">🖼️</span>
+                        <span className="result-card-icon"><ResultIcon name="figure" /></span>
                         <span className="result-card-label">图表</span>
                         <span className="result-card-hint">{m.result.figures.length} 张 · 点击预览</span>
                       </button>
                     ) : (
                       <div className="result-card result-card-disabled">
-                        <span className="result-card-icon">🖼️</span>
+                        <span className="result-card-icon"><ResultIcon name="figure" /></span>
                         <span className="result-card-label">图表</span>
                         <span className="result-card-hint">未生成</span>
                       </div>
@@ -1492,7 +1552,7 @@ export default function ChatModeling({
           <div className="spacer" />
           {phase === 'running' && runId ? (
             <button className="chatapp-send" onClick={() => void handleStop()} disabled={cancelBusy}>
-              {cancelBusy ? '终止中…' : '终止运行'}
+              {cancelBusy ? '终止中…' : '终止任务'}
             </button>
           ) : (
             <button className="chatapp-send" onClick={handleStart} disabled={busy || !composing}>
@@ -1544,7 +1604,17 @@ export default function ChatModeling({
             </div>
             <div className="preview-body">
               {preview.kind === 'paper' && (
-                <pre className="preview-paper">{preview.paperContent}</pre>
+                <div className="preview-paper">
+                  {/* 报告是 Markdown：按正文渲染，报告里的相对图片路径改写到本次运行的产物目录 */}
+                  <MarkdownContent
+                    content={preview.paperContent ?? ''}
+                    transformUrl={(url) => (
+                      /^[a-z][a-z0-9+.-]*:/i.test(url) || url.startsWith('/')
+                        ? url
+                        : `/api/runs/${preview.runId}/files/${url}`
+                    )}
+                  />
+                </div>
               )}
               {preview.kind === 'code' && (
                 <pre className="preview-code">{preview.codeContent}</pre>

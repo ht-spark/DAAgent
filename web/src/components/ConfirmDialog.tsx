@@ -30,11 +30,13 @@ export default function ConfirmDialog({
   // onCancel 多为内联箭头函数，用 ref 取最新值，避免每次渲染重新注册模态层
   const onCancelRef = useRef(onCancel)
   onCancelRef.current = onCancel
+  // 弹窗容器：把 Tab 焦点限制在弹窗内部
+  const dialogRef = useRef<HTMLDivElement | null>(null)
 
-  // 压入模态层：统一处理页面滚动锁，且 Esc 只作用于最上层弹窗
+  // 压入模态层：统一处理页面滚动锁、Esc 只作用于最上层弹窗、Tab 焦点不外漏
   useEffect(() => {
     if (!open) return
-    return pushModalLayer(() => onCancelRef.current())
+    return pushModalLayer(() => onCancelRef.current(), dialogRef.current)
   }, [open])
 
   if (!open) return null
@@ -42,6 +44,7 @@ export default function ConfirmDialog({
   return (
     <div className="confirm-mask" onClick={onCancel} role="presentation">
       <div
+        ref={dialogRef}
         className="confirm-dialog"
         role="dialog"
         aria-modal="true"

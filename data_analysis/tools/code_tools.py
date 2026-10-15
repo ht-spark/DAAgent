@@ -1,33 +1,24 @@
-"""供 Agent 动态生成并执行 Python 分析代码（经 SandboxService 路由）。
-
-设计说明（对齐《MXC 集成设计方案 V2.2》§7 的递归陷阱提醒）：
-
-- 实际执行逻辑已下沉至 ``runtime/sandbox_backends`` 的 local / MXC 后端；
-  本模块只负责构建请求并路由，**不得回调自身**，避免形成递归调用；
-- ``CodeExecutionError`` 自 ``sandbox_backends.errors`` 迁移并在此 re-export，
-  保持 ``from data_analysis.tools import CodeExecutionError`` 的既有导入兼容；
-- ``sandbox_backend`` 为运行级后端标识，仅允许由服务端（``ExecutionContext``）
-  注入；为空时使用进程级配置（默认 ``local``，行为与迁移前完全一致）。
-"""
+"""供 Agent 在受限本地子进程中执行动态 Python 分析代码。"""
 
 from __future__ import annotations
 
+import json
+import os
+import subprocess
 import sys
-import uuid
 from pathlib import Path
 from typing import Mapping, Sequence
 
 from pydantic import JsonValue
 
-from ..runtime.sandbox_backends import (
-    CodeExecutionError,
-    PythonRunRequest,
-    get_sandbox_service,
-)
-
 __all__ = ["CodeExecutionError", "execute_python_code"]
 
 _DEFAULT_TIMEOUT_SECONDS = 7_100
+_RUNNER_PATH = Path(__file__).resolve().parents[1] / "runtime" / "_python_code_runner.py"
+
+
+class CodeExecutionError(RuntimeError):
+    """动态 Python 代码执行失败。"""
 
 
 def execute_python_code(
@@ -41,7 +32,6 @@ def execute_python_code(
     environment_name: str = "MMAgent",
     expected_artifacts: Sequence[str] = (),
     skill_assets: Mapping[str, str] | None = None,
-    sandbox_backend: str | None = None,
 ) -> dict[str, JsonValue]:
     """执行模型生成的 Python 代码并收集观察结果。
 
@@ -59,30 +49,118 @@ def execute_python_code(
         environment_name: 环境显示名称，用于向 Agent 报告。
         expected_artifacts: 本次代码承诺创建或更新的相对产物路径。
         skill_assets: 已由 SkillRuntime 物化并授权的资产标识到路径映射。
-        sandbox_backend: 可选运行级后端标识（``local`` / ``mxc`` / ``auto``），
-            仅由服务端注入；为空时使用进程级配置。
-
     Returns:
-        标准输出、标准错误、结构化结果及当前产物清单；``runtime`` 中包含
-        实际生效的后端与隔离 tier 信息。
+        标准输出、标准错误、结构化结果及当前产物清单。
 
     Raises:
         ValueError: 代码为空或运行目录无效。
         CodeExecutionError: 代码编译或执行失败。
-        SandboxPolicyError: 后端标识非法或策略不允许执行。
-        SandboxUnavailableError: 所选后端不可用且不允许降级。
     """
-    request = PythonRunRequest(
-        run_id=uuid.uuid4().hex,
-        code=code,
-        data_paths=tuple(Path(path) for path in data_paths),
-        output_dir=Path(output_dir),
-        workspace_root=Path(workspace_root) if workspace_root is not None else None,
-        python_executable=Path(python_executable or sys.executable),
-        environment_source=environment_source,
-        environment_name=environment_name,
-        expected_artifacts=tuple(expected_artifacts),
-        skill_assets=dict(skill_assets or {}),
-        timeout_seconds=_DEFAULT_TIMEOUT_SECONDS,
+    if not code.strip():
+        raise ValueError("Python 代码不能为空")
+    target_dir = Path(output_dir).expanduser().resolve(strict=False)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    if not target_dir.is_dir():
+        raise ValueError(f"产物目录无效: {target_dir}")
+
+    resolved_paths = [
+        Path(path).expanduser().resolve(strict=False)
+        for path in data_paths
+    ]
+    missing_paths = [path.name for path in resolved_paths if not path.is_file()]
+    if missing_paths:
+        raise FileNotFoundError(f"授权数据文件不存在: {', '.join(missing_paths)}")
+    executable = Path(python_executable or sys.executable).expanduser().resolve(strict=True)
+    if not executable.is_file():
+        raise ValueError("Python 解释器路径无效")
+    resolved_workspace = (
+        str(Path(workspace_root).resolve(strict=True))
+        if workspace_root is not None
+        else None
     )
-    return get_sandbox_service().run_python(request, backend=sandbox_backend)
+    payload = {
+        "code": code,
+        "data_files": [str(path) for path in resolved_paths],
+        "output_dir": str(target_dir),
+        "workspace_root": resolved_workspace,
+        "skill_assets": dict(skill_assets or {}),
+    }
+    try:
+        completed = subprocess.run(
+            [str(executable), "-I", "-B", str(_RUNNER_PATH)],
+            input=json.dumps(payload, ensure_ascii=True),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            cwd=target_dir,
+            env=_safe_python_environment(target_dir),
+            timeout=_DEFAULT_TIMEOUT_SECONDS,
+            shell=False,
+            check=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise CodeExecutionError("Python 代码执行超时") from exc
+    except OSError as exc:
+        raise CodeExecutionError(f"无法启动选定的 Python 环境: {exc}") from exc
+    if completed.returncode != 0:
+        detail = completed.stderr.strip()[-2_000:] or "目标 Python 异常退出"
+        raise CodeExecutionError(detail)
+    try:
+        response = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise CodeExecutionError("目标 Python 没有返回合法执行结果") from exc
+    if not isinstance(response, dict) or not response.get("ok"):
+        error_type = response.get("error_type", "CodeExecutionError")
+        detail = f"{error_type}: {response.get('error') or 'Python 代码执行失败'}"
+        captured = response.get("captured")
+        if isinstance(captured, str) and captured:
+            detail += f"\n运行输出:\n{captured}"
+        raise CodeExecutionError(detail)
+    changed = response.get("changed_artifacts")
+    if not isinstance(changed, list) or not all(isinstance(item, str) for item in changed):
+        raise CodeExecutionError("目标 Python 返回的产物清单无效")
+    expected = {_normalize_expected_artifact(path) for path in expected_artifacts}
+    missing = sorted(expected - set(changed))
+    if missing:
+        raise CodeExecutionError(
+            "代码执行成功，但没有在当前运行目录生成承诺产物: "
+            + ", ".join(missing)
+        )
+    runtime = response.get("runtime") if isinstance(response.get("runtime"), dict) else {}
+    runtime.update({"source": environment_source, "name": environment_name})
+    response["runtime"] = runtime
+    response.pop("ok", None)
+    return response
+
+
+def _normalize_expected_artifact(relative_path: str) -> str:
+    """校验模型声明的产物路径位于当前输出目录。"""
+    if not isinstance(relative_path, str) or not relative_path.strip():
+        raise ValueError("expected_artifacts 只能包含非空相对路径")
+    candidate = Path(relative_path.strip())
+    if candidate.is_absolute() or ".." in candidate.parts:
+        raise ValueError("expected_artifacts 只能包含无 '..' 的相对路径")
+    return candidate.as_posix()
+
+
+def _safe_python_environment(output_dir: Path) -> dict[str, str]:
+    """构造最小子进程环境，并把运行缓存限制在当前 Run。"""
+    runtime_dir = output_dir / ".runtime"
+    temporary_dir = runtime_dir / "tmp"
+    temporary_dir.mkdir(parents=True, exist_ok=True)
+    allowed_names = ("COMSPEC", "PATH", "PATHEXT", "SYSTEMROOT", "WINDIR")
+    environment = {name: os.environ[name] for name in allowed_names if name in os.environ}
+    environment.update({
+        "PYTHONIOENCODING": "utf-8",
+        "PYTHONUTF8": "1",
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "TEMP": str(temporary_dir),
+        "TMP": str(temporary_dir),
+        "MPLCONFIGDIR": str(runtime_dir / "matplotlib"),
+        "XDG_CACHE_HOME": str(runtime_dir / "cache"),
+        "NUMBA_CACHE_DIR": str(runtime_dir / "numba"),
+        "JOBLIB_TEMP_FOLDER": str(temporary_dir),
+    })
+    return environment

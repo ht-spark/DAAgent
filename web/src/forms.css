@@ -115,7 +115,8 @@
   background: rgba(255, 253, 248, 0.95);
   color: #8a7f68;
   cursor: pointer;
-  transition: all 0.2s ease;
+  transition: background-color 0.2s ease, color 0.2s ease, border-color 0.2s ease,
+    transform var(--dur-press) var(--ease-out);
   font-family: inherit;
   margin-top: 8px;
 }
@@ -527,6 +528,7 @@
     background 0.2s ease,
     color 0.2s ease,
     box-shadow 0.2s ease,
+    transform var(--dur-press) var(--ease-out),
     width var(--sidebar-motion-duration) var(--sidebar-motion-ease),
     height var(--sidebar-motion-duration) var(--sidebar-motion-ease),
     padding var(--sidebar-motion-duration) var(--sidebar-motion-ease),
@@ -537,6 +539,10 @@
 .nav-item:hover {
   background: #f3ecd8;
   color: #2a2416;
+}
+/* 侧栏导航属于高频点击，按压反馈保持极轻微，只用来确认「收到了」 */
+.nav-item:active {
+  transform: scale(0.98);
 }
 .nav-item.active {
   background: #b8892d;
@@ -884,7 +890,8 @@
   font-size: calc(13px * var(--app-font-ratio));
   font-weight: 650;
   cursor: pointer;
-  transition: background 160ms ease, border-color 160ms ease, color 160ms ease;
+  transition: background 160ms ease, border-color 160ms ease, color 160ms ease,
+    transform var(--dur-press) var(--ease-out);
 }
 
 .expert-primary-button {
@@ -919,7 +926,7 @@
 
 .expert-primary-button:active:not(:disabled),
 .expert-list-actions button:active:not(:disabled) {
-  transform: translateY(1px);
+  transform: scale(0.97);
 }
 
 .expert-notice {
@@ -1430,11 +1437,9 @@
 
 .expert-editor-actions button.is-primary:hover:not(:disabled) { background: #8f681f; }
 
+/* 专家预览已上移到板块内容之上，这里不再需要双栏，整页改为单栏 */
 .expert-editor-layout {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(280px, 296px);
-  align-items: start;
-  gap: 36px;
+  display: block;
 }
 
 .expert-editor-main { min-width: 0; }
@@ -1651,52 +1656,42 @@
   cursor: pointer;
 }
 
-.expert-editor-aside {
-  position: sticky;
-  top: 24px;
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
+/* 工作区头部：专家预览 + 发布开关，横向排成两张方块卡片，置于 01–04 板块卡片上方 */
+.expert-workspace-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(240px, 268px);
+  gap: 20px;
+  margin-bottom: 26px;
 }
 
 .expert-preview {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 0 18px;
+  padding: 22px 24px;
+  /* 与 .expert-overview-card 保持同一套方块卡片：边框、圆角、底色、投影一致 */
+  border: 1px solid rgba(214, 203, 180, 0.78);
+  border-radius: 16px;
+  background: var(--expert-surface);
+  box-shadow: 0 4px 20px rgba(92, 72, 28, 0.055);
+}
+
+/* 正文信息的排版由页面主题块给出，这里只负责布局 */
+.expert-preview-copy {
   display: flex;
+  min-width: 0;
   flex-direction: column;
   align-items: flex-start;
-  padding: 22px;
-  background: #fffcf3;
-  border: 1px solid rgba(92, 72, 28, 0.14);
-  border-radius: 14px;
-  box-shadow: 0 12px 30px rgba(92, 72, 28, 0.07);
 }
 
-.expert-preview > strong {
-  margin-top: 13px;
-  color: #2a2416;
-  font-size: calc(16px * var(--app-font-ratio));
-}
-
-.expert-preview > small {
-  margin-top: 3px;
-  color: #817663;
-  font-size: calc(11px * var(--app-font-ratio));
-  font-variant-numeric: tabular-nums;
-}
-
-.expert-preview > p {
-  margin: 13px 0 18px;
-  color: #5c5340;
-  font-size: calc(12px * var(--app-font-ratio));
-  line-height: 1.55;
-}
-
+/* 统计块贴在卡片右端，用一条竖线与正文分隔 */
 .expert-preview dl {
-  display: grid;
-  width: 100%;
-  grid-template-columns: repeat(3, 1fr);
+  display: flex;
+  gap: 22px;
   margin: 0;
-  padding-top: 14px;
-  border-top: 1px solid rgba(92, 72, 28, 0.12);
+  padding-left: 22px;
+  border-left: 1px solid rgba(92, 72, 28, 0.12);
 }
 
 .expert-preview dl div {
@@ -1722,10 +1717,13 @@
   display: flex;
   align-items: flex-start;
   gap: 10px;
-  padding: 16px;
+  padding: 22px 24px;
   color: #403721;
   background: #f4efe1;
-  border-radius: 12px;
+  /* 与预览卡片同一套方块卡片外观 */
+  border: 1px solid rgba(214, 203, 180, 0.78);
+  border-radius: 16px;
+  box-shadow: 0 4px 20px rgba(92, 72, 28, 0.055);
   cursor: pointer;
 }
 
@@ -1746,17 +1744,8 @@
 }
 
 @media (max-width: 980px) {
-  .expert-editor-layout { grid-template-columns: 1fr; }
-  .expert-editor-aside {
-    position: static;
-    grid-row: 1;
-  }
-  .expert-preview { display: grid; grid-template-columns: auto 1fr; column-gap: 14px; }
-  .expert-preview > strong { margin-top: 0; align-self: end; }
-  .expert-preview > small,
-  .expert-preview > p,
-  .expert-preview dl { grid-column: 2; }
-  .expert-preview > p { margin-bottom: 12px; }
+  /* 头部两张卡片在窄屏改为上下堆叠 */
+  .expert-workspace-head { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 760px) {
@@ -1792,11 +1781,6 @@
   .expert-draft-list li { align-items: flex-start; flex-direction: column; }
   .expert-skill-settings { grid-template-columns: 1fr; }
   .expert-stage { padding: 16px; }
-  .expert-preview { display: flex; }
-  .expert-preview > small,
-  .expert-preview > p,
-  .expert-preview dl { grid-column: auto; }
-  .expert-preview > strong { margin-top: 12px; }
   .expert-editor-section > header { flex-direction: column; }
 }
 
@@ -2204,16 +2188,12 @@
   color: #8f2f2f;
 }
 
-.expert-editor-page .expert-editor-aside {
-  top: 24px;
-  gap: 12px;
-}
-
+/* 顶部方块卡片：外观（主题渐变、投影、头像）由本页面主题块负责，
+   网格结构、内边距、统计块分隔线由基础 .expert-preview 规则给出 */
 .expert-editor-page .expert-preview {
   position: relative;
   isolation: isolate;
   overflow: hidden;
-  padding: 20px;
   border: 1px solid rgba(214, 203, 180, 0.84);
   border-radius: 16px;
   background:
@@ -2224,7 +2204,6 @@
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.88),
     0 14px 36px rgba(92, 72, 28, 0.11);
-  transition: transform 180ms ease, box-shadow 180ms ease;
 }
 
 .expert-editor-page .expert-preview::before {
@@ -2237,13 +2216,6 @@
   opacity: 0.72;
 }
 
-.expert-editor-page .expert-preview:hover {
-  transform: translateY(-2px);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.92),
-    0 18px 44px rgba(92, 72, 28, 0.14);
-}
-
 .expert-editor-page .expert-preview .expert-card-avatar {
   width: 42px;
   height: 42px;
@@ -2254,40 +2226,30 @@
   font-size: calc(14px * var(--app-font-ratio));
 }
 
-.expert-editor-page .expert-preview > strong {
-  margin-top: 13px;
+/* 正文信息包在 .expert-preview-copy 里，因此原来的直接子元素选择器已失效 */
+.expert-editor-page .expert-preview-copy > strong {
   color: var(--expert-ink);
   font-size: calc(16px * var(--app-font-ratio));
   font-weight: 740;
   letter-spacing: -0.02em;
 }
 
-.expert-editor-page .expert-preview > small {
+.expert-editor-page .expert-preview-copy > small {
   margin-top: 4px;
   color: #817663;
   font-size: calc(11px * var(--app-font-ratio));
 }
 
-.expert-editor-page .expert-preview > p {
-  margin: 13px 0 16px;
+.expert-editor-page .expert-preview-copy > p {
+  margin: 13px 0 0;
   color: #5c5340;
   font-size: calc(12px * var(--app-font-ratio));
   line-height: 1.62;
 }
 
-.expert-editor-page .expert-preview dl {
-  padding-top: 13px;
-  border-top-color: #e6ddca;
-}
-
 .expert-editor-page .expert-preview dl div {
   gap: 3px;
   min-width: 0;
-}
-
-.expert-editor-page .expert-preview dl div + div {
-  padding-left: 10px;
-  border-left: 1px solid #e6ddca;
 }
 
 .expert-editor-page .expert-preview dt {
@@ -2304,9 +2266,9 @@
 }
 
 .expert-editor-page .expert-enabled-toggle {
-  padding: 14px;
+  padding: 22px 24px;
   border: 1px solid rgba(214, 203, 180, 0.84);
-  border-radius: 12px;
+  border-radius: 16px;
   background: rgba(255, 253, 247, 0.9);
   box-shadow: 0 4px 16px rgba(92, 72, 28, 0.05);
   color: #403721;
@@ -2339,16 +2301,17 @@
 }
 
 @media (max-width: 980px) {
-  .expert-editor-page .expert-editor-layout {
-    grid-template-columns: 1fr;
-  }
-
-  .expert-editor-page .expert-editor-aside {
-    position: static;
-  }
-
+  /* 头部两张卡片改上下堆叠；统计块从右端移到底部，分隔线由竖线换为横线 */
   .expert-editor-page .expert-preview {
     grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .expert-editor-page .expert-preview dl {
+    grid-column: 1 / -1;
+    margin-top: 16px;
+    padding: 14px 0 0;
+    border-left: none;
+    border-top: 1px solid rgba(92, 72, 28, 0.12);
   }
 }
 
@@ -2408,10 +2371,6 @@
   .expert-editor-page .expert-editor-section + .expert-editor-section {
     padding-top: 18px;
   }
-
-  .expert-editor-page .expert-preview dl div + div {
-    padding-left: 10px;
-  }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -2419,7 +2378,6 @@
   .expert-editor-page .expert-secondary-button,
   .expert-editor-page .expert-editor-section,
   .expert-editor-page .expert-stage,
-  .expert-editor-page .expert-preview,
   .expert-editor-page .expert-enabled-toggle,
   .expert-editor-page .expert-overview-card,
   .expert-editor-page .expert-focus-back,
@@ -2436,7 +2394,6 @@
 
   .expert-editor-page .expert-editor-actions button:hover:not(:disabled),
   .expert-editor-page .expert-secondary-button:hover,
-  .expert-editor-page .expert-preview:hover,
   .expert-editor-page .expert-overview-card:hover {
     transform: none;
   }
@@ -2507,7 +2464,7 @@
 }
 
 .expert-editor-page .expert-overview-card:active {
-  transform: translateY(-1px) scale(0.995);
+  transform: translateY(-1px) scale(0.99);
 }
 
 .expert-editor-page .expert-overview-card:focus-visible {
@@ -2657,7 +2614,8 @@
   transition:
     border-color 160ms ease,
     background 160ms ease,
-    box-shadow 160ms ease;
+    box-shadow 160ms ease,
+    transform var(--dur-press) var(--ease-out);
 }
 
 .expert-editor-page .expert-focus-back:hover {
@@ -2667,7 +2625,7 @@
 }
 
 .expert-editor-page .expert-focus-back:active {
-  transform: translateY(1px);
+  transform: scale(0.97);
 }
 
 .expert-editor-page .expert-focus-tabs {
@@ -2785,7 +2743,8 @@
   font-size: calc(13px * var(--app-font-ratio));
   font-weight: 600;
   cursor: pointer;
-  transition: all 0.2s ease;
+  transition: background-color 0.2s ease, border-color 0.2s ease, color 0.2s ease,
+    transform var(--dur-press) var(--ease-out);
   font-family: inherit;
   text-decoration: none;
 }
@@ -2818,7 +2777,8 @@
   background: var(--bg-soft);
   color: var(--text-tertiary);
   border: 1px solid var(--border-strong);
-  transition: all 0.2s ease;
+  transition: background-color 0.2s ease, color 0.2s ease, border-color 0.2s ease,
+    box-shadow 0.2s ease;
 }
 .step.active .step-num {
   background: linear-gradient(135deg, var(--primary-500), var(--primary-700));
@@ -2961,7 +2921,7 @@
   font-size: calc(16px * var(--app-font-ratio));
   font-weight: 700;
   cursor: pointer;
-  transition: all 0.2s ease;
+  transition: transform var(--dur-press) var(--ease-out), box-shadow 0.2s ease;
   box-shadow: 0 4px 14px rgba(74, 91, 199, 0.32);
   font-family: inherit;
 }
@@ -3050,6 +3010,13 @@
 .ev.muted { color: var(--text-muted); }
 
 /* ---------- Paper preview (Result) ---------- */
+/* 小节标题：避免在组件里写内联 font-size/margin */
+.result-section-title {
+  margin: 18px 0 8px;
+  font-size: calc(16px * var(--app-font-ratio));
+  font-weight: 700;
+  color: var(--text-primary);
+}
 .paper-box {
   background: var(--bg);
   border: 1px solid var(--border-strong);
@@ -3085,7 +3052,8 @@
   font-size: calc(13px * var(--app-font-ratio));
   font-weight: 600;
   text-decoration: none;
-  transition: all 0.2s ease;
+  transition: background-color 0.2s ease, border-color 0.2s ease, color 0.2s ease,
+    transform var(--dur-press) var(--ease-out);
 }
 .dl-list li a:hover {
   background: var(--primary-100);
@@ -3167,7 +3135,8 @@
   padding: 16px 20px;
   box-shadow: var(--shadow-sm);
   cursor: pointer;
-  transition: all 0.2s ease;
+  transition: transform var(--dur-ui) var(--ease-out), box-shadow var(--dur-ui) var(--ease-out),
+    border-color var(--dur-ui) var(--ease-out);
 }
 .run-card-main:hover {
   transform: translateY(-2px);
@@ -3185,7 +3154,8 @@
   font-size: calc(14px * var(--app-font-ratio));
   font-weight: 600;
   cursor: pointer;
-  transition: all 0.18s ease;
+  transition: background-color 0.18s ease, border-color 0.18s ease, color 0.18s ease,
+    transform var(--dur-press) var(--ease-out);
   font-family: inherit;
 }
 .run-del:hover {
@@ -3203,7 +3173,8 @@
   font-size: calc(14px * var(--app-font-ratio));
   font-weight: 600;
   cursor: pointer;
-  transition: all 0.18s ease;
+  transition: background-color 0.18s ease, border-color 0.18s ease, color 0.18s ease,
+    transform var(--dur-press) var(--ease-out);
   font-family: inherit;
 }
 .run-cancel:hover:not(:disabled) {
@@ -3289,7 +3260,7 @@
   filter: brightness(1.04);
 }
 .api-add-btn:active {
-  transform: translateY(0);
+  transform: scale(0.97);
 }
 .api-add-btn:focus-visible {
   outline: 2px solid rgba(184, 137, 45, 0.55);
@@ -3466,7 +3437,7 @@
   font-family: inherit;
   cursor: pointer;
   border-radius: 10px;
-  transition: background 0.15s ease, color 0.15s ease;
+  transition: background 0.15s ease, color 0.15s ease, transform var(--dur-press) var(--ease-out);
 }
 .api-modal-foot .api-cancel:hover {
   color: #2a2416;
@@ -3850,7 +3821,7 @@
   color: #922f2a;
 }
 .api-model-actions button:active {
-  transform: translateY(1px);
+  transform: scale(0.97);
 }
 .api-model-actions button:focus-visible {
   outline: 2px solid rgba(184, 137, 45, 0.5);
@@ -3891,7 +3862,7 @@
   border-color: rgba(184, 137, 45, 0.4);
   color: #2a2416;
 }
-.api-btn:active { transform: translateY(1px); }
+.api-btn:active { transform: scale(0.97); }
 .api-btn:focus-visible {
   outline: 2px solid rgba(184, 137, 45, 0.5);
   outline-offset: 2px;
@@ -4143,7 +4114,8 @@
   font-weight: 600;
   cursor: pointer;
   font-family: inherit;
-  transition: all 0.18s ease;
+  transition: background-color 0.18s ease, border-color 0.18s ease, color 0.18s ease,
+    transform var(--dur-press) var(--ease-out);
 }
 .kb-page-btn:hover:not(:disabled) {
   background: var(--primary-50);
@@ -4414,7 +4386,7 @@
   font-size: calc(13px * var(--app-font-ratio));
   font-weight: 600;
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: color 0.15s ease, background-color 0.15s ease, box-shadow 0.15s ease;
 }
 .ce-segmented button:hover:not(.ce-seg-active) { color: var(--text-secondary); }
 .ce-seg-active {
@@ -4580,11 +4552,14 @@
   font-weight: 600;
   cursor: pointer;
   font-family: inherit;
-  transition: all 0.18s ease;
+  transition: background-color 0.18s ease, border-color 0.18s ease, color 0.18s ease,
+    transform var(--dur-press) var(--ease-out);
 }
 .btn-ghost:hover {
   color: #2a2416;
   background: rgba(92, 72, 28, 0.08);
+  /* 原 index.css 里的 .btn-ghost:hover 只贡献了这一条边框色，已并入此处 */
+  border-color: #b8892d;
 }
 .btn-danger {
   padding: 9px 18px;
@@ -4596,7 +4571,7 @@
   font-weight: 700;
   cursor: pointer;
   font-family: inherit;
-  transition: all 0.18s ease;
+  transition: filter 0.18s ease, transform var(--dur-press) var(--ease-out);
 }
 .btn-danger:hover {
   filter: brightness(0.93);
@@ -4624,7 +4599,8 @@
   font-weight: 700;
   cursor: pointer;
   font-family: inherit;
-  transition: all 0.18s ease;
+  transition: background-color 0.18s ease, border-color 0.18s ease, color 0.18s ease,
+    transform var(--dur-press) var(--ease-out);
 }
 .btn-cancel:hover:not(:disabled) {
   background: rgba(245, 158, 11, 0.22);
@@ -4977,7 +4953,7 @@
   font-size: calc(14px * var(--app-font-ratio));
   font-family: inherit;
   line-height: 1.6;
-  transition: all 0.2s ease;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
 }
 .chatapp-textarea:focus {
   outline: none;
@@ -5000,7 +4976,8 @@
   font-size: calc(13px * var(--app-font-ratio));
   font-weight: 600;
   cursor: pointer;
-  transition: all 0.18s ease;
+  transition: background-color 0.18s ease, border-color 0.18s ease, color 0.18s ease,
+    transform var(--dur-press) var(--ease-out);
   user-select: none;
 }
 .attach-btn:hover { background: var(--primary-50); color: var(--primary-700); border-color: var(--primary-500); }
@@ -5016,7 +4993,7 @@
   font-weight: 700;
   cursor: pointer;
   box-shadow: 0 2px 8px rgba(74, 91, 199, 0.3);
-  transition: all 0.18s ease;
+  transition: transform var(--dur-press) var(--ease-out), box-shadow 0.18s ease;
   font-family: inherit;
 }
 .chatapp-send:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 6px 16px rgba(74, 91, 199, 0.4); }
@@ -5173,7 +5150,14 @@
 .progress-clarification-actions .btn-primary:disabled { opacity: 0.6; cursor: default; }
 .progress-clarification-actions .btn-danger:disabled { opacity: 0.6; cursor: default; }
 
-.markdown-content { color: inherit; white-space: normal; }
+.markdown-content {
+  color: inherit;
+  white-space: normal;
+  /* 正文一律使用界面正文字体：外层容器可能是为代码准备的等宽字体，
+     若靠继承会把整篇报告渲染成等宽字，阅读体验很差。 */
+  font-family: 'Noto Sans SC', 'Outfit', -apple-system, BlinkMacSystemFont, "PingFang SC",
+    "Microsoft YaHei", Roboto, sans-serif;
+}
 .markdown-content > :first-child { margin-top: 0; }
 .markdown-content > :last-child { margin-bottom: 0; }
 .markdown-content h1, .markdown-content h2, .markdown-content h3, .markdown-content h4 {
@@ -5390,7 +5374,8 @@
   border: 1px solid rgba(74, 91, 199, 0.15);
   cursor: pointer;
   text-decoration: none;
-  transition: all 0.18s ease;
+  transition: background-color 0.18s ease, border-color 0.18s ease,
+    transform var(--dur-ui) var(--ease-out), box-shadow var(--dur-ui) var(--ease-out);
   text-align: center;
 }
 .result-card:hover {
@@ -5410,7 +5395,22 @@
   box-shadow: none;
   background: rgba(0, 0, 0, 0.02);
 }
-.result-card-icon { font-size: calc(28px * var(--app-font-ratio)); }
+/* 交付物图标是线性 SVG，尺寸跟随界面字号倍率，颜色用主题金棕 */
+.result-card-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: calc(28px * var(--app-font-ratio));
+  height: calc(28px * var(--app-font-ratio));
+  color: #b8892d;
+}
+.result-card-icon svg {
+  width: 100%;
+  height: 100%;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+}
 .result-card-label {
   font-size: calc(14px * var(--app-font-ratio));
   font-weight: 700;
@@ -5942,7 +5942,7 @@
 }
 .task-start-button:hover:not(:disabled)::after { transform: translateX(4px); }
 .task-start-button:active,
-.workflow-result-button:active { transform: translateY(0); }
+.workflow-result-button:active { transform: scale(0.98); }
 .task-start-button:disabled { opacity: 0.55; cursor: default; }
 
 /* ============================================================
@@ -7737,7 +7737,9 @@
   border-radius: 12px;
   background: var(--rag-bg-panel);
   box-shadow: var(--rag-shadow);
-  animation: rag-model-menu-in 0.14s ease;
+  /* 浮层从触发它的按钮位置长出，而不是从自身中心缩放（默认 center 会显得错位） */
+  transform-origin: bottom right;
+  animation: rag-model-menu-in 0.14s var(--ease-out);
 }
 
 @keyframes rag-model-menu-in {
@@ -10990,4 +10992,78 @@ body {
 
 .settings-api-host .api-empty {
   min-height: 180px;
+}
+
+/* ============================================================
+   交互反馈：按压 / 触屏悬停
+   ============================================================ */
+
+/* 按压反馈：按下瞬间轻微缩小，把「界面已经收到操作」变成一次触觉式确认。
+   只动 transform（走合成器，不触发重排重绘），幅度 0.97 既明显又不显得跳动。 */
+.sidebar-toggle:active,
+.back-link:active,
+.submit-btn:active:not(:disabled),
+.dl-list li a:active,
+.run-del:active,
+.run-cancel:active:not(:disabled),
+.kb-page-btn:active:not(:disabled),
+.btn-ghost:active,
+.btn-danger:active,
+.btn-cancel:active:not(:disabled),
+.attach-btn:active,
+.chatapp-send:active:not(:disabled),
+.result-card:active,
+.api-modal-foot .api-save:active,
+.api-modal-foot .api-cancel:active,
+.confirm-foot .confirm-ok:active,
+.confirm-foot .confirm-cancel:active {
+  transform: scale(0.97);
+}
+
+/* 焦点可见性：下面这些核心交互此前没有自定义焦点样式，只能吃浏览器默认焦点环，
+   在暖黄底色上几乎看不见。统一补一条清晰描边，键盘用户才能确认焦点在哪。 */
+.nav-item:focus-visible,
+.chatapp-send:focus-visible,
+.kb-page-btn:focus-visible,
+.back-link:focus-visible,
+.attach-btn:focus-visible,
+.dl-list li a:focus-visible,
+.result-card:focus-visible,
+.modeling-task-card:focus-visible,
+.task-start-button:focus-visible,
+.workflow-result-button:focus-visible {
+  outline: 2px solid rgba(184, 137, 45, 0.78);
+  outline-offset: 2px;
+}
+
+/* 触屏设备上 :hover 会被点按误触发，且手指离开后不会自动复位，
+   卡片会一直停在「抬起」的位置，看起来像卡住了。
+   这里统一关掉纯装饰性的悬停位移/缩放，颜色、边框与阴影反馈保留。 */
+@media (hover: none) {
+  .modeling-task-card:hover,
+  .expert-editor-page .expert-editor-actions button:hover:not(:disabled),
+  .expert-editor-page .expert-secondary-button:hover,
+  .expert-editor-page .expert-overview-card:hover,
+  .submit-btn:hover:not(:disabled),
+  .fig-link:hover,
+  .run-card-main:hover,
+  .api-add-btn:hover,
+  .api-modal-foot .api-save:hover,
+  .confirm-foot .confirm-ok:hover,
+  .chatapp-send:hover:not(:disabled),
+  .result-card:hover,
+  .task-upload-slot:hover,
+  .task-start-button:hover:not(:disabled),
+  .workflow-result-button:hover,
+  .rag-approval-approve:hover,
+  .rag-send:hover,
+  .agent-artifact-item:hover,
+  .conv-tray:hover {
+    transform: none;
+  }
+
+  .task-start-button:hover:not(:disabled)::after,
+  .expert-editor-page .expert-overview-card:hover .expert-overview-enter svg {
+    transform: none;
+  }
 }

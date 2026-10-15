@@ -56,7 +56,7 @@ export default function History({ onOpen }: { onOpen: (runId: string) => void })
       // 立即乐观更新状态，稍后刷新列表确认
       setRuns((prev) =>
         prev.map((x) =>
-          x.run_id === r.run_id ? { ...x, status: 'cancelled', error: '用户已中断任务' } : x,
+          x.run_id === r.run_id ? { ...x, status: 'cancelled', error: '用户已终止任务' } : x,
         ),
       )
     } catch (e) {
@@ -96,7 +96,16 @@ export default function History({ onOpen }: { onOpen: (runId: string) => void })
           <div key={r.run_id} className="run-card">
             <div
               className="run-card-main"
+              role="button"
+              tabIndex={0}
               onClick={() => onOpen(r.run_id)}
+              onKeyDown={(event) => {
+                // 卡片本身是 div，补上 Enter/Space 才能用键盘打开历史任务
+                if (event.key === 'Enter' || event.key === ' ') {
+                  event.preventDefault()
+                  onOpen(r.run_id)
+                }
+              }}
             >
               <div>
                 <div className="run-id">{r.run_id}</div>
@@ -110,17 +119,17 @@ export default function History({ onOpen }: { onOpen: (runId: string) => void })
               </div>
               <span className={`status-tag ${r.status}`}>
                 {isActive(r.status) && <span className="status-pulse" />}
-                {r.status === 'queued' ? '排队中' : r.status === 'running' ? '建模中' : r.status === 'succeeded' ? '已完成' : r.status === 'failed' ? '失败' : r.status === 'cancelled' ? '已中断' : r.status}
+                {r.status === 'queued' ? '排队中' : r.status === 'running' ? '建模中' : r.status === 'succeeded' ? '已完成' : r.status === 'failed' ? '失败' : r.status === 'cancelled' ? '已终止' : r.status}
               </span>
             </div>
             {isActive(r.status) ? (
               <button
                 className="run-cancel"
-                title="中断该任务"
+                title="终止该任务"
                 disabled={cancelling === r.run_id}
                 onClick={() => handleCancel(r)}
               >
-                {cancelling === r.run_id ? '中断中…' : '中断'}
+                {cancelling === r.run_id ? '终止中…' : '终止'}
               </button>
             ) : (
               <button

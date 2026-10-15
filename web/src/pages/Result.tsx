@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { getFigures, getPaper, getRun } from '../api'
+import MarkdownContent from '../components/MarkdownContent'
 
 export default function Result({
   runId,
@@ -56,8 +57,10 @@ export default function Result({
         </div>
       )}
 
-      <h3 style={{ fontSize: 16, margin: '18px 0 8px' }}>报告预览（Markdown）</h3>
-      <pre className="paper-box">{paper}</pre>
+      <h3 className="result-section-title">报告预览</h3>
+      <div className="paper-box">
+        <MarkdownContent content={paper} />
+      </div>
 
       <div className="dl-section">
         <div className="dl-group-title">下载产物</div>
@@ -102,7 +105,7 @@ export default function Result({
         </ul>
       </div>
 
-      <h3 style={{ fontSize: 16, margin: '22px 0 8px' }}>图表</h3>
+      <h3 className="result-section-title">图表</h3>
       <div className="figs">
         {figures.map((f) => (
           <a

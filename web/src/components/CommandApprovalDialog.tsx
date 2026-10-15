@@ -1,4 +1,5 @@
 import { useEffect } from 'react'
+import { hasOpenModalLayer } from '../modalLayer'
 import type { TerminalType } from '../settings'
 
 type Props = {
@@ -24,7 +25,9 @@ export default function CommandApprovalDialog({
 }: Props) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onReject()
+      // 本卡片是非模态的（贴在输入框上方，不打断会话），因此 Esc 只在
+      // 没有模态弹窗占据最上层时才生效，避免和设置弹窗等争抢同一次 Esc。
+      if (e.key === 'Escape' && !hasOpenModalLayer()) onReject()
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)

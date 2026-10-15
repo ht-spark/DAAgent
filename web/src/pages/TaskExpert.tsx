@@ -423,9 +423,11 @@ function ExpertDetailDialog({
   // onClose 为内联箭头函数，用 ref 取最新值，避免每次渲染重新注册模态层
   const onCloseRef = useRef(onClose)
   onCloseRef.current = onClose
+  // 弹窗容器：把 Tab 焦点限制在弹窗内部
+  const dialogRef = useRef<HTMLDivElement | null>(null)
 
-  // 压入模态层：统一处理滚动锁，且 Esc 只作用于最上层弹窗
-  useEffect(() => pushModalLayer(() => onCloseRef.current()), [])
+  // 压入模态层：统一处理滚动锁、Esc 只作用于最上层弹窗、Tab 焦点不外漏
+  useEffect(() => pushModalLayer(() => onCloseRef.current(), dialogRef.current), [])
 
   const expert = view.expert
   // skill_id 到名称的映射，未匹配到时回退展示 id
@@ -437,6 +439,7 @@ function ExpertDetailDialog({
   return (
     <div className="expert-detail-mask" onClick={onClose} role="presentation">
       <div
+        ref={dialogRef}
         className="expert-detail-dialog"
         role="dialog"
         aria-modal="true"
@@ -753,6 +756,28 @@ function ExpertEditor({
 
       <div className="expert-editor-layout">
         <main className="expert-editor-main">
+          {/* 工作区头部：专家预览 + 发布开关，做成与 01–04 板块卡片同一套方块卡片，
+              常驻在板块内容之上，进入单板块编辑时也不会丢失发布开关。 */}
+          <div className="expert-workspace-head">
+            <div className="expert-preview">
+              <span className="expert-card-avatar" aria-hidden="true">{draft.glyph || '专'}</span>
+              <div className="expert-preview-copy">
+                <strong>{draft.name || '未命名专家'}</strong>
+                <small>{draft.expert_id || 'expert-id'} · v{draft.version || '1.0.0'}</small>
+                <p>{draft.description || '补充专家简介后，这里会展示它的适用场景。'}</p>
+              </div>
+              <dl>
+                <div><dt>Skills</dt><dd>{draft.skill_bindings.length}</dd></div>
+                <div><dt>SOP 阶段</dt><dd>{draft.sop_stages.length}</dd></div>
+                <div><dt>检查项</dt><dd>{draft.validation_requirements.length}</dd></div>
+              </dl>
+            </div>
+            <label className="expert-enabled-toggle">
+              <input type="checkbox" checked={draft.enabled} onChange={(event) => patch({ enabled: event.target.checked })} />
+              <span><strong>发布后可使用</strong><small>关闭后仍可发布，但不会出现在任务选择中。</small></span>
+            </label>
+          </div>
+
           {activeMeta === null ? (
             <div className="expert-overview">
               <p className="expert-overview-hint">
@@ -827,24 +852,6 @@ function ExpertEditor({
             </div>
           )}
         </main>
-
-        <aside className="expert-editor-aside">
-          <div className="expert-preview">
-            <span className="expert-card-avatar" aria-hidden="true">{draft.glyph || '专'}</span>
-            <strong>{draft.name || '未命名专家'}</strong>
-            <small>{draft.expert_id || 'expert-id'} · v{draft.version || '1.0.0'}</small>
-            <p>{draft.description || '补充专家简介后，这里会展示它的适用场景。'}</p>
-            <dl>
-              <div><dt>Skills</dt><dd>{draft.skill_bindings.length}</dd></div>
-              <div><dt>SOP 阶段</dt><dd>{draft.sop_stages.length}</dd></div>
-              <div><dt>检查项</dt><dd>{draft.validation_requirements.length}</dd></div>
-            </dl>
-          </div>
-          <label className="expert-enabled-toggle">
-            <input type="checkbox" checked={draft.enabled} onChange={(event) => patch({ enabled: event.target.checked })} />
-            <span><strong>发布后可使用</strong><small>关闭后仍可发布，但不会出现在任务选择中。</small></span>
-          </label>
-        </aside>
       </div>
 
       {detailSkill ? (
@@ -868,7 +875,15 @@ function normalizeDraft(draft: ExpertDraft): ExpertDraft {
     skill_bindings?: Array<ExpertSkillBinding & { mode?: string }>
   }
   const { bundle_hash: _bundleHash, ...editable } = source
-  const migrated = (editable.skill_bindings ?? []).map(({ mode: _mode, ...binding }) => binding)
+  // 显式标注参数类型：source 是交叉类型，TS 会把 skill_bindings 解析回
+  // ExpertSkillBinding[]，直接解构 mode 会报「属性不存在」。这里以带旧字段的
+  // 宽类型遍历，剥离模式字段后仍是合法的 ExpertSkillBinding。
+  const migrated = (editable.skill_bindings ?? []).map(
+    (binding: ExpertSkillBinding & { mode?: string }) => {
+      const { mode: _mode, ...rest } = binding
+      return rest
+    },
+  )
   for (const skillId of editable.default_skill_ids ?? []) {
     if (!migrated.some((item) => item.skill_id === skillId)) migrated.push({ skill_id: skillId, reason: '' })
   }
