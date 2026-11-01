@@ -2,7 +2,7 @@
 
 面向 DAAgent v1.1.0，目标是在一台 2 核 4 GB 的 Windows Server 2022 上跑通完整网页端，公网可通过 `http://<公网IP>:8000` 访问。
 
-> 前置结论：2 GB 内存不足。项目需同时驻留 `torch`、`bge-small-zh-v1.5`（184 MB）与 pandas 峰值，实测峰值 2.0–2.7 GB。必须先升配到 4 GB。
+> 前置结论：2 GB 内存不足。项目需同时驻留 `torch`、`bge-small-zh-v1.5`（184 MB）与 pandas 峰值，按各组件常驻量核算峰值约 2.0–2.7 GB，会触发 OOM。必须先升配到 4 GB。
 
 ## 一、控制台准备（三件事，按顺序做）
 
@@ -32,15 +32,15 @@ ECS 控制台 → 实例 → **重置密码** → 用户名 `Administrator` → 
 
 ## 二、远程登录
 
-本地 Windows 按 `Win + R` 输入 `mstsc`：
+推荐用控制台的**远程连接**（Workbench）：不占用本地端口，也不需要把 3389 暴露到公网。
 
-- 计算机：`39.106.138.41`
-- 用户名：`Administrator`
-- 密码：上一步设置的密码
+ECS 控制台 → 实例 → 右上角 **远程连接** → 选择「Workbench 远程连接」→ 输入 Administrator 密码登录。
 
-首次连接会提示证书不受信任，选择「是」继续。
+登录后默认可能是 cmd，输入 `powershell` 回车切换到 PowerShell。
 
-> 3389 暴露在公网，建议后续把安全组的 3389 授权对象改成你的固定 IP，或改用阿里云 Workbench 免密登录。
+备选方案 mstsc：本地按 `Win + R` 输入 `mstsc`，计算机填 `39.106.138.41`，用户名 `Administrator`。
+
+> 若长期用 mstsc，建议把安全组 3389 的授权对象收窄到自己的固定 IP。
 
 ## 三、拉取代码
 
@@ -67,7 +67,9 @@ git clone https://gitee.com/harmony-tao/MMAgent.git DAAgent
 cd DAAgent
 ```
 
-> 为什么不用 GitHub：本地 GitHub 远端落后 38 个提交（最新提交 `1844853`），clone 下来是旧版本；Gitee 已同步到最新，且国内服务器拉取速度快一个量级。
+> 为什么不用 GitHub：该仓库的 GitHub 远端长期未同步，落后数十个提交，clone 下来是旧版本；Gitee 是当前最新代码，且国内服务器拉取速度快一个量级。
+
+> 若 `git clone` 提示输入账号密码，说明仓库为私有，填入 Gitee 用户名与私人令牌（个人设置 → 私人令牌）即可。
 
 ## 四、环境准备
 
@@ -113,6 +115,8 @@ uv run uvicorn server.main:app --host 0.0.0.0 --port 8000
 
 `--host 0.0.0.0` 不能省略，否则只监听 `127.0.0.1`，外网无法访问。
 
+首次启动要导入 torch、sentence-transformers 等重型依赖，约需 30–60 秒才会打印 `Application startup complete`，期间无输出属正常，不要重复启动。
+
 看到 `Application startup complete` 后，用浏览器打开：
 
 ```
@@ -123,7 +127,9 @@ http://39.106.138.41:8000
 
 ### 首次使用必须配置模型
 
-服务器上没有任何模型密钥，页面打开后需要在**设置**里填入 DeepSeek（或其他兼容 OpenAI 协议）的 API Key 与 Base URL，配置保存在浏览器 localStorage，不会落到服务器磁盘。
+`server/api_settings.json` 已被 `.gitignore` 排除，`git clone` 后不存在，服务器上没有任何可用密钥。页面打开后需在**设置**里填入模型 API Key 与 Base URL 并保存。
+
+注意：该配置会**同时写入浏览器 localStorage 与服务端 `server/api_settings.json`**，后者是明文密钥文件。它已在忽略规则中，切勿提交到仓库；如果是多人共用的服务器，应各自使用独立密钥并在用完后清理该文件。
 
 ## 七、常驻运行（验证通过后再做）
 
@@ -139,7 +145,7 @@ $action = New-ScheduledTaskAction -Execute "cmd.exe" `
     -Argument '/c "C:\DAAgent\.venv\Scripts\python.exe -m uvicorn server.main:app --host 0.0.0.0 --port 8000 >> C:\DAAgent\server\uvicorn.out 2>&1"' `
     -WorkingDirectory "C:\DAAgent"
 $trigger = New-ScheduledTaskTrigger -AtStartup
-$settings = New-ScheduledTaskSettingsSet -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit (New-TimeSpan -Days 0) -StartWhenAvailable
+$settings = New-ScheduledTaskSettingsSet -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero) -StartWhenAvailable
 
 Register-ScheduledTask -TaskName "DAAgent" -Action $action -Trigger $trigger `
     -Settings $settings -User "SYSTEM" -RunLevel Highest -Description "DAAgent 数据分析智能体"
@@ -175,10 +181,10 @@ Get-Process python -ErrorAction SilentlyContinue | Stop-Process -Force
 
 - 实例为**按使用流量计费**，100 Mbps 峰值。流量约 0.8 元/GB，跑任务时上传数据集、下载报告会产生流量。
 - 建议设置「流量计费封顶」，避免异常流量产生高额账单。
-- 不用时在控制台**停止实例**（按量付费停止后不再计计算费用，但云盘仍收费）。
+- 不用时可在控制台**停止实例**，但按量付费默认停机仍会收取计算资源（vCPU 与内存）费用。需在实例上开启「节省停机模式」，停机后才不计计算费，云盘费用照收。
 
 ## 十、后续可选项
 
 1. **域名 + HTTPS**：备案后可绑域名，用 Nginx 或 Caddy 反代到 8000，再把 Cloudflare 作为 DNS 与 CDN。
-2. **知识库模型**：`KnowledgeBase/embedding_model/bge-small-zh-v1.5` 未纳入版本库，`git clone` 后不存在。如需向量检索，从 ModelScope 下载该模型放入对应目录，或直接从本地打包上传（约 184 MB）。
+2. **知识库模型**：`KnowledgeBase/embedding_model/bge-small-zh-v1.5` 未纳入版本库，`git clone` 后不存在，此时知识库的向量检索会报错，但不影响建模主流程。需要启用时，在 ModelScope 搜索 `bge-small-zh-v1.5` 下载完整目录（含 `config.json`、`model.safetensors`、`tokenizer.json`），放到 `C:\DAAgent\KnowledgeBase\embedding_model\bge-small-zh-v1.5\` 下，目录层级必须完全一致。
 3. **数据目录持久化**：`artifacts/`、`KnowledgeBase/qdrant_db/`、`server/*.db` 均在 `.gitignore` 中，属于服务器本地状态，升级代码时不要删除。
