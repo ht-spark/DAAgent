@@ -1,0 +1,184 @@
+# Windows Server 2022 部署手册（阿里云 ECS）
+
+面向 DAAgent v1.1.0，目标是在一台 2 核 4 GB 的 Windows Server 2022 上跑通完整网页端，公网可通过 `http://<公网IP>:8000` 访问。
+
+> 前置结论：2 GB 内存不足。项目需同时驻留 `torch`、`bge-small-zh-v1.5`（184 MB）与 pandas 峰值，实测峰值 2.0–2.7 GB。必须先升配到 4 GB。
+
+## 一、控制台准备（三件事，按顺序做）
+
+### 1. 升配到 4 GB
+
+ECS 控制台 → 实例 → 目标实例 → **更多 → 实例设置 → 变更配置** → 规格选 `ecs.e-c1m2.large`（2 核 4 GB）→ 按量付费可直接变更，系统会重启一次。
+
+重启完成后确认「实例状态」为**运行中**，且内存显示 4 GB。
+
+### 2. 安全组放行 8000
+
+ECS 控制台 → 实例 → **网络与安全组 → 安全组 → 配置规则 → 入方向 → 手动添加**：
+
+| 字段 | 值 |
+|---|---|
+| 授权策略 | 允许 |
+| 优先级 | 1 |
+| 协议类型 | 自定义 TCP |
+| 端口范围 | 8000/8000 |
+| 授权对象 | 0.0.0.0/0 |
+
+> 阿里云 Windows 镜像默认只放行 3389，不手动加这一条，外网永远连不上。若只想自己访问，授权对象填你的本地公网 IP 更安全。
+
+### 3. 设置登录密码
+
+ECS 控制台 → 实例 → **重置密码** → 用户名 `Administrator` → 设置一个 12 位以上强密码 → 重启实例生效。
+
+## 二、远程登录
+
+本地 Windows 按 `Win + R` 输入 `mstsc`：
+
+- 计算机：`39.106.138.41`
+- 用户名：`Administrator`
+- 密码：上一步设置的密码
+
+首次连接会提示证书不受信任，选择「是」继续。
+
+> 3389 暴露在公网，建议后续把安全组的 3389 授权对象改成你的固定 IP，或改用阿里云 Workbench 免密登录。
+
+## 三、拉取代码
+
+登录服务器后，**以管理员身份**打开 PowerShell（开始菜单搜索 PowerShell → 右键 → 以管理员身份运行）。
+
+```powershell
+# 先确认 git 可用，Server 2022 默认未安装
+git --version
+```
+
+若提示找不到命令，先装 Git：
+
+```powershell
+Invoke-WebRequest -Uri https://registry.npmmirror.com/-/binary/git-for-windows/v2.47.1.windows.1/Git-2.47.1-64-bit.exe -OutFile $env:TEMP\git.exe -UseBasicParsing
+Start-Process $env:TEMP\git.exe -ArgumentList '/VERYSILENT' -Wait
+# 装完后重开一个 PowerShell 窗口，再执行 git --version
+```
+
+拉取代码（**用 Gitee，不要用 GitHub**）：
+
+```powershell
+cd C:\
+git clone https://gitee.com/harmony-tao/MMAgent.git DAAgent
+cd DAAgent
+```
+
+> 为什么不用 GitHub：本地 GitHub 远端落后 38 个提交（最新提交 `1844853`），clone 下来是旧版本；Gitee 已同步到最新，且国内服务器拉取速度快一个量级。
+
+## 四、环境准备
+
+```powershell
+cd C:\DAAgent
+powershell -ExecutionPolicy Bypass -File .\deploy\setup-windows.ps1
+```
+
+脚本会依次完成：Python 3.12 → uv → Node.js 20 → npm 淘宝镜像 → 防火墙放行 8000。已安装的组件自动跳过，可重复执行。
+
+预计耗时 3–8 分钟，取决于镜像速度。
+
+> 装完后如果 `python` 或 `node` 提示找不到命令，关掉当前窗口重开一个即可（PATH 需要重新加载）。
+
+## 五、安装依赖并构建前端
+
+```powershell
+cd C:\DAAgent
+uv sync
+```
+
+`pyproject.toml` 已配置阿里云 PyPI 镜像，无需额外设置。首次会下载约 1.5–2 GB（含 torch CPU 版），耗时 5–15 分钟。
+
+> 内存占用只在运行期才冲高，安装阶段虽然磁盘 IO 大但内存安全。
+
+构建前端：
+
+```powershell
+cd C:\DAAgent\web
+npm install
+npm run build
+cd C:\DAAgent
+```
+
+`npm run build` 约 30–90 秒，产物写入 `web\dist`（约 7.4 MB），后端会自动挂载该目录。
+
+## 六、启动与验证
+
+```powershell
+cd C:\DAAgent
+uv run uvicorn server.main:app --host 0.0.0.0 --port 8000
+```
+
+`--host 0.0.0.0` 不能省略，否则只监听 `127.0.0.1`，外网无法访问。
+
+看到 `Application startup complete` 后，用浏览器打开：
+
+```
+http://39.106.138.41:8000
+```
+
+先访问 `http://39.106.138.41:8000/healthz`，返回正常即代表链路打通。
+
+### 首次使用必须配置模型
+
+服务器上没有任何模型密钥，页面打开后需要在**设置**里填入 DeepSeek（或其他兼容 OpenAI 协议）的 API Key 与 Base URL，配置保存在浏览器 localStorage，不会落到服务器磁盘。
+
+## 七、常驻运行（验证通过后再做）
+
+前台运行时关闭 RDP 窗口进程会被终止。要长期在线，先用**管理员 PowerShell** 做两件事：
+
+```powershell
+# SYSTEM 账户的家目录在 System32 下，matplotlib 默认缓存路径不可写，会直接报错
+New-Item -ItemType Directory -Force -Path C:\DAAgent\.cache\matplotlib | Out-Null
+[Environment]::SetEnvironmentVariable('MPLCONFIGDIR', 'C:\DAAgent\.cache\matplotlib', 'Machine')
+
+# 注册开机自启（用 cmd 包装以便把输出重定向到日志文件）
+$action = New-ScheduledTaskAction -Execute "cmd.exe" `
+    -Argument '/c "C:\DAAgent\.venv\Scripts\python.exe -m uvicorn server.main:app --host 0.0.0.0 --port 8000 >> C:\DAAgent\server\uvicorn.out 2>&1"' `
+    -WorkingDirectory "C:\DAAgent"
+$trigger = New-ScheduledTaskTrigger -AtStartup
+$settings = New-ScheduledTaskSettingsSet -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit (New-TimeSpan -Days 0) -StartWhenAvailable
+
+Register-ScheduledTask -TaskName "DAAgent" -Action $action -Trigger $trigger `
+    -Settings $settings -User "SYSTEM" -RunLevel Highest -Description "DAAgent 数据分析智能体"
+```
+
+启动与停止：
+
+```powershell
+Start-ScheduledTask -TaskName "DAAgent"
+Get-ScheduledTask   -TaskName "DAAgent" | Select-Object State
+Get-Content C:\DAAgent\server\uvicorn.out -Tail 50
+```
+
+停止服务需要连带结束 Python 子进程（任务计划只终止 cmd 主进程）：
+
+```powershell
+Stop-ScheduledTask -TaskName "DAAgent"
+Get-Process python -ErrorAction SilentlyContinue | Stop-Process -Force
+```
+
+## 八、故障排查
+
+| 现象 | 原因 | 处理 |
+|---|---|---|
+| 浏览器打不开，但 healthz 能通 | 前端未构建 | 执行 `web` 目录下 `npm run build` |
+| 完全连不上 | 安全组未放行 | 检查入方向 8000 规则 |
+| 能连但页面空白 | `dist` 缺失或路径错 | 确认 `C:\DAAgent\web\dist\index.html` 存在 |
+| 启动即退出，日志 OOM | 内存不足 | 确认已升配 4 GB；关闭无关进程 |
+| `uv sync` 卡在 torch | 镜像未生效 | 检查 `pyproject.toml` 的 `[tool.uv.index]` |
+| 中文乱码 | 控制台代码页 | PowerShell 执行 `chcp 65001` |
+
+## 九、费用提醒
+
+- 实例为**按使用流量计费**，100 Mbps 峰值。流量约 0.8 元/GB，跑任务时上传数据集、下载报告会产生流量。
+- 建议设置「流量计费封顶」，避免异常流量产生高额账单。
+- 不用时在控制台**停止实例**（按量付费停止后不再计计算费用，但云盘仍收费）。
+
+## 十、后续可选项
+
+1. **域名 + HTTPS**：备案后可绑域名，用 Nginx 或 Caddy 反代到 8000，再把 Cloudflare 作为 DNS 与 CDN。
+2. **知识库模型**：`KnowledgeBase/embedding_model/bge-small-zh-v1.5` 未纳入版本库，`git clone` 后不存在。如需向量检索，从 ModelScope 下载该模型放入对应目录，或直接从本地打包上传（约 184 MB）。
+3. **数据目录持久化**：`artifacts/`、`KnowledgeBase/qdrant_db/`、`server/*.db` 均在 `.gitignore` 中，属于服务器本地状态，升级代码时不要删除。
