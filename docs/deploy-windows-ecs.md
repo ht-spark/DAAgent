@@ -94,12 +94,22 @@ powershell -ExecutionPolicy Bypass -File .\deploy\setup-windows.ps1
 
 ```powershell
 cd C:\DAAgent
+# uv 默认超时偏短，国内网络抖动时容易在单个包上反复重试后失败；
+# 并发连接默认 50，容易占满带宽反而加剧超时，降到 8 更稳
+$env:UV_HTTP_TIMEOUT = "600"
+$env:UV_CONCURRENT_DOWNLOADS = "8"
 uv sync
 ```
 
 `pyproject.toml` 已配置阿里云 PyPI 镜像，无需额外设置。首次会下载约 1.5–2 GB（含 torch CPU 版），耗时 5–15 分钟。
 
-> 内存占用只在运行期才冲高，安装阶段虽然磁盘 IO 大但内存安全。
+> 上述两个环境变量只对当前 PowerShell 会话有效，重开窗口后需要重新设置。
+
+若仍出现 `Failed to download xxx` 超时，换清华源重试。`uv sync` 可重入，已下载的包会命中本地缓存，不会从头开始：
+
+```powershell
+uv sync --default-index https://pypi.tuna.tsinghua.edu.cn/simple
+```
 
 构建前端：
 
