@@ -204,7 +204,37 @@ if (Get-Command npm -ErrorAction SilentlyContinue) {
     Write-Warn "npm 不可用，跳过镜像配置"
 }
 
-# ── 5. 防火墙 ────────────────────────────────────────────────────────
+# ── 5. Visual C++ 运行库 ─────────────────────────────────────────────
+Write-Step "检查 Visual C++ 运行库"
+
+# onnxruntime（由 markitdown → magika 间接引入）是预编译的 C++ 扩展，
+# 缺少 vcruntime140.dll 时会在 import 阶段抛 "DLL load failed ... 找不到指定的模块"。
+# 纯净的 Server 镜像默认不带，必须在装依赖前补上，否则文档转 Markdown 功能直接 500。
+$vcRuntimeDll = Join-Path $env:SystemRoot 'System32\vcruntime140.dll'
+if (Test-Path $vcRuntimeDll) {
+    Write-Ok "已存在 VC++ 运行库"
+} else {
+    Write-Warn "缺少 vcruntime140.dll，安装 VC++ 2015-2022 运行库"
+    $vcRedist = Join-Path $env:TEMP 'vc_redist.x64.exe'
+    $vcDownloaded = $true
+    try {
+        Invoke-WebRequest -Uri 'https://aka.ms/vs/17/release/vc_redist.x64.exe' -OutFile $vcRedist -UseBasicParsing -TimeoutSec 600
+    } catch {
+        Write-Warn "下载失败，请手动安装：https://aka.ms/vs/17/release/vc_redist.x64.exe"
+        $vcDownloaded = $false
+    }
+    if ($vcDownloaded -and (Test-Path $vcRedist)) {
+        # /quiet 静默安装，/norestart 避免安装器自行重启服务器
+        Start-Process -FilePath $vcRedist -ArgumentList '/install', '/quiet', '/norestart' -Wait
+        if (Test-Path $vcRuntimeDll) {
+            Write-Ok "VC++ 运行库安装完成"
+        } else {
+            Write-Warn "安装未生效，请手动运行 $vcRedist 后重试"
+        }
+    }
+}
+
+# ── 6. 防火墙 ────────────────────────────────────────────────────────
 Write-Step "配置防火墙"
 
 $ruleName = "DAAgent HTTP $PORT"
@@ -216,7 +246,7 @@ if (Get-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue) {
     Write-Ok "已放行 TCP $PORT 入站"
 }
 
-# ── 6. 汇总 ──────────────────────────────────────────────────────────
+# ── 7. 汇总 ──────────────────────────────────────────────────────────
 Write-Step "环境准备完成"
 
 Write-Host "    Python : $(try { & python --version } catch { '未就绪' })"

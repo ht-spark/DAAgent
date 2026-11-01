@@ -220,6 +220,7 @@ Get-Process python -ErrorAction SilentlyContinue | Stop-Process -Force
 | 启动即退出，日志 OOM | 内存不足 | 确认已升配 4 GB；关闭无关进程 |
 | `uv sync` 卡在 torch | 镜像未生效 | 检查 `pyproject.toml` 的 `[tool.uv.index]` |
 | 中文乱码 | 控制台代码页 | PowerShell 执行 `chcp 65001` |
+| 上传文档报 `DLL load failed while importing onnxruntime_pybind11_state` | 缺 VC++ 运行库（`onnxruntime` 是 C++ 扩展，纯净 Server 镜像不带 `vcruntime140.dll`） | 安装 https://aka.ms/vs/17/release/vc_redist.x64.exe 后重启服务；`deploy\setup-windows.ps1` 已包含该步骤 |
 
 ## 九、费用提醒
 
