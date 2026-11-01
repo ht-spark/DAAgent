@@ -84,7 +84,7 @@ cd C:\DAAgent
 powershell -ExecutionPolicy Bypass -File .\deploy\setup-windows.ps1
 ```
 
-脚本会依次完成：Python 3.12 → uv → Node.js 20 → npm 淘宝镜像 → 防火墙放行 8000。已安装的组件自动跳过，可重复执行。
+脚本会依次完成：Python 3.12 → uv → Node.js 22 → npm 淘宝镜像 → 防火墙放行 8000。已安装的组件自动跳过，可重复执行。
 
 预计耗时 3–8 分钟，取决于镜像速度。
 
@@ -121,6 +121,8 @@ cd C:\DAAgent
 ```
 
 `npm run build` 约 30–90 秒，产物写入 `web\dist`（约 7.4 MB），后端会自动挂载该目录。
+
+> Node 版本必须 ≥ 22.12，这是 `mermaid@12` 的引擎要求（`web/package.json` 依赖 `mermaid ^12.1.0`），不是 Vite 的 ≥18。若 `npm install` 刷出大量 `EBADENGINE` 警告，说明 Node 过低，升级后重新安装依赖。
 
 ## 六、启动与验证
 

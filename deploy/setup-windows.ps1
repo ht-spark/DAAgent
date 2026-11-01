@@ -21,8 +21,9 @@ $ErrorActionPreference = 'Stop'
 # ── 版本与镜像（超参数）────────────────────────────────────────────────
 # PYTHON_VERSION：项目要求 >=3.11，选 3.12 是因为 3.13 上 torch / llama-index 的预编译轮子尚不完整
 $PYTHON_VERSION = '3.12.8'
-# NODE_VERSION：Vite 5.4 要求 Node >=18，选 20 LTS 保证长期可用且与本地构建结果一致
-$NODE_VERSION = '20.18.1'
+# NODE_VERSION：web/package.json 依赖 mermaid ^12.1.0，其引擎声明为 node >=22.12，
+# 低于该版本 npm install 会大量报 EBADENGINE 且构建存在失败风险；选 22.20.0（22.x LTS 最新补丁版）
+$NODE_VERSION = '22.20.0'
 # PORT：后端监听端口，与本地 start.ps1 prod 保持一致，避免前端相对路径请求失效
 $PORT = 8000
 # 多镜像候选：国内服务器优先华为云与淘宝镜像，逐个回退，避免单点不可达
@@ -161,12 +162,13 @@ Write-Step "检查 Node.js"
 $nodeOk = $false
 if (Get-Command node -ErrorAction SilentlyContinue) {
     $nodeVersion = (& node --version) -replace 'v', ''
-    $nodeMajor = [int]$nodeVersion.Split('.')[0]
-    if ($nodeMajor -ge 18) {
+    # 引擎要求来自 mermaid 12.1.0（>=22.12），不是 Vite 的 >=18，
+    # 用完整版本号比较而非只看主版本，否则 22.10 会被误判为可用
+    if ([version]$nodeVersion -ge [version]'22.12.0') {
         Write-Ok "已安装 Node v$nodeVersion"
         $nodeOk = $true
     } else {
-        Write-Warn "检测到 Node v$nodeVersion，低于 Vite 5 要求的 18"
+        Write-Warn "检测到 Node v$nodeVersion，低于 mermaid 12 要求的 22.12"
     }
 } else {
     Write-Warn "未检测到 Node.js"
