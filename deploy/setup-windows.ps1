@@ -140,9 +140,13 @@ Write-Step "检查 uv（项目依赖管理器）"
 if (Get-Command uv -ErrorAction SilentlyContinue) {
     Write-Ok "已安装 uv $(& uv --version)"
 } else {
-    Write-Host "    通过 pip 安装 uv（走已配置的镜像，速度更快）"
-    & python -m pip install --upgrade pip --quiet
-    & python -m pip install uv --quiet
+    # pip 默认访问 pypi.org，国内服务器常只有几十 KB/s 甚至长时间无响应。
+    # 必须显式指定镜像：pyproject.toml 的 [tool.uv.index] 只对 uv 生效，不影响 pip。
+    $pipIndex = 'https://mirrors.aliyun.com/pypi/simple/'
+    Write-Host "    安装 uv（镜像：$pipIndex）"
+    # 不加 --quiet，保留进度条，便于区分「正在下载」与「真的卡死」
+    & python -m pip install --upgrade pip -i $pipIndex
+    & python -m pip install uv -i $pipIndex
     Update-SessionPath
     if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
         Write-Warn "uv 未进入 PATH，后续请使用 python -m uv 代替 uv"
