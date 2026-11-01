@@ -92,20 +92,46 @@ powershell -ExecutionPolicy Bypass -File .\deploy\setup-windows.ps1
 
 ## 五、安装依赖并构建前端
 
+### 优先用内网镜像（决定耗时长短的关键）
+
+阿里云 ECS 内网提供独立镜像站 `mirrors.cloud.aliyuncs.com`，走内网带宽，不计公网流量费。实测公网镜像 `mirrors.aliyun.com` 只有约 0.6 MB/s，2 GB 依赖要跑近一小时，而且按流量计费的实例还要额外付约 1.6 元；内网镜像通常可达数十 MB/s。
+
 ```powershell
 cd C:\DAAgent
-# uv 默认超时偏短，国内网络抖动时容易在单个包上反复重试后失败；
-# 并发连接默认 50，容易占满带宽反而加剧超时，降到 8 更稳
+uv sync --default-index http://mirrors.cloud.aliyuncs.com/pypi/simple/ --allow-insecure-host mirrors.cloud.aliyuncs.com
+```
+
+前端同理：
+
+```powershell
+cd C:\DAAgent\web
+npm config set registry http://mirrors.cloud.aliyuncs.com/npm/
+npm install
+npm run build
+```
+
+> 该域名只解析在内网（`100.100.x.x`），本地电脑访问不通，属正常现象。
+
+### 内网镜像不可用时的备选
+
+先用公网镜像，并放宽超时、降低并发（默认并发 50 会占满带宽反而加剧超时）：
+
+```powershell
+cd C:\DAAgent
 $env:UV_HTTP_TIMEOUT = "600"
 $env:UV_CONCURRENT_DOWNLOADS = "8"
 uv sync
 ```
 
-`pyproject.toml` 已配置阿里云 PyPI 镜像，无需额外设置。首次会下载约 1.5–2 GB（含 torch CPU 版），耗时 5–15 分钟。
+> 这两个环境变量只对当前 PowerShell 会话有效，重开窗口需重设。
 
-> 上述两个环境变量只对当前 PowerShell 会话有效，重开窗口后需要重新设置。
+若时间紧张且暂时不需要知识库，可跳过全部重型依赖。项目源码没有顶层 `import torch`，`langchain_huggingface` 在 `KnowledgeBase/embedding.py` 内部延迟导入，因此跳过不影响服务启动，只是知识库的向量检索不可用：
 
-若仍出现 `Failed to download xxx` 超时，换清华源重试。`uv sync` 可重入，已下载的包会命中本地缓存，不会从头开始：
+```powershell
+uv sync --no-install-package torch --no-install-package sentence-transformers --no-install-package langchain-huggingface --no-install-package modelscope --no-install-package llama-index
+```
+
+`uv sync` 可重入，已下载的包命中本地缓存，中断后重跑不会从头开始。若单个包反复超时，可换清华源：
 
 ```powershell
 uv sync --default-index https://pypi.tuna.tsinghua.edu.cn/simple
