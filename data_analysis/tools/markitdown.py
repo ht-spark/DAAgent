@@ -1,4 +1,4 @@
-"""把非 Markdown 附件转换为 Markdown 文本的 Agent 工具。
+"""文档转换 Skill 复用的附件授权、转换缓存与分页实现。
 
 用户上传的 PDF、Word、PPT、Excel、HTML、EPUB、Notebook 附件无法当作文本直接阅读，
 这里复用确定性转换层（``server.document_tools``）先转成 Markdown 落盘，
@@ -17,6 +17,7 @@ from server.document_tools import (
     to_markdown,
 )
 
+from .artifact_tools import ArtifactWorkspace
 from .attachment_tools import TEXT_ATTACHMENT_SUFFIXES
 
 __all__ = [
@@ -107,8 +108,9 @@ def _ensure_markdown(source: Path, converted_dir: Path) -> tuple[Path, bool]:
     Raises:
         DocumentConversionError: 转换失败（格式损坏、依赖缺失、内容为空等）。
     """
-    converted_dir.mkdir(parents=True, exist_ok=True)
-    target = _converted_path(converted_dir, source)
+    workspace = ArtifactWorkspace(converted_dir)
+    relative_path = _converted_path(workspace.root, source).relative_to(workspace.root)
+    target = workspace.path(relative_path, overwrite=True)
     if target.is_file() and target.stat().st_mtime >= source.stat().st_mtime:
         return target, False
 
@@ -127,7 +129,7 @@ def convert_attachment_to_markdown(
 
     Args:
         arguments: ``file_path``（必填）、``offset``（起始行，默认 1）、
-            ``limit``（行数，默认 400，上限 1000）。
+            ``limit``（行数，默认 400，上限 1000）、``char_offset``（行内续读位置，默认 0）。
         context: 需包含 ``authorized_paths`` 与 ``converted_dir``。
 
     Returns:
@@ -138,12 +140,15 @@ def convert_attachment_to_markdown(
         PermissionError: 附件未获授权。
         DocumentConversionError: 转换失败。
     """
-    if set(arguments) - {"file_path", "offset", "limit"} or "file_path" not in arguments:
-        raise ValueError("markitdown 需要 file_path，可选 offset 和 limit")
+    if set(arguments) - {"file_path", "offset", "limit", "char_offset"} or "file_path" not in arguments:
+        raise ValueError("markitdown 需要 file_path，可选 offset、limit 和 char_offset")
     offset = arguments.get("offset", 1)
     limit = arguments.get("limit", DEFAULT_PAGE_LINES)
+    char_offset = arguments.get("char_offset", 0)
     if type(offset) is not int or type(limit) is not int or offset < 1 or not 1 <= limit <= MAX_PAGE_LINES:
         raise ValueError(f"offset 必须大于 0，limit 必须在 1 到 {MAX_PAGE_LINES} 之间")
+    if type(char_offset) is not int or char_offset < 0:
+        raise ValueError("char_offset 必须是非负整数")
 
     source = _authorized_source(arguments["file_path"], context)
     converted_dir = context.get("converted_dir")
@@ -157,19 +162,29 @@ def convert_attachment_to_markdown(
     total_chars = sum(len(line) for line in all_lines)
 
     window = all_lines[offset - 1 : offset - 1 + limit]
+    if char_offset and (not window or char_offset > len(window[0])):
+        raise ValueError("char_offset 超出起始行的字符范围")
     truncated = offset - 1 + len(window) < total_lines
+    next_offset = offset + len(window) if truncated else None
+    next_char_offset = 0
     page: list[str] = []
     used_chars = 0
     end_line = offset - 1
     for index, line in enumerate(window, start=offset):
+        line_offset = char_offset if index == offset else 0
+        content = line[line_offset:]
         remaining = MAX_PAGE_CHARS - used_chars
-        if len(line) > remaining:
-            page.append(line[:remaining])
-            end_line = index
+        if len(content) > remaining:
+            page.append(content[:remaining])
+            if remaining:
+                end_line = index
             truncated = True
+            # 超长行从当前行的未读字符继续，不能直接跳到下一行而丢失内容。
+            next_offset = index
+            next_char_offset = line_offset + remaining
             break
-        page.append(line)
-        used_chars += len(line)
+        page.append(content)
+        used_chars += len(content)
         end_line = index
 
     return {
@@ -180,8 +195,10 @@ def convert_attachment_to_markdown(
         "total_lines": total_lines,
         "total_chars": total_chars,
         "start_line": offset,
+        "char_offset": char_offset,
         "end_line": end_line,
         "content": "".join(page),
         "truncated": truncated,
-        "next_offset": end_line + 1 if truncated else None,
+        "next_offset": next_offset,
+        "next_char_offset": next_char_offset if truncated else None,
     }

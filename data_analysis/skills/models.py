@@ -45,6 +45,8 @@ class SkillMetadata(BaseModel):
     name: str
     description: str
     bundle_hash: str
+    # 来源由注册表判定，不接受上传包自行声明为系统技能。
+    source: Literal["system", "personal"] = "personal"
     references: tuple[SkillResource, ...] = ()
     assets: tuple[SkillResource, ...] = ()
     scripts: tuple[SkillScript, ...] = ()

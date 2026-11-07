@@ -11,11 +11,10 @@ import KnowledgeBaseStats from './pages/KnowledgeBaseStats'
 import ChunkEmbedding, { type ChunkEmbeddingOptions } from './pages/ChunkEmbedding'
 import ChunkEmbeddingProgress from './pages/ChunkEmbeddingProgress'
 import KnowledgeBaseHistory from './pages/KnowledgeBaseHistory'
-import DocConverter from './pages/DocConverter'
 import TaskExpert, { type TaskExpertView } from './pages/TaskExpert'
 import Skills from './pages/Skills'
 
-type Section = 'modeling' | 'brainstorm' | 'converter' | 'task-expert' | 'skills'
+type Section = 'modeling' | 'brainstorm' | 'task-expert' | 'skills'
 type TaskStep = 'submit' | 'progress' | 'result'
 type ModelingView = 'new' | 'history'
 type BrainstormView = 'knowledge-hub' | 'knowledge' | 'knowledge-history' | 'stats' | 'chunking' | 'chunking-progress'
@@ -75,7 +74,7 @@ function resolveLevelNav(options: {
     }
   }
 
-  if (section === 'converter' || section === 'skills') {
+  if (section === 'skills') {
     return { parent: null, next: null }
   }
 
@@ -148,6 +147,7 @@ export default function App() {
   const [discussionId, setDiscussionId] = useState<string | null>(null)
   const [taskViewEpoch, setTaskViewEpoch] = useState(0)
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null)
+  const [activeProjectTitle, setActiveProjectTitle] = useState<string | null>(null)
   const [activeKnowledgeBaseId, setActiveKnowledgeBaseId] = useState<string | undefined>()
   const [activeExpertId, setActiveExpertId] = useState<string | null>(null)
   // 标记资料统计是从「知识库统计」打开，以便返回正确页面
@@ -159,6 +159,8 @@ export default function App() {
     windowSize: 5,
   })
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const [compactNavigation, setCompactNavigation] = useState(() => window.matchMedia('(max-width: 768px)').matches)
+  const [mobileNavOpen, setMobileNavOpen] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [task, setTask] = useState<{ step: TaskStep; runId: string | null }>({
     step: 'submit',
@@ -173,7 +175,23 @@ export default function App() {
     applyUiSettings(loadUiSettings())
   }, [])
 
+  useEffect(() => {
+    const media = window.matchMedia('(max-width: 768px)')
+    function updateNavigation() {
+      setCompactNavigation(media.matches)
+      setMobileNavOpen(false)
+    }
+    media.addEventListener('change', updateNavigation)
+    return () => media.removeEventListener('change', updateNavigation)
+  }, [])
+
+  // 切换工作区页面时从标题开始，避免沿用上一页资源列表的滚动位置。
+  useEffect(() => {
+    window.scrollTo({ top: 0, left: 0, behavior: 'instant' })
+  }, [section, modelingView, brainstormView, taskExpertView])
+
   function startNew() {
+    setMobileNavOpen(false)
     setTaskViewEpoch((value) => value + 1)
     setDiscussionId(null)
     setActiveExpertId(null)
@@ -183,6 +201,7 @@ export default function App() {
   }
 
   function startWithExpert(expertId: string) {
+    setMobileNavOpen(false)
     setTaskViewEpoch((value) => value + 1)
     setDiscussionId(null)
     setActiveExpertId(expertId)
@@ -200,6 +219,7 @@ export default function App() {
   }
 
   function applyNavTarget(target: NavTarget) {
+    setMobileNavOpen(false)
     setSection(target.section)
     if (target.modelingView) setModelingView(target.modelingView)
     if (target.brainstormView) setBrainstormView(target.brainstormView)
@@ -218,51 +238,78 @@ export default function App() {
 
   return (
     <div className="shell">
-      {/* 静态背景层（全站共用）：网格点阵 + 暖色渐变，不做持续动画 */}
+      {/* 静态背景层（全站共用）：网格点阵 + 浅暖白渐变，不做持续动画 */}
       <div className="bg-grid" />
       <div className="bg-glow" />
 
+      <header className="mobile-app-bar">
+        <button
+          type="button"
+          className="mobile-nav-button"
+          aria-label="打开主导航"
+          aria-controls="app-sidebar"
+          aria-expanded={mobileNavOpen}
+          onClick={() => setMobileNavOpen(true)}
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" aria-hidden="true">
+            <path d="M4 6h16M4 12h16M4 18h16" />
+          </svg>
+        </button>
+        <img src="/logo.png" alt="" aria-hidden="true" />
+        <span>DAAgent</span>
+        <span className="mobile-current-page">{{ modeling: '新建任务', brainstorm: '知识库', 'task-expert': '任务专家', skills: '技能' }[section]}</span>
+      </header>
+      {compactNavigation && mobileNavOpen && (
+        <button className="sidebar-backdrop" type="button" aria-label="关闭主导航" tabIndex={-1} onClick={() => setMobileNavOpen(false)} />
+      )}
+
       <Sidebar
         section={section}
-        collapsed={sidebarCollapsed}
+        collapsed={compactNavigation ? !mobileNavOpen : sidebarCollapsed}
+        mobileOpen={compactNavigation && mobileNavOpen}
+        onClose={() => setMobileNavOpen(false)}
         activeDiscussionId={discussionId}
         activeProjectId={activeProjectId}
-        onProjectChange={(projectId) => {
+        onProjectChange={(projectId, projectTitle) => {
           setActiveProjectId(projectId)
+          setActiveProjectTitle(projectTitle ?? null)
           startNew()
         }}
         onHome={() => startNew()}
         onModeling={() => startNew()}
         onBrainstorm={() => {
+          setMobileNavOpen(false)
           // 侧边栏「知识库」直接进入维护总览（知识库更新 / 历史记录），
           // 不再经过单卡片的中转页。
           setSection('brainstorm')
           setBrainstormView('knowledge-hub')
         }}
-        onOpenDiscussion={(id, projectId) => {
+        onOpenDiscussion={(id, projectId, projectTitle) => {
+          setMobileNavOpen(false)
           setTaskViewEpoch((value) => value + 1)
-            setActiveProjectId(projectId)
-            setDiscussionId(id)
-            setActiveExpertId(null)
+          setActiveProjectId(projectId)
+          setActiveProjectTitle(projectTitle ?? null)
+          setDiscussionId(id)
+          setActiveExpertId(null)
           setTask({ step: 'submit', runId: null })
           setSection('modeling')
           setModelingView('new')
         }}
-        onConverter={() => setSection('converter')}
         onTaskExpert={() => {
+          setMobileNavOpen(false)
           setSection('task-expert')
           setTaskExpertView('list')
           setTaskExpertCanResumeEditor(false)
         }}
-        onSkills={() => setSection('skills')}
-        onSettings={() => setSettingsOpen(true)}
+        onSkills={() => { setMobileNavOpen(false); setSection('skills') }}
+        onSettings={() => { setMobileNavOpen(false); setSettingsOpen(true) }}
         onDiscussionDeleted={(id) => {
           if (discussionId === id) setDiscussionId(null)
         }}
       />
       <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
 
-      <main className={`content ${sidebarCollapsed ? 'content--collapsed' : ''}`}>
+      <main className={`content ${!compactNavigation && sidebarCollapsed ? 'content--collapsed' : ''}`}>
         <div className="content-top-actions">
           <button
             className="page-back-button"
@@ -313,6 +360,7 @@ export default function App() {
             onHistory={() => setModelingView('history')}
             discussionId={discussionId}
             projectId={activeProjectId}
+            projectTitle={activeProjectTitle}
             expertId={activeExpertId}
             onDiscussionId={setDiscussionId}
             onManageSkills={() => setSection('skills')}
@@ -338,6 +386,7 @@ export default function App() {
         )}
         {section === 'brainstorm' && brainstormView === 'knowledge-history' && (
           <KnowledgeBaseHistory
+            onAddMaterials={() => setBrainstormView('knowledge')}
             onOpenKnowledgeBase={(knowledgeBaseId) => {
               // 详细文件记录统一放在资料统计；维护页每次打开为空
               setActiveKnowledgeBaseId(knowledgeBaseId)
@@ -372,7 +421,6 @@ export default function App() {
           />
         )}
         {section === 'modeling' && modelingView === 'history' && <History onOpen={openFromHistory} />}
-        {section === 'converter' && <DocConverter />}
         {section === 'task-expert' && (
           <TaskExpert
             view={taskExpertView}

@@ -182,7 +182,8 @@ class SkillRuntime:
         }
         process_environment["PYTHONIOENCODING"] = "utf-8"
         completed = run_cancellable_process(
-            [self.python_executable, "-I", str(entrypoint)],
+            # 隔离模式忽略 PYTHONIOENCODING，用解释器选项统一中文 JSON 和输出编码。
+            [self.python_executable, "-I", "-X", "utf8", str(entrypoint)],
             timeout=script.timeout_seconds,
             cancel_check=self.cancel_check,
             input=encoded,
@@ -244,7 +245,7 @@ class SkillRuntime:
         normalized_argv = [self._validate_cli_argument(item) for item in argv]
         before = self._snapshot_files(self.output_dir)
         completed = run_cancellable_process(
-            [self.python_executable, "-I", str(entrypoint), *normalized_argv],
+            [self.python_executable, "-I", "-X", "utf8", str(entrypoint), *normalized_argv],
             timeout=script.timeout_seconds,
             cancel_check=self.cancel_check,
             text=True,

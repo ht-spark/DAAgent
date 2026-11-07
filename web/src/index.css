@@ -9,35 +9,43 @@
    ============================================ */
 
 :root {
-    /* Indigo palette (格致 design tokens, base #4a5bc7) */
-    --primary-50: #EEF0FB;
-    --primary-100: #DFE4F7;
-    --primary-200: #C3CBEE;
-    --primary-300: #9FABE3;
-    --primary-400: #7584D7;
-    --primary-500: #4A5BC7;
-    --primary-600: #4250B4;
-    --primary-700: #3B4890;
-    --primary-800: #313B76;
-    --primary-900: #272F5C;
+    /* 品牌绿：浅色用于选择背景，深色用于可读文字和主要操作。 */
+    --primary-50: #edf4f0;
+    --primary-100: #deebe3;
+    --primary-200: #bcd6c8;
+    --primary-300: #94baa5;
+    --primary-400: #63967d;
+    --primary-500: #3f7d60;
+    --primary-600: #32674f;
+    --primary-700: #285640;
+    --primary-800: #234735;
+    --primary-900: #1c392b;
 
     /* Accent - ice teal */
     --accent: #7CC7C0;
     --accent-soft: #D8EFED;
 
-    /* Neutrals — 暖黄工作台 */
-    --bg: #faf6e8;
-    --bg-soft: #f3ecd8;
-    --bg-card: rgba(255, 252, 243, 0.82);
-    --bg-card-solid: #fffcf3;
-    --border: rgba(92, 72, 28, 0.12);
-    --border-strong: rgba(184, 137, 45, 0.32);
+    /* Neutrals — 浅暖白工作台
+       大面积不使用纯白，主背景落在 244~250 亮度区间；灰色带极轻微暖偏移
+       （R 比 B 高约 3 个色阶），避免高亮纯白的眩光，同时保留柔和的暖感。 */
+    --bg: #f7f6f3;
+    --bg-soft: #f0efec;
+    --bg-card: rgba(251, 250, 247, 0.82);
+    --bg-card-solid: #fbfaf7;
+    --border: rgba(84, 82, 78, 0.12);
+    --border-strong: rgba(111, 108, 103, 0.32);
 
     /* Text */
-    --text-primary: #1C2438;
-    --text-secondary: #3A4256;
-    --text-tertiary: #5B6478;
-    --text-muted: #8B94A9;
+    --text-primary: #292d29;
+    --text-secondary: #4d554f;
+    --text-tertiary: #60685f;
+    --text-muted: #686b65;
+
+    /* 语义操作色统一供导航、表单和各资源页面复用。 */
+    --action-primary: #2f684f;
+    --action-primary-hover: #24543f;
+    --action-danger: #a33d31;
+    --focus-ring: #32674f;
 
     /* Status */
     --success: #10B981;
@@ -88,6 +96,18 @@ body {
     -webkit-font-smoothing: antialiased;
 }
 
+::selection {
+    background: var(--primary-200);
+    color: var(--primary-900);
+}
+
+:is(button, a, input, textarea, select, summary, [tabindex]):focus-visible {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 3px;
+}
+
+input, textarea { caret-color: var(--action-primary); }
+
 .latin,
 h1, h2, h3 {
     font-family: 'Outfit', 'Noto Sans SC', -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif;
@@ -95,13 +115,13 @@ h1, h2, h3 {
 
 /* ============================================
    静态背景层
-   只保留网格点阵与暖色渐变，不再随页面持续动画——
+   只保留网格点阵与浅暖白渐变，不再随页面持续动画——
    工具界面上持续的位移/重绘只会拖慢交互，不承载任何信息。
    ============================================ */
 .bg-grid {
     position: fixed;
     inset: 0;
-    background-image: radial-gradient(rgba(92, 72, 28, 0.05) 1px, transparent 1px);
+    background-image: radial-gradient(rgba(84, 82, 78, 0.05) 1px, transparent 1px);
     background-size: 26px 26px;
     z-index: -3;
     opacity: 0.55;
@@ -113,10 +133,10 @@ h1, h2, h3 {
     position: fixed;
     inset: 0;
     background:
-        radial-gradient(52% 42% at 12% 8%, rgba(184, 137, 45, 0.14) 0%, transparent 62%),
-        radial-gradient(46% 40% at 88% 0%, rgba(63, 125, 110, 0.10) 0%, transparent 60%),
-        radial-gradient(60% 50% at 50% 110%, rgba(184, 137, 45, 0.10) 0%, transparent 64%),
-        linear-gradient(180deg, #faf6e8 0%, #f6f0dc 100%);
+        radial-gradient(52% 42% at 12% 8%, rgba(111, 108, 103, 0.06) 0%, transparent 62%),
+        radial-gradient(46% 40% at 88% 0%, rgba(63, 125, 110, 0.07) 0%, transparent 60%),
+        radial-gradient(60% 50% at 50% 110%, rgba(111, 108, 103, 0.05) 0%, transparent 64%),
+        linear-gradient(180deg, #f7f6f3 0%, #f4f3f0 100%);
     z-index: -2;
     contain: layout paint;
 }
@@ -135,8 +155,8 @@ h1, h2, h3 {
     align-items: center;
     gap: 8px;
     padding: 10px 20px;
-    background: #b8892d;
-    color: #fffdf6;
+    background: var(--action-primary);
+    color: #fcfaf8;
     border: none;
     border-radius: var(--radius-md);
     font-size: calc(14px * var(--app-font-ratio));
@@ -144,13 +164,13 @@ h1, h2, h3 {
     cursor: pointer;
     transition: background-color 0.2s ease, box-shadow 0.2s ease,
         transform var(--dur-press) var(--ease-out);
-    box-shadow: 0 2px 8px rgba(184, 137, 45, 0.28);
+    box-shadow: var(--shadow-sm);
     font-family: inherit;
 }
 
 .btn-primary:hover {
     transform: translateY(-1px);
-    box-shadow: 0 6px 16px rgba(184, 137, 45, 0.36);
+    box-shadow: 0 6px 16px rgba(111, 108, 103, 0.36);
     filter: brightness(1.05);
 }
 

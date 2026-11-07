@@ -10,8 +10,10 @@ import ConfirmDialog from '../components/ConfirmDialog'
 
 export default function KnowledgeBaseHistory({
   onOpenKnowledgeBase,
+  onAddMaterials,
 }: {
   onOpenKnowledgeBase: (knowledgeBaseId: string) => void
+  onAddMaterials: () => void
 }) {
   const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBaseSummary[]>([])
   const [loading, setLoading] = useState(true)
@@ -158,7 +160,10 @@ export default function KnowledgeBaseHistory({
             <tbody>
               {!loading && knowledgeBases.length === 0 && (
                 <tr>
-                  <td colSpan={6} className="kb-empty-row">暂无知识库，可从“知识库更新”中创建</td>
+                  <td colSpan={6} className="kb-empty-row">
+                    <p>还没有知识库，先添加需要反复参考的资料。</p>
+                    <button type="button" className="api-btn" onClick={onAddMaterials}>添加资料</button>
+                  </td>
                 </tr>
               )}
               {knowledgeBases.map((base) => (

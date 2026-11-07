@@ -10,6 +10,8 @@ type ModalLayer = {
   onEscape: () => void
   /** 该层的 DOM 容器；提供时 Tab 焦点被限制在容器内部循环 */
   container?: HTMLElement | null
+  /** 注册时的外部焦点，最上层关闭后恢复到仍存在的触发控件。 */
+  returnFocus: HTMLElement | null
 }
 
 const layers: ModalLayer[] = []
@@ -26,6 +28,19 @@ const FOCUSABLE_SELECTOR = [
   'textarea:not([disabled])',
   '[tabindex]:not([tabindex="-1"])',
 ].join(',')
+
+/** 在弹窗挂载完成后选择初始焦点；空弹窗由容器自身承接。 */
+function focusLayer(container: HTMLElement) {
+  const focusables = Array.from(container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR))
+    .filter((element) => element.getClientRects().length > 0)
+  const first = focusables.find((element) => element.hasAttribute('data-modal-initial-focus')) ?? focusables[0]
+  if (first) {
+    first.focus()
+  } else {
+    container.tabIndex = -1
+    container.focus()
+  }
+}
 
 /**
  * 把 Tab 焦点限制在当前最上层弹窗内部。
@@ -69,6 +84,7 @@ function handleKeyDown(event: KeyboardEvent) {
   const layer = layers[layers.length - 1]
 
   if (event.key === 'Escape') {
+    event.preventDefault()
     layer.onEscape()
     return
   }
@@ -124,14 +140,35 @@ export function pushModalLayer(
   onEscape: () => void,
   container?: HTMLElement | null,
 ): () => void {
-  const layer: ModalLayer = { onEscape, container }
+  const active = document.activeElement as HTMLElement | null
+  const layer: ModalLayer = {
+    onEscape,
+    container,
+    returnFocus: active && !container?.contains(active) ? active : null,
+  }
   layers.push(layer)
   syncDom()
+  // 等同一轮 React 挂载和 inert 更新完成，避免聚焦到尚未就绪的容器。
+  queueMicrotask(() => {
+    if (container && container.isConnected !== false && layers[layers.length - 1] === layer) {
+      focusLayer(container)
+    }
+  })
 
   return () => {
     const index = layers.indexOf(layer)
     if (index === -1) return
+    const wasTop = index === layers.length - 1
     layers.splice(index, 1)
     syncDom()
+    if (!wasTop) return
+    const parent = layers[layers.length - 1]?.container
+    const target = layer.returnFocus
+    if (target && target.isConnected !== false && typeof target.focus === 'function'
+      && (!parent || parent.contains(target))) {
+      target.focus()
+    } else if (parent) {
+      focusLayer(parent)
+    }
   }
 }

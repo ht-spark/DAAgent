@@ -2,6 +2,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import os
+import shutil
+import subprocess
+import sys
 
 import pytest
 
@@ -158,7 +163,7 @@ def test_select_folder_endpoint_returns_path(tmp_path, monkeypatch):
 
 
 def test_native_folder_dialog_uses_windows_picker(tmp_path, monkeypatch):
-    """Windows 应使用独立 Shell 选择器，避免 tkinter 工作线程弹窗失败。"""
+    """Windows 应使用独立原生选择器，避免 tkinter 工作线程弹窗失败。"""
     monkeypatch.setattr(main.sys, "platform", "win32")
     monkeypatch.setattr(
         main,
@@ -189,6 +194,72 @@ def test_windows_folder_dialog_passes_initial_directory(tmp_path, monkeypatch):
     assert selected == str(tmp_path.resolve())
     assert "-STA" in captured["command"]
     assert captured["environment"]["DAAGENT_INITIAL_FOLDER"] == str(tmp_path)
+
+
+@pytest.mark.skipif(
+    sys.platform != "win32" or shutil.which("powershell.exe") is None,
+    reason="需要 Windows PowerShell 执行原生选择器脚本",
+)
+@pytest.mark.parametrize("initial_exists,cancel", [(True, False), (False, False), (True, True)])
+def test_windows_picker_can_leave_initial_folder(tmp_path, initial_exists, cancel):
+    """执行真实脚本并替换弹窗，验证初始目录不限制盘符浏览且取消仍有效。"""
+    initial = tmp_path / "初始目录's [项目]"
+    if initial_exists:
+        initial.mkdir()
+    environment = os.environ.copy()
+    environment["DAAGENT_INITIAL_FOLDER"] = str(initial)
+    environment["DAAGENT_TEST_CANCEL"] = str(int(cancel))
+    # 仅替换交互窗口，实际执行生产脚本的初始化、结果读取与资源释放。
+    harness = r"""
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Windows.Forms
+function New-Object {
+    param([string]$TypeName)
+    if ($TypeName -ne 'System.Windows.Forms.FolderBrowserDialog') {
+        throw '选择器类型不符合预期'
+    }
+    $script:dialog = [pscustomobject]@{
+        RootFolder = [Environment+SpecialFolder]::MyComputer
+        SelectedPath = ''
+        Description = ''
+        ShowNewFolderButton = $false
+        Disposed = $false
+        InitialPath = ''
+    }
+    $script:dialog | Add-Member ScriptMethod ShowDialog {
+        $this.InitialPath = $this.SelectedPath
+        $this.SelectedPath = 'Z:\其他盘\项目'
+        if ($env:DAAGENT_TEST_CANCEL -eq '1') {
+            return [System.Windows.Forms.DialogResult]::Cancel
+        }
+        return [System.Windows.Forms.DialogResult]::OK
+    }
+    $script:dialog | Add-Member ScriptMethod Dispose { $this.Disposed = $true }
+    return $script:dialog
+}
+"""
+    result = subprocess.run(
+        [
+            "powershell.exe", "-NoProfile", "-STA", "-Command",
+            harness + main._WINDOWS_FOLDER_DIALOG_SCRIPT
+            + "\n[Console]::Error.Write(($script:dialog | ConvertTo-Json -Compress))",
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env=environment,
+        timeout=30,
+        check=False,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+
+    assert result.returncode == 0, result.stderr
+    state = json.loads(result.stderr)
+    assert state["RootFolder"] == 0  # 桌面是整个 Shell 命名空间根，可浏览所有盘符。
+    assert state["InitialPath"] == (str(initial) if initial_exists else "")
+    assert state["ShowNewFolderButton"] is True
+    assert state["Disposed"] is True
+    assert result.stdout == ("" if cancel else "Z:\\其他盘\\项目")
 
 
 def test_select_folder_endpoint_cancel_returns_null(monkeypatch):

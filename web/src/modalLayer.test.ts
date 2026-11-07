@@ -68,6 +68,9 @@ function installDom() {
 
 type FakeFocusable = {
   focused: boolean
+  isConnected: boolean
+  initialFocus: boolean
+  hasAttribute: (name: string) => boolean
   getClientRects: () => unknown[]
   focus: () => void
 }
@@ -77,13 +80,18 @@ function makeContainer(count: number) {
   const els: FakeFocusable[] = []
   const container = {
     els,
+    isConnected: true,
+    tabIndex: -1,
     querySelectorAll: () => els,
     contains: (target: unknown) => els.includes(target as FakeFocusable),
-    focus() {},
+    focus() { (globalThis as { document?: { activeElement?: unknown } }).document!.activeElement = container },
   }
   for (let i = 0; i < count; i += 1) {
     const el: FakeFocusable = {
       focused: false,
+      isConnected: true,
+      initialFocus: false,
+      hasAttribute: (name: string) => name === 'data-modal-initial-focus' && el.initialFocus,
       // 可见性判定用 getClientRects().length，返回非空即视为可见
       getClientRects: () => [{}],
       focus() {
@@ -215,4 +223,73 @@ test('未提供容器的弹窗不拦截 Tab', () => {
   assert.equal(event.prevented, false)
 
   pop()
+})
+
+test('打开弹窗后聚焦可见控件，关闭后返回触发按钮', async () => {
+  const dom = installDom()
+  const trigger = makeContainer(1).els[0]
+  trigger.focus()
+  const dialog = makeContainer(2)
+  const pop = pushModalLayer(() => {}, dialog as unknown as HTMLElement)
+
+  await Promise.resolve()
+  assert.equal(dom.doc.activeElement, dialog.els[0])
+  pop()
+  assert.equal(dom.doc.activeElement, trigger)
+})
+
+test('指定初始控件不会提前抢走触发器，关闭后仍能恢复焦点', async () => {
+  const dom = installDom()
+  const trigger = makeContainer(1).els[0]
+  trigger.focus()
+  const dialog = makeContainer(2)
+  dialog.els[1].initialFocus = true
+  const pop = pushModalLayer(() => {}, dialog as unknown as HTMLElement)
+  await Promise.resolve()
+  assert.equal(dom.doc.activeElement, dialog.els[1])
+  pop()
+  assert.equal(dom.doc.activeElement, trigger)
+})
+
+test('嵌套弹窗关闭后返回父层控件，最后返回页面触发器', async () => {
+  const dom = installDom()
+  const trigger = makeContainer(1).els[0]
+  trigger.focus()
+  const lower = makeContainer(2)
+  const popLower = pushModalLayer(() => {}, lower as unknown as HTMLElement)
+  await Promise.resolve()
+  lower.els[1].focus()
+  const upper = makeContainer(1)
+  const popUpper = pushModalLayer(() => {}, upper as unknown as HTMLElement)
+  await Promise.resolve()
+
+  popUpper()
+  assert.equal(dom.doc.activeElement, lower.els[1])
+  popLower()
+  assert.equal(dom.doc.activeElement, trigger)
+})
+
+test('提前关闭的弹窗不会在微任务中抢焦点', async () => {
+  const dom = installDom()
+  const trigger = makeContainer(1).els[0]
+  trigger.focus()
+  const dialog = makeContainer(1)
+  const pop = pushModalLayer(() => {}, dialog as unknown as HTMLElement)
+  pop()
+  await Promise.resolve()
+
+  assert.equal(dom.doc.activeElement, trigger)
+})
+
+test('空弹窗可获得焦点，触发器已移除时不会聚焦失效节点', async () => {
+  const dom = installDom()
+  const trigger = makeContainer(1).els[0]
+  trigger.focus()
+  const dialog = makeContainer(0)
+  const pop = pushModalLayer(() => {}, dialog as unknown as HTMLElement)
+  await Promise.resolve()
+  assert.equal(dom.doc.activeElement, dialog)
+  trigger.isConnected = false
+  pop()
+  assert.notEqual(dom.doc.activeElement, trigger)
 })

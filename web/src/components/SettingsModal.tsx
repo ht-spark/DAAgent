@@ -107,6 +107,7 @@ export default function SettingsModal({ open, onClose }: Props) {
           <input
             className="settings-search"
             type="search"
+            aria-label="搜索设置"
             placeholder={SEARCH_PLACEHOLDER}
             value={query}
             onChange={(e) => setQuery(e.target.value)}
@@ -117,6 +118,7 @@ export default function SettingsModal({ open, onClose }: Props) {
               <button
                 type="button"
                 className={`settings-nav-item ${tab === 'general' ? 'active' : ''}`}
+                aria-current={tab === 'general' ? 'page' : undefined}
                 onClick={() => selectTab('general')}
               >
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" aria-hidden="true">
@@ -132,6 +134,7 @@ export default function SettingsModal({ open, onClose }: Props) {
               <button
                 type="button"
                 className={`settings-nav-item ${tab === 'api' ? 'active' : ''}`}
+                aria-current={tab === 'api' ? 'page' : undefined}
                 onClick={() => selectTab('api')}
               >
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" aria-hidden="true">
@@ -153,7 +156,7 @@ export default function SettingsModal({ open, onClose }: Props) {
               </header>
 
               <section className="settings-section">
-                <h3 className="settings-section-title">常规</h3>
+                <h3 className="settings-section-title">界面与运行偏好</h3>
                 <div className="settings-card">
                   {showFontSize && (
                     <div className="settings-row">

@@ -6,14 +6,15 @@
 
 ### Project Objectives and Functions
 
-    **Objective**: This is an intelligent agent for mathematical modeling, aiming to implement task-oriented automated mathematical modeling.
+**Objective**: DAAgent is a task-oriented data analysis agent. It helps users answer questions, understand data, and produce evidence-grounded conclusions and actionable insights.
 
-    **Functions**: Based on problems submitted by users and attached documents, it completes the full workflow automatically — including modeling, execution, and generation of final deliverable reports.
+**Functions**: Based on user questions, data, attached documents, and project context, the agent autonomously plans and executes the analysis needed for the task. It can inspect and process data, perform calculations, create visualizations, retrieve supporting information, and deliver conclusions, code, files, or reports as appropriate. Mathematical modeling is one available tool, used only when it serves the analysis objective; it is not a required stage or the product's primary focus.
 
 ### Core Project Settings
 
-1. The agent is designed for general mathematical modeling tasks. All proposed optimizations or error corrections must take generality into consideration; localized modifications tailored only to one specific problem are prohibited.
-2. The core capability of this agent lies in modeling, and the essence of modeling is constructing accurate and reasonable models. The entire modeling workflow of this agent adopts an **LLM-only strategy**. No predefined methodologies are imposed, nor are problems rigidly categorized to apply fixed sets of methods. Driven by LLMs, the agent focuses on modeling centered on the problem itself and conducts targeted analysis for each individual case.
+1. The agent serves general data analysis tasks. All proposed optimizations or error corrections must take generality into consideration; localized modifications tailored only to one specific problem are prohibited.
+2. The core capability is understanding the user's analysis objective, planning an appropriate analysis path, obtaining evidence through tools, and communicating reliable findings. The analysis workflow adopts an **LLM-only decision-making strategy**: no predefined methodologies are imposed, and problems are not rigidly categorized to apply fixed sets of methods. The LLM decides which tools to use and how to proceed based on the task, available data, and observed results; calculations and factual evidence must come from actual tool execution rather than unsupported model assertions.
+3. Mathematical modeling is an optional tool within the unified data analysis agent, alongside data inspection, code execution, visualization, retrieval, and file operations. Do not treat it as the agent's central capability, a mandatory workflow, or a separate product line. Product copy, frontend entry points, prompts, and architecture descriptions must emphasize data analysis tasks and represent modeling only within its actual supported scope.
 
 ## Coding Style & Naming Conventions
 

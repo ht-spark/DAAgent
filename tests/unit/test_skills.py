@@ -63,12 +63,12 @@ def test_registry_and_runtime(tmp_path: Path) -> None:
         operation="run_script",
         skill_id="demo-skill",
         entrypoint_id="echo",
-        arguments={"value": 7},
+        arguments={"value": 7, "label": "中文材料"},
     ))
 
     assert registry.discover()[0].skill_id == "demo-skill"
     assert reference.result["content"] == "规则正文"
-    assert script.result["result"] == {"value": 7}
+    assert script.result["result"] == {"value": 7, "label": "中文材料"}
 
 
 def test_registry_rejects_path_traversal(tmp_path: Path) -> None:

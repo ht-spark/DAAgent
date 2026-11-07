@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 
-import { deleteSkill, importSkill, listSkills, skillExportUrl, type SkillInfo } from '../api'
+import { deleteSkill, importSkill, listSkills, skillExportUrl, type SkillInfo, type SkillSource } from '../api'
 import ConfirmDialog from '../components/ConfirmDialog'
+import MoreActions from '../components/MoreActions'
 import { pushModalLayer } from '../modalLayer'
 
 /** 管理项目目录中已安装的文件化 Skill。 */
@@ -9,6 +10,7 @@ export default function Skills() {
   const [skills, setSkills] = useState<SkillInfo[]>([])
   const [loading, setLoading] = useState(true)
   const [uploading, setUploading] = useState(false)
+  const [activeTab, setActiveTab] = useState<SkillSource>('system')
   const [error, setError] = useState('')
   // 详情弹窗当前展示的技能，null 表示弹窗关闭
   const [detailSkill, setDetailSkill] = useState<SkillInfo | null>(null)
@@ -49,7 +51,7 @@ export default function Skills() {
 
   /** 用户确认删除后调用后端卸载，成功则同步关闭详情与确认框。 */
   async function confirmDelete() {
-    if (!pendingDelete || deleting) return
+    if (!pendingDelete || pendingDelete.source !== 'personal' || deleting) return
     setDeleting(true)
     setError('')
     try {
@@ -69,16 +71,16 @@ export default function Skills() {
       <div className="page-head modeling-tasks-head">
         <div>
           <h1 className="page-title">技能</h1>
-          <p className="page-sub">查看、导入和删除可由用户手动加载的分析技能，通过「查看详情」查阅技能声明。</p>
+          <p className="page-sub">为分析任务添加可复用的能力，查看每项技能的用途与使用说明。</p>
         </div>
-        <button
+        {activeTab === 'personal' && (loading || skills.some((skill) => skill.source === 'personal')) && <button
           type="button"
           className="skills-upload-button"
           disabled={uploading}
           onClick={() => inputRef.current?.click()}
         >
-          {uploading ? '正在导入…' : '上传 Skill'}
-        </button>
+          {uploading ? '正在上传…' : '上传个人技能'}
+        </button>}
         <input
           ref={inputRef}
           hidden
@@ -91,22 +93,57 @@ export default function Skills() {
         />
       </div>
 
-      {error && <p className="skills-error">{error}</p>}
+      <div className="skills-tabs" role="tablist" aria-label="技能来源">
+        {(['system', 'personal'] as const).map((source) => (
+          <button
+            key={source}
+            id={`skills-tab-${source}`}
+            type="button"
+            role="tab"
+            className="skills-tab"
+            aria-selected={activeTab === source}
+            aria-controls={`skills-panel-${source}`}
+            tabIndex={activeTab === source ? 0 : -1}
+            onClick={() => setActiveTab(source)}
+            onKeyDown={(event) => {
+              if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
+              event.preventDefault()
+              const next = event.key === 'Home' ? 'system' : event.key === 'End' ? 'personal' : source === 'system' ? 'personal' : 'system'
+              setActiveTab(next)
+              document.getElementById(`skills-tab-${next}`)?.focus()
+            }}
+          >
+            {source === 'system' ? '系统' : '个人'}
+            {!loading && <span className="skills-tab-count">{skills.filter((skill) => skill.source === source).length}</span>}
+          </button>
+        ))}
+      </div>
+      {error && <p className="skills-error" role="alert">{error}</p>}
+      {(['system', 'personal'] as const).map((source) => (
+        <section key={source} id={`skills-panel-${source}`} role="tabpanel" aria-labelledby={`skills-tab-${source}`} hidden={activeTab !== source} tabIndex={0}>
+        <p className="skills-panel-description">{source === 'system' ? '平台内置的基础能力，由系统统一维护。' : '上传自己的技能，为数据分析任务扩展能力。支持包含 SKILL.md 的 ZIP 包。'}</p>
       {loading ? (
         <p className="skills-empty">正在读取已安装技能…</p>
-      ) : skills.length === 0 ? (
+      ) : skills.filter((skill) => skill.source === source).length === 0 ? (
         <div className="skills-empty">
-          <strong>还没有安装 Skill</strong>
-          <span>上传包含 SKILL.md 的 ZIP 包后，它会安装到 data_analysis/skills。</span>
+          <strong>{source === 'system' ? '暂无系统技能' : '还没有个人技能'}</strong>
+          <span>{source === 'system' ? '系统技能加载后会显示在这里。' : '上传后，即可在分析任务中选择使用。'}</span>
+          {source === 'personal' && <button type="button" className="skills-upload-button" disabled={uploading} onClick={() => inputRef.current?.click()}>{uploading ? '正在上传…' : '上传个人技能'}</button>}
         </div>
       ) : (
-        // 矩形小卡片：卡片内只展示技能名称，操作收进「查看详情 / 删除」按钮
+        // 先展示能力说明，次要管理操作收进菜单。
         <ul className="skills-grid">
-          {skills.map((skill) => (
+          {skills.filter((skill) => skill.source === source).map((skill) => (
             <li className="skill-card" key={skill.skill_id}>
               <span className="skill-card-name" title={skill.name}>
                 {skill.name}
               </span>
+              <p className="skill-card-description" title={skill.description}>{skill.description || '查看详情了解这项技能的用途与使用要求。'}</p>
+              <div className="skill-card-meta" aria-label="技能资源">
+                <span>{skill.references.length} 份参考资料</span>
+                <span>{skill.assets.length} 个附件</span>
+                <span>{skill.scripts.length} 个脚本</span>
+              </div>
               <span className="skill-card-actions">
                 <button
                   type="button"
@@ -115,31 +152,27 @@ export default function Skills() {
                 >
                   查看详情
                 </button>
-                <button
-                  type="button"
-                  className="skill-action is-danger"
-                  onClick={() => setPendingDelete(skill)}
-                >
-                  删除
-                </button>
+                {source === 'system' ? <span className="skill-system-label">系统内置</span> : <MoreActions label={skill.name} actions={[{ label: '删除技能', danger: true, onSelect: () => setPendingDelete(skill) }]} />}
               </span>
             </li>
           ))}
         </ul>
       )}
+        </section>
+      ))}
 
       {detailSkill ? (
         <SkillDetailDialog
           skill={detailSkill}
           onClose={() => setDetailSkill(null)}
-          onRequestDelete={() => setPendingDelete(detailSkill)}
+          onRequestDelete={detailSkill.source === 'personal' ? () => setPendingDelete(detailSkill) : undefined}
         />
       ) : null}
 
       <ConfirmDialog
         open={pendingDelete !== null}
         title={`删除技能「${pendingDelete?.name ?? ''}」`}
-        description="删除后该技能目录会从 data_analysis/skills 中移除，后续任务将无法再加载它；重新上传对应 ZIP 包即可恢复。"
+        description="删除后，后续任务将无法再使用这项个人技能。重新上传对应 ZIP 包即可恢复。"
         detail={
           pendingDelete
             ? `技能标识 ${pendingDelete.skill_id} · 版本 ${pendingDelete.bundle_hash.slice(0, 12)}`
@@ -235,7 +268,7 @@ export function SkillDetailDialog({
           >
             导出 ZIP
           </a>
-          {onRequestDelete ? (
+          {onRequestDelete && skill.source === 'personal' ? (
             <button type="button" className="confirm-ok is-danger" onClick={onRequestDelete}>
               删除技能
             </button>

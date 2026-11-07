@@ -39,7 +39,7 @@ DAAgent 是一个以 LLM 为决策核心、以受限工具为执行边界的任�
 
 ```text
 ┌──────────────────────────── React + Vite（web/）────────────────────────────┐
-│ Agent 对话 │ 项目工作区 │ 知识库 │ 文档转换 │ 设置 │ 产物与会话历史          │
+│ Agent 对话 │ 项目工作区 │ 知识库 │ 设置 │ 产物与会话历史                    │
 └─────────────────────────────────────┬───────────────────────────────────────┘
                                       │ HTTP + NDJSON 流
 ┌───────────────────────────── FastAPI（server/）─────────────────────────────┐
@@ -136,7 +136,8 @@ DAAgent 是一个以 LLM 为决策核心、以受限工具为执行边界的任�
 | 数学建模   | `explore_math_models`                                                            | 对授权表格进行两两函数关系发现，并可对指定目标列做多元线性拟合；返回公式、系数、R²、RMSE、特征重要性、结构结论与适用约束。 |
 | 动态分析   | `execute_python`                                                                 | 运行时注入`DATA_FILES`、`DATA_FILE_MAP`、`OUTPUT_DIR`、`ARTIFACTS`；模型将结构化结论写入全局 `result` 回传。      |
 | 产物复核   | `write_artifact`、`inspect_artifact`、`inspect_generated_image`              | 产物仅能写入会话输出目录；支持 Markdown、DOCX、CSV、XLSX、JSON 与代码等格式。                                               |
-| 附件与项目 | 读附件、映射并原位编辑项目原文件、文档转 Markdown、按范围读/搜索/写入/编辑项目文件 | 浏览器上传副本只用于读取；附件编辑必须映射到内容一致的项目原文件并直接修改，无法确认原文件时拒绝执行。                      |
+| 附件与项目 | 读附件、映射并原位编辑项目原文件、按范围读/搜索/写入/编辑项目文件 | 浏览器上传副本只用于读取；附件编辑必须映射到内容一致的项目原文件并直接修改，无法确认原文件时拒绝执行。                      |
+| 文档转换技能 | `markitdown` Skill 的 `convert-markdown` 脚本入口 | 加载技能后通过 SkillRuntime 转换本轮授权附件，按行读取并将完整 Markdown 登记为产物；不再注册独立的 `markitdown` 普通工具。底层转换层继续供附件处理和知识库流程复用。 |
 | 项目终端   | `run_terminal_command`                                                           | Pi 风格的一次调用一个独立 Shell；常规设置可固定选择 PowerShell、Bash 或 Git Bash。每次调用在前端获得一次性人工批准后才可执行，并回传合并输出及文件变更审计。 |
 | 外部资料   | `search_knowledge_base`、`search_web`                                          | 知识库仅查用户选择的库；联网来源随工具结果返回。                                                                            |
 
@@ -249,12 +250,13 @@ search_knowledge_base(query)
 | ------------------------------------------------ | ------------------------------------------------------------ |
 | `web/src/pages/NewChat.tsx`                    | Agent 对话、附件、工具轨迹、知识库来源、产物和项目文件预览。 |
 | `web/src/pages/KnowledgeBase*.tsx`             | 知识库、资料上传、转换、分块嵌入和处理状态。                 |
-| `web/src/pages/DocConverter.tsx`               | 通用文档转换及历史记录。                                     |
 | `web/src/components/Sidebar.tsx`               | 项目、会话与页面导航。                                       |
 | `web/src/components/CommandApprovalDialog.tsx` | 展示待执行终端命令、Shell 和超时，要求用户明确批准或拒绝。  |
 | `web/src/api.ts`                               | API 客户端、NDJSON 事件解析、流式重连与前端数据类型。        |
 
 任何仍直接面向旧 `scr/` 数学建模运行的页面、API 类型或任务面板都属于迁移删除范围，不应作为统一 Agent 前端的长期契约。
+
+文档转换不设独立转换页面或专用 HTTP 接口。用户在技能页查看 `markitdown`，并在聊天中加载该技能或通过专家装配启用；模型通过 SkillRuntime 调用 `convert-markdown` 脚本，把本轮授权的 PDF、Word、PPT、Excel 等附件转为 Markdown。完整文件写入 `skill-artifacts/markitdown/` 并登记为产物，分页结果使用行号与行内字符偏移续读，避免超长行被截断后跳过余文。确定性转换层 `server/document_tools.py` 继续复用，不再将 `markitdown` 注册为普通 Agent 工具。
 
 ## 8. 外部依赖与配置
 

@@ -9,7 +9,7 @@ export default function KnowledgeBaseHub({ onUpdate, onHistory }: Props) {
       <div className="page-head modeling-tasks-head">
         <div>
           <h1 className="page-title">知识库维护</h1>
-          <p className="page-sub">上传任务与历史文件记录分开：更新页只做本次上传，详细记录见统计。</p>
+          <p className="page-sub">归集参考资料，在分析任务中检索、引用和复用。</p>
         </div>
       </div>
 
@@ -17,8 +17,8 @@ export default function KnowledgeBaseHub({ onUpdate, onHistory }: Props) {
         <button className="modeling-task-card" onClick={onUpdate}>
           <span className="modeling-task-icon" aria-hidden="true">＋</span>
           <span className="modeling-task-copy">
-            <strong>知识库更新</strong>
-            <span>完成一次上传与转换任务，打开时列表为空。</span>
+            <strong>添加资料</strong>
+            <span>创建知识库，上传文档并转换为可检索的参考资料。</span>
           </span>
           <span className="modeling-task-arrow" aria-hidden="true">→</span>
         </button>
@@ -26,8 +26,8 @@ export default function KnowledgeBaseHub({ onUpdate, onHistory }: Props) {
         <button className="modeling-task-card" onClick={onHistory}>
           <span className="modeling-task-icon" aria-hidden="true">◷</span>
           <span className="modeling-task-copy">
-            <strong>知识库统计</strong>
-            <span>查看各知识库的详细文件记录，并管理知识库。</span>
+            <strong>管理资料</strong>
+            <span>查看已收录文档、处理状态与知识库统计。</span>
           </span>
           <span className="modeling-task-arrow" aria-hidden="true">→</span>
         </button>

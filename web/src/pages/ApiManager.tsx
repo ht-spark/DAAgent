@@ -323,7 +323,7 @@ export default function ApiManager({
                   value={editing.name ?? ''}
                   onChange={(e) => setEditing({ ...editing, name: e.target.value })}
                   placeholder="例如：DeepSeek 个人 / OpenAI 官方"
-                  autoFocus
+                  data-modal-initial-focus
                 />
               </div>
 

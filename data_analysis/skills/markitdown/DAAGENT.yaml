@@ -1,0 +1,14 @@
+version: 1
+scripts:
+  - id: convert-markdown
+    path: scripts/convert.py
+    description: 将本轮授权的非文本附件转换为 Markdown，返回分页内容和完整产物；参数为 file_path、offset、limit 和 char_offset。
+    runtime: python
+    # 每次转换或续读最多等待 120 秒，防止损坏或复杂文档长期占用子进程。
+    timeout_seconds: 120
+    requires_approval: true
+    permissions:
+      read_data_files: true
+      read_assets: []
+      write_artifacts: true
+      network: false

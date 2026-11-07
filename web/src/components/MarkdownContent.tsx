@@ -63,12 +63,12 @@ function MermaidDiagram({ code }: { code: string }) {
             securityLevel: 'strict',
             theme: 'base',
             themeVariables: {
-              primaryColor: '#f4ead1',
-              primaryTextColor: '#2a2416',
-              primaryBorderColor: '#b8892d',
-              lineColor: '#776744',
-              secondaryColor: '#f8f3e4',
-              tertiaryColor: '#fffdf8',
+              primaryColor: '#f3f2ef',
+              primaryTextColor: '#2b2a28',
+              primaryBorderColor: '#6f6c67',
+              lineColor: '#6f6e69',
+              secondaryColor: '#f6f5f2',
+              tertiaryColor: '#fdfcfa',
               fontFamily: 'Microsoft YaHei, PingFang SC, Inter, sans-serif',
               fontSize: '16px',
             },
@@ -164,7 +164,7 @@ function MermaidFullscreen({ svg, onClose }: { svg: string; onClose: () => void 
             <strong>流程图预览</strong>
             <span>按 Esc 退出全屏</span>
           </div>
-          <button type="button" onClick={onClose} aria-label="关闭全屏预览" autoFocus>
+          <button type="button" onClick={onClose} aria-label="关闭全屏预览" data-modal-initial-focus>
             <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
               <path d="M6 6l12 12M18 6 6 18" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
             </svg>

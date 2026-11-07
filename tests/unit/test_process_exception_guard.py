@@ -44,7 +44,7 @@ class TestProcessLevelExceptionGuard:
         client.post("/api/knowledge/chunk-embed", json={"window_size": 5})
 
         # 无关请求仍应正常返回
-        assert client.get("/api/documents/history").status_code == 200
+        assert client.get("/api/settings/general").status_code == 200
 
     def test_regular_exception_still_propagates(self, monkeypatch):
         """普通异常不应被该守卫吞掉：仍按原有 400 语义返回。"""

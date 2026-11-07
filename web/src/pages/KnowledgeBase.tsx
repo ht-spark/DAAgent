@@ -11,6 +11,7 @@ import {
 } from '../api'
 import { formatKnowledgeDocumentId } from '../knowledgeDocumentId'
 import ConfirmDialog from '../components/ConfirmDialog'
+import { pushModalLayer } from '../modalLayer'
 
 const PAGE_SIZE = 10
 
@@ -26,6 +27,7 @@ export default function KnowledgeBase({
   // 本页只承载「一次上传任务」：打开时列表为空，不拉取历史文件
   const [documents, setDocuments] = useState<KnowledgeDocument[]>([])
   const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBaseSummary[]>([])
+  const [basesLoading, setBasesLoading] = useState(true)
   const [knowledgeBaseId, setKnowledgeBaseId] = useState(initialKnowledgeBaseId ?? '')
   const [currentPage, setCurrentPage] = useState(1)
   const [loading, setLoading] = useState(false)
@@ -42,9 +44,12 @@ export default function KnowledgeBase({
   const [createDescription, setCreateDescription] = useState('')
   const [creating, setCreating] = useState(false)
   const fileInput = useRef<HTMLInputElement>(null)
-  const createInputRef = useRef<HTMLInputElement>(null)
+  const createDialogRef = useRef<HTMLDivElement>(null)
+  const creatingRef = useRef(creating)
+  creatingRef.current = creating
   const uploading = uploadProgress !== null
   useEffect(() => {
+    setBasesLoading(true)
     void getKnowledgeBases()
       .then((bases) => {
         setKnowledgeBases(bases)
@@ -60,6 +65,7 @@ export default function KnowledgeBase({
       .catch((reason: unknown) => setError(
         reason instanceof Error ? reason.message : '无法读取知识库列表。',
       ))
+      .finally(() => setBasesLoading(false))
   }, [initialKnowledgeBaseId, onKnowledgeBaseIdChange])
 
   // 切换知识库时清空本次任务列表，不加载该库历史文件
@@ -72,6 +78,10 @@ export default function KnowledgeBase({
 
   const uploadFiles = useCallback(async (files: FileList | null | undefined) => {
     if (!files || files.length === 0) return
+    if (!knowledgeBaseId) {
+      setError('请先创建或选择知识库，再添加资料。')
+      return
+    }
     const fileList = Array.from(files)
     setUploadProgress({ total: fileList.length, done: 0, currentName: fileList[0].name })
     setError('')
@@ -141,21 +151,10 @@ export default function KnowledgeBase({
 
   useEffect(() => {
     if (!createOpen) return
-    const previous = document.activeElement
-    const timer = window.setTimeout(() => createInputRef.current?.focus(), 20)
-    function onKeyDown(event: KeyboardEvent) {
-      if (event.key === 'Escape') {
-        event.preventDefault()
-        closeCreateDialog()
-      }
-    }
-    window.addEventListener('keydown', onKeyDown)
-    return () => {
-      window.clearTimeout(timer)
-      window.removeEventListener('keydown', onKeyDown)
-      if (previous instanceof HTMLElement) previous.focus()
-    }
-  }, [createOpen, creating])
+    return pushModalLayer(() => {
+      if (!creatingRef.current) setCreateOpen(false)
+    }, createDialogRef.current)
+  }, [createOpen])
 
   function handleDrop(event: React.DragEvent) {
     event.preventDefault()
@@ -249,7 +248,7 @@ export default function KnowledgeBase({
       <div className="page-head">
         <div>
           <h1 className="page-title">知识库维护</h1>
-          <p className="page-sub">完成一次上传与转换任务；打开时列表为空，历史文件请到「知识库统计」查看。</p>
+          <p className="page-sub">添加参考资料，转换后用于对话检索。已收录的资料可在「知识库统计」中管理。</p>
         </div>
         <div className="kb-route-controls">
           <label>
@@ -260,8 +259,9 @@ export default function KnowledgeBase({
                 setKnowledgeBaseId(event.target.value)
                 onKnowledgeBaseIdChange?.(event.target.value)
               }}
-              disabled={uploading || converting || deleting}
+              disabled={basesLoading || knowledgeBases.length === 0 || uploading || converting || deleting}
             >
+              {knowledgeBases.length === 0 && <option value="">{basesLoading ? '正在读取…' : '尚未创建知识库'}</option>}
               {knowledgeBases.map((base) => (
                 <option key={base.id} value={base.id}>
                   {base.name} · {base.document_count} 份
@@ -280,15 +280,27 @@ export default function KnowledgeBase({
       <div className="kb-layout">
         {/* 顶部：上传文件区域（居中长条） */}
         <div className="kb-upload-section">
+          {basesLoading ? (
+            <p className="kb-first-use" role="status">正在读取知识库…</p>
+          ) : !knowledgeBaseId ? (
+            <div className="kb-first-use">
+              <h2>先为参考资料创建一个知识库</h2>
+              <p>按主题归集文档，方便在不同任务中重复检索和引用。</p>
+              <button type="button" className="skills-upload-button" onClick={openCreateDialog}>创建知识库</button>
+              <small>本次任务的临时附件也可以直接在聊天中添加。</small>
+            </div>
+          ) : (
           <div
             className={`kb-upload-zone ${dragOver ? 'kb-drag-over' : ''} ${uploading ? 'kb-uploading' : ''}`}
             onDragOver={(event) => {
               event.preventDefault()
-              setDragOver(true)
+              if (!uploading) setDragOver(true)
             }}
             onDragLeave={() => setDragOver(false)}
-            onDrop={handleDrop}
-            onClick={() => knowledgeBaseId && !uploading && fileInput.current?.click()}
+            onDrop={(event) => {
+              if (uploading) { event.preventDefault(); return }
+              handleDrop(event)
+            }}
           >
             <input
               ref={fileInput}
@@ -324,15 +336,18 @@ export default function KnowledgeBase({
                   <path d="M8 32v6a4 4 0 0 0 4 4h24a4 4 0 0 0 4-4v-6" />
                 </svg>
                 <span className="kb-upload-copy">
-                  <p className="kb-upload-text">点击或拖拽文件到此处上传</p>
+                  <p className="kb-upload-text">将参考资料拖到这里</p>
                   <p className="kb-upload-hint">支持 PDF / Word / Excel / TXT / Markdown，压缩包自动分批处理</p>
                 </span>
+                <button type="button" className="skills-upload-button kb-select-files" onClick={() => fileInput.current?.click()}>选择文件</button>
               </>
             )}
           </div>
+          )}
         </div>
 
         {/* 下方：本次任务文件列表（不展示历史） */}
+        {knowledgeBaseId && (
         <div className="kb-table-section">
           <div className="kb-table-head">
             <h2>本次上传文件</h2>
@@ -357,7 +372,7 @@ export default function KnowledgeBase({
                   <th className="kb-col-name">文件名</th>
                   <th className="kb-col-time">上传时间</th>
                   <th className="kb-col-status">上传状态</th>
-                  <th className="kb-col-unknown">is_markdown</th>
+                  <th className="kb-col-unknown">Markdown 格式</th>
                   <th className="kb-col-status">是否转换成功</th>
                 </tr>
               </thead>
@@ -453,7 +468,7 @@ export default function KnowledgeBase({
               disabled={selectedIds.size === 0 || converting}
               onClick={convertFormat}
             >
-              {converting ? '转换中…' : '转化格式'}
+              {converting ? '转换中…' : '转换格式'}
             </button>
             <button
               className="api-btn danger"
@@ -467,11 +482,13 @@ export default function KnowledgeBase({
             </button>
           </div>
         </div>
+        )}
       </div>
 
       {createOpen && (
         <div className="api-modal-mask" onClick={closeCreateDialog} role="presentation">
           <div
+            ref={createDialogRef}
             className="api-modal kb-create-modal"
             role="dialog"
             aria-modal="true"
@@ -506,7 +523,6 @@ export default function KnowledgeBase({
               <div className="field">
                 <label htmlFor="kb-create-name">知识库名称</label>
                 <input
-                  ref={createInputRef}
                   id="kb-create-name"
                   type="text"
                   value={createName}

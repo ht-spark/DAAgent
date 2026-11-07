@@ -21,12 +21,6 @@ from .attachment_tools import (
     edit_attachment_file,
     read_attachment_file,
 )
-from .markitdown import (
-    CONVERTIBLE_DOCUMENT_SUFFIXES,
-    DEFAULT_PAGE_LINES,
-    MAX_PAGE_LINES,
-    convert_attachment_to_markdown,
-)
 from .code_tools import execute_python_code
 from .project_edit_tools import (
     MAX_FILE_EDITS,
@@ -482,47 +476,6 @@ def create_agent_tool_registry(
                 edit_attachment_file,
                 context=attachment_context,
             )
-    # 非 Markdown 文档附件：先转换成 Markdown 才能阅读
-    document_attachment_paths = tuple(
-        path
-        for path in bound_paths
-        if Path(path).suffix.lower() in CONVERTIBLE_DOCUMENT_SUFFIXES
-    )
-    if document_attachment_paths:
-        registry.register(
-            ToolSpec(
-                name="markitdown",
-                description=(
-                    "把用户上传的非 Markdown 文档附件（PDF、Word、PPT、Excel、HTML、EPUB、Notebook）"
-                    "转换為 Markdown 后读取内容。附件不是 .md/.txt 而又需要看其中内容时调用它；"
-                    "纯文本与代码附件请改用 read_attachment_file。返回结果按行分页：默认读取开头，"
-                    "truncated 为 true 时用返回的 next_offset 继续读取，不要一次索取全文。"
-                    "同一附件只会真正转换一次，完整结果保存在 markdown_path，可多次分页读取。"
-                    "内容较长时应结合用户目标挑选相关段落，不要逐页念完。"
-                ),
-                parameters={
-                    "type": "object",
-                    "properties": {
-                        "file_path": {"type": "string", "minLength": 1},
-                        "offset": {"type": "integer", "minimum": 1, "default": 1},
-                        "limit": {
-                            "type": "integer",
-                            "minimum": 1,
-                            "maximum": MAX_PAGE_LINES,
-                            "default": DEFAULT_PAGE_LINES,
-                        },
-                    },
-                    "required": ["file_path"],
-                    "additionalProperties": False,
-                },
-            ),
-            convert_attachment_to_markdown,
-            context={
-                "authorized_paths": [str(path) for path in document_attachment_paths],
-                # 转换成绝对路径：工具在子进程执行，相对路径会随 cwd 落到别处
-                "converted_dir": str(Path(output_dir).expanduser().resolve() / "converted"),
-            },
-        )
     selected_base_ids = list(dict.fromkeys(
         base_id.strip()
         for base_id in knowledge_base_ids

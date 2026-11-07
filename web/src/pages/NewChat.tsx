@@ -157,8 +157,8 @@ const CLIPBOARD_IMAGE_EXTENSIONS: Record<string, string> = {
   'image/webp': 'webp',
 }
 
-/** 技能头像取色盘：与稿纸暖色主题协调的六种柔和底色 */
-const SKILL_AVATAR_COLORS = ['#5b6db4', '#4f9a90', '#b8892d', '#a45a78', '#6c8a5e', '#8c6bae']
+/** 技能头像取色盘：与浅暖白工作台协调的六种柔和底色 */
+const SKILL_AVATAR_COLORS = ['#5b6db4', '#4f9a90', '#8a8d96', '#a45a78', '#6c8a5e', '#8c6bae']
 
 /** 取技能名首字符作为头像字母（英文名统一转大写） */
 function skillAvatarLabel(name: string, fallback: string): string {
@@ -994,8 +994,8 @@ function ChatAvatar({ role }: { role: Message['role'] }) {
           <path d="m16 4.5 8.8 5.1v10.2L16 25l-8.8-5.2V9.6L16 4.5Z" stroke="currentColor" strokeWidth="1.7" strokeLinejoin="round" />
           <path d="m16 10.2 4.7 2.7v5.4L16 21l-4.7-2.7v-5.4l4.7-2.7Z" fill="currentColor" fillOpacity="0.16" stroke="currentColor" strokeWidth="1.45" strokeLinejoin="round" />
           <circle cx="16" cy="15.6" r="2.15" fill="currentColor" />
-          <circle cx="25.4" cy="7.2" r="1.8" fill="#D59A27" />
-          <path d="M25.4 3.7v1.3M25.4 9.4v1.3M21.9 7.2h1.3M27.6 7.2h1.3" stroke="#D59A27" strokeWidth="1.3" strokeLinecap="round" />
+          <circle cx="25.4" cy="7.2" r="1.8" fill="#9c9a96" />
+          <path d="M25.4 3.7v1.3M25.4 9.4v1.3M21.9 7.2h1.3M27.6 7.2h1.3" stroke="#9c9a96" strokeWidth="1.3" strokeLinecap="round" />
         </svg>
       </span>
     )
@@ -1007,7 +1007,7 @@ function ChatAvatar({ role }: { role: Message['role'] }) {
         <circle cx="16" cy="11.1" r="4.15" fill="currentColor" fillOpacity="0.16" stroke="currentColor" strokeWidth="1.65" />
         <path d="M8.1 25.7c.8-4.45 3.6-6.7 7.9-6.7s7.1 2.25 7.9 6.7" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
         <path d="M6 15.8c.15 6.4 4.1 10.2 10 10.2 3.05 0 5.55-1.02 7.25-3.05" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" opacity="0.42" />
-        <circle cx="25.3" cy="17.1" r="1.75" fill="#D59A27" />
+        <circle cx="25.3" cy="17.1" r="1.75" fill="#9c9a96" />
       </svg>
     </span>
   )
@@ -1102,6 +1102,7 @@ const ChatMessage = memo(function ChatMessage({
 type Props = {
   discussionId: string | null
   projectId: string | null
+  projectTitle?: string | null
   onDiscussionId: (id: string) => void
   resumeRunId?: string | null
   onViewResult: (runId: string) => void
@@ -1110,6 +1111,13 @@ type Props = {
   /** 跳转到「技能」管理页（「+」菜单底部“管理技能”） */
   onManageSkills?: () => void
 }
+
+// 示例只帮助表达任务目标，不预设算法；点击后填入输入框，由用户审阅再发送。
+const TASK_EXAMPLES = [
+  { title: '分析数据与异常', prompt: '我有一份数据，想了解主要规律和异常。请先确认分析目标、数据质量和必要假设，再提出合适的分析方案。' },
+  { title: '比较方案与约束', prompt: '我需要比较几个方案。请帮我梳理目标、约束和评价依据，建立合理模型，并说明结果的适用条件。' },
+  { title: '从题目开始建模', prompt: '我有一道建模题和相关资料。请先理解问题与交付要求，澄清缺失信息，再开展建模、计算和结果验证。' },
+]
 
 /** 将选中知识库收敛到真实存在的 ID：去重并过滤无效项。 */
 function clampKnowledgeBaseIds(
@@ -1125,6 +1133,7 @@ function clampKnowledgeBaseIds(
 export default function NewChat({
   discussionId,
   projectId,
+  projectTitle,
   onDiscussionId,
   resumeRunId,
   onViewResult,
@@ -1177,6 +1186,7 @@ export default function NewChat({
   const [expandedKnowledgeBaseId, setExpandedKnowledgeBaseId] = useState<string | null>(null)
   const knowledgeBasesRef = useRef<KnowledgeBaseSummary[]>([])
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const draftInputRef = useRef<HTMLTextAreaElement>(null)
   // 「+」菜单：主弹层、技能/专家飞层与「从本地添加技能」文件输入
   const addPickerRef = useRef<HTMLDetailsElement>(null)
   const skillSubRef = useRef<HTMLDetailsElement>(null)
@@ -1814,6 +1824,25 @@ export default function NewChat({
                 <div className="agent-empty-state">
                   <img className="agent-empty-logo" src="/logo.png" alt="" aria-hidden="true" />
                   <h2>今天想分析什么？</h2>
+                  <p className="agent-empty-intro">从问题和资料出发，建立模型、验证结果，整理可审阅的报告。</p>
+                  <div className="agent-task-examples" aria-label="示例任务">
+                    {TASK_EXAMPLES.map((example) => (
+                      <button
+                        key={example.title}
+                        type="button"
+                        onClick={() => {
+                          setDraft((current) => current.trim() ? `${current}\n\n${example.prompt}` : example.prompt)
+                          draftInputRef.current?.focus()
+                        }}
+                      >
+                        <span>{example.title}</span>
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                          <path d="M7 17 17 7M7 7h10v10" />
+                        </svg>
+                      </button>
+                    ))}
+                  </div>
+                  <p className="agent-empty-delivery">可从题目、数据、文档或图片开始</p>
                 </div>
               )}
               {isSubmitting
@@ -1834,6 +1863,13 @@ export default function NewChat({
           </div>
 
           <div className="rag-composer-wrap">
+            {messages.length === 0 && (
+              <div className="rag-composer-context" aria-label="当前任务资料">
+                <span className="rag-context-project" title={projectTitle ?? undefined}>{projectTitle ? `项目：${projectTitle}` : projectId ? '已关联项目' : '未关联项目'}</span>
+                <span>{files.length} 份附件</span>
+                <span>{knowledgeBaseIds.length} 个参考知识库</span>
+              </div>
+            )}
             {agentPlan && (
               // 任务卡片固定在输入框上方，可展开/收起查看完整任务列表
               <AgentTaskCard
@@ -1897,6 +1933,9 @@ export default function NewChat({
                 </div>
               )}
               <textarea
+                ref={draftInputRef}
+                aria-label="描述分析或建模任务"
+                aria-describedby="task-input-hint"
                 value={draft}
                 onChange={(event) => setDraft(event.target.value)}
                 onPaste={handlePaste}
@@ -2214,7 +2253,7 @@ export default function NewChat({
                   const activeModelLabel = activeModelConfig.model || activeModelConfig.name || '未命名模型'
                   const effectiveReasoningEffort = selectedReasoningEffort
                     ?? (isReasoningEffort(activeModelConfig.reasoningEffort) ? activeModelConfig.reasoningEffort : 'close')
-                  const activeModelDisplay = `${activeModelLabel} ${reasoningEffortLabel(effectiveReasoningEffort)}`
+                  const activeModelDisplay = `${activeModelLabel} · 思考：${reasoningEffortLabel(effectiveReasoningEffort)}`
                   const hoveredModelConfig = apiConfigs.find((config) => config.id === hoveredModelConfigId) ?? null
                   const hoveredReasoningEffort = hoveredModelConfig
                     ? (hoveredModelConfig.id === activeModelConfig.id
@@ -2325,6 +2364,7 @@ export default function NewChat({
                 </button>
               </div>
             </div>
+            <p className="rag-composer-hint" id="task-input-hint">Enter 发送 · Shift + Enter 换行。附件用于本轮任务，知识库可跨任务复用。</p>
           </div>
         </section>
 

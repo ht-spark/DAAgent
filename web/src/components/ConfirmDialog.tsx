@@ -15,7 +15,7 @@ type Props = {
   onCancel: () => void
 }
 
-/** 与 API 管理编辑弹窗同一套暖黄工作台风格的通用确认框。 */
+/** 与 API 管理编辑弹窗同一套浅暖白工作台风格的通用确认框。 */
 export default function ConfirmDialog({
   open,
   title,
@@ -70,7 +70,7 @@ export default function ConfirmDialog({
             type="button"
             className={`confirm-ok${tone === 'danger' ? ' is-danger' : ''}`}
             onClick={onConfirm}
-            autoFocus
+            data-modal-initial-focus
           >
             {confirmLabel}
           </button>

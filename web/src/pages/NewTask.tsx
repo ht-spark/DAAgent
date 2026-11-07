@@ -9,6 +9,7 @@ type Props = {
   onHistory: () => void
   discussionId: string | null
   projectId: string | null
+  projectTitle?: string | null
   onDiscussionId: (id: string) => void
   expertId?: string | null
   /** 跳转到「技能」管理页（对话「+」菜单的“管理技能”） */
@@ -21,6 +22,7 @@ export default function NewTask({
   onHistory,
   discussionId,
   projectId,
+  projectTitle,
   onDiscussionId,
   expertId,
   onManageSkills,
@@ -43,6 +45,7 @@ export default function NewTask({
     <NewChat
       discussionId={discussionId}
       projectId={projectId}
+      projectTitle={projectTitle}
       onDiscussionId={onDiscussionId}
       resumeRunId={task.step === 'progress' ? task.runId : null}
       onViewResult={(id) => setTask({ step: 'result', runId: id })}

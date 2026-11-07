@@ -55,6 +55,7 @@ from data_analysis.skills import (
     SkillRegistryError,
     SkillRuntime,
 )
+from data_analysis.skills.registry import SystemSkillError
 from data_analysis.context import (
     AttachmentText,
     compile_attachment_context,
@@ -81,7 +82,6 @@ from data_analysis.tools.terminal_tools import (
     TERMINAL_TOOL_NAMES,
 )
 from server import store
-from server import converter_store
 from server.project_workspaces import (
     ProjectWorkspaceError,
     create_project as register_project,
@@ -116,18 +116,15 @@ from KnowledgeBase.upload_file import (
     update_embedding_status,
 )
 from server.document_tools import (
-    MAX_DOCUMENT_BYTES,
     DocumentConversionError,
     supported_extensions,
     to_markdown,
-    to_markdown_from_bytes,
 )
 from server.schemas import (
     AgentCommandDecisionBody,
     BrainstormDiscussion,
     BrainstormDiscussionSummary,
     BrainstormDiscussionMessage,
-    DocumentSaveBody,
     KnowledgeDocument,
     KnowledgeBaseCreateBody,
     KnowledgeBaseSummary,
@@ -516,28 +513,30 @@ async def open_project_folder_endpoint(project_id: str) -> dict[str, bool]:
 
 
 _WINDOWS_FOLDER_DIALOG_SCRIPT = r"""
+$ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+Add-Type -AssemblyName System.Windows.Forms
 $initial = [Environment]::GetEnvironmentVariable('DAAGENT_INITIAL_FOLDER')
-if (-not $initial -or -not (Test-Path -LiteralPath $initial -PathType Container)) {
-    $initial = 0
-}
-$shell = New-Object -ComObject Shell.Application
+$dialog = New-Object System.Windows.Forms.FolderBrowserDialog
 try {
-    $folder = $shell.BrowseForFolder(0, '选择项目文件夹', 65, $initial)
-    if ($null -ne $folder) {
-        [Console]::Out.Write($folder.Self.Path)
+    $dialog.Description = '选择项目文件夹'
+    # 桌面作为浏览根保留所有盘符；起始目录仅用于定位，不能作为浏览边界。
+    $dialog.RootFolder = [Environment+SpecialFolder]::Desktop
+    $dialog.ShowNewFolderButton = $true
+    if ($initial -and (Test-Path -LiteralPath $initial -PathType Container)) {
+        $dialog.SelectedPath = $initial
+    }
+    if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+        [Console]::Out.Write($dialog.SelectedPath)
     }
 } finally {
-    if ($null -ne $folder) {
-        [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($folder)
-    }
-    [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($shell)
+    $dialog.Dispose()
 }
 """
 
 
 def _open_windows_folder_dialog(initial_dir: str | None = None) -> str | None:
-    """通过 Windows Shell COM 打开资源管理器文件夹选择器。"""
+    """通过 Windows Forms 打开可跨盘符浏览的文件夹选择器。"""
     environment = os.environ.copy()
     environment["DAAGENT_INITIAL_FOLDER"] = initial_dir or str(Path.home())
     try:
@@ -1928,6 +1927,8 @@ async def import_skill_endpoint(file: UploadFile = File(...)) -> dict[str, objec
     payload = await file.read()
     try:
         metadata = await asyncio.to_thread(_skill_registry.install_archive, payload)
+    except SystemSkillError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except SkillRegistryError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return metadata.model_dump(mode="json")
@@ -1952,6 +1953,8 @@ async def delete_skill_endpoint(skill_id: str) -> dict[str, str]:
     """卸载一个已安装 Skill，删除其在 data_analysis/skills 下的目录。"""
     try:
         await asyncio.to_thread(_skill_registry.uninstall, skill_id)
+    except SystemSkillError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except SkillRegistryError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return {"removed": skill_id}
@@ -2706,183 +2709,6 @@ async def update_brainstorm_discussion_model_endpoint(
 async def removed_legacy_runs_endpoint(legacy_path: str = "") -> None:
     """旧建模运行器已随 scr 删除；统一 Agent 使用 /api/agent/chat/stream。"""
     raise HTTPException(status_code=410, detail="旧建模接口已移除，请使用统一 Agent 对话。")
-
-
-# ---------------------------------------------------------------------------
-# 文档转换（MarkItDown）
-# ---------------------------------------------------------------------------
-# 单次请求最多转换的文件数，避免一次上传过多文件长时间占用工作线程
-MAX_CONVERT_FILES_PER_REQUEST = 20
-# 单次另存 Markdown 的字符上限，防止异常大的请求体
-MAX_SAVE_MARKDOWN_CHARS = 50_000_000
-
-
-def _safe_markdown_filename(filename: str) -> str:
-    """把用户输入的保存文件名规范化。
-
-    只保留文件名本身（去掉任何路径成分），替换 Windows 非法字符，并强制 .md 后缀，
-    避免通过文件名做目录穿越。
-
-    Args:
-        filename: 用户输入的文件名，可含或不含 .md 后缀。
-
-    Returns:
-        形如 ``报告.md`` 的安全文件名。
-
-    Raises:
-        HTTPException: 文件名为空或清洗后为空。
-    """
-    stem = Path(filename).name.strip()
-    stem = re.sub(r'[<>:"|?*\x00-\x1f]', "_", stem)
-    if stem.lower().endswith(".md"):
-        stem = stem[:-3]
-    stem = stem.strip(" .")
-    if not stem:
-        raise HTTPException(status_code=400, detail="文件名不能为空")
-    return f"{stem}.md"
-
-
-def _default_save_directory() -> str:
-    """建议的默认保存目录：优先用户「下载」目录，不存在时回退用户主目录。"""
-    downloads = Path.home() / "Downloads"
-    return str(downloads if downloads.is_dir() else Path.home())
-
-
-@app.get("/api/documents/formats")
-async def list_convertible_formats_endpoint() -> dict[str, object]:
-    """返回文档转换支持的格式、体积上限与默认保存目录，供界面提示与校验。"""
-    return {
-        "extensions": list(supported_extensions()),
-        "max_bytes": MAX_DOCUMENT_BYTES,
-        "default_save_dir": _default_save_directory(),
-    }
-
-
-@app.post("/api/documents/save")
-async def save_converted_markdown_endpoint(body: DocumentSaveBody) -> dict[str, object]:
-    """把某条转换记录另存到用户指定的本机目录。
-
-    浏览器无法指定下载路径，因此由本地后端完成落盘：目录既可手输，
-    也可先调 /api/system/select-folder 用系统原生文件夹选择框取得。
-    """
-    markdown = await asyncio.to_thread(converter_store.read_markdown, body.record_id)
-    if markdown is None:
-        raise HTTPException(status_code=404, detail="转换记录不存在，无法保存")
-    if not markdown.strip():
-        raise HTTPException(status_code=400, detail="该记录没有可保存的内容")
-
-    filename = _safe_markdown_filename(body.filename)
-    target_dir = Path(body.directory).expanduser()
-
-    if not target_dir.is_absolute():
-        raise HTTPException(status_code=400, detail="保存目录必须是绝对路径")
-    if not target_dir.is_dir():
-        raise HTTPException(status_code=400, detail=f"保存目录不存在：{target_dir}")
-
-    if len(markdown) > MAX_SAVE_MARKDOWN_CHARS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"内容过大（{len(markdown)} 字符），超过 {MAX_SAVE_MARKDOWN_CHARS} 字符上限",
-        )
-
-    target = target_dir / filename
-    try:
-        await asyncio.to_thread(target.write_text, markdown, encoding="utf-8")
-    except OSError as exc:
-        raise HTTPException(status_code=400, detail=f"写入失败：{exc}") from exc
-
-    return {
-        "saved_path": str(target),
-        "filename": filename,
-        "bytes": target.stat().st_size,
-    }
-
-
-# ---------------------------------------------------------------------------
-# 转换历史：未删除的记录会一直保留，每次打开「文档转换」页都能看到
-# ---------------------------------------------------------------------------
-
-
-@app.get("/api/documents/history")
-async def list_conversion_history_endpoint() -> dict[str, object]:
-    """按转换先后顺序返回全部转换记录（不含正文）。"""
-    records = await asyncio.to_thread(converter_store.list_records)
-    return {"records": records}
-
-
-@app.get("/api/documents/history/{record_id}/content")
-async def read_conversion_content_endpoint(record_id: int) -> PlainTextResponse:
-    """返回某条转换记录的 Markdown 正文（预览、复制时按需读取）。"""
-    markdown = await asyncio.to_thread(converter_store.read_markdown, record_id)
-    if markdown is None:
-        raise HTTPException(status_code=404, detail="转换记录不存在")
-    return PlainTextResponse(markdown)
-
-
-@app.delete("/api/documents/history/{record_id}")
-async def delete_conversion_record_endpoint(record_id: int) -> dict[str, object]:
-    """删除一条转换记录（删除后不再出现在列表里）。"""
-    deleted = await asyncio.to_thread(converter_store.delete_record, record_id)
-    if not deleted:
-        raise HTTPException(status_code=404, detail="转换记录不存在")
-    return {"deleted_id": record_id}
-
-
-@app.post("/api/documents/convert")
-async def convert_documents_to_markdown_endpoint(
-    files: list[UploadFile] = File(..., description="待转换文档（可多个）"),
-) -> dict[str, object]:
-    """把上传的文档转换为 Markdown 文本，并登记到转换历史。
-
-    独立功能，与建模流程无关：逐份转换、逐份登记记录，
-    单个文件失败不影响同一批次中的其余文件，失败原因同样入历史。
-
-    返回每条记录的元数据（不含正文）；正文按需通过
-    ``GET /api/documents/history/{record_id}/content`` 读取。
-    """
-    if not files:
-        raise HTTPException(status_code=400, detail="请至少选择一个文档")
-    if len(files) > MAX_CONVERT_FILES_PER_REQUEST:
-        raise HTTPException(
-            status_code=400,
-            detail=f"单次最多转换 {MAX_CONVERT_FILES_PER_REQUEST} 个文档",
-        )
-
-    results: list[dict[str, object]] = []
-    for upload in files:
-        filename = Path(upload.filename or "document").name
-        started = time.monotonic()
-        content = await upload.read()
-        try:
-            # 转换是 CPU 密集的同步调用，放到线程避免阻塞事件循环
-            markdown = await asyncio.to_thread(
-                to_markdown_from_bytes, content, filename
-            )
-        except (ValueError, DocumentConversionError) as exc:
-            results.append(
-                await asyncio.to_thread(
-                    converter_store.add_record,
-                    filename=filename,
-                    ok=False,
-                    size_bytes=len(content),
-                    elapsed_ms=int((time.monotonic() - started) * 1000),
-                    error=str(exc),
-                )
-            )
-            continue
-        results.append(
-            await asyncio.to_thread(
-                converter_store.add_record,
-                filename=filename,
-                ok=True,
-                char_count=len(markdown),
-                size_bytes=len(content),
-                elapsed_ms=int((time.monotonic() - started) * 1000),
-                markdown=markdown,
-            )
-        )
-
-    return {"results": results}
 
 
 # ---------------------------------------------------------------------------

@@ -18,6 +18,7 @@ import {
   type SkillInfo,
 } from '../api'
 import ConfirmDialog from '../components/ConfirmDialog'
+import MoreActions from '../components/MoreActions'
 import { pushModalLayer } from '../modalLayer'
 import { SkillDetailDialog } from './Skills'
 
@@ -35,7 +36,7 @@ type EditorState = {
   persisted: boolean
 }
 
-/** 详情弹窗展示的专家视图：已发布版本与草稿共用同一结构 */
+/** 详情弹窗展示的专家视图：已发布版本与待发布版本共用同一结构 */
 type ExpertDetailView = {
   expert: ExpertDraft
   statusLabel: string
@@ -94,7 +95,7 @@ const SECTION_STATUS_LABELS: Record<SectionStatus, string> = {
   ready: '已就绪',
 }
 
-/** 管理专家草稿、Skill 装配和发布版本。 */
+/** 管理专家待发布版本、Skill 装配和发布版本。 */
 export default function TaskExpert({
   view,
   onSelect,
@@ -107,7 +108,7 @@ export default function TaskExpert({
   const [editor, setEditor] = useState<EditorState | null>(null)
   const [pendingDelete, setPendingDelete] = useState<ExpertDraft | null>(null)
   const [pendingExpertDelete, setPendingExpertDelete] = useState<ExpertInfo | null>(null)
-  // 当前在详情弹窗中查看的专家（已发布或草稿均可查看）
+  // 当前在详情弹窗中查看的专家（已发布或待发布均可查看）
   const [viewing, setViewing] = useState<ExpertDetailView | null>(null)
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
@@ -150,7 +151,7 @@ export default function TaskExpert({
     try {
       openEditor(await createDraftFromExpert(expert.expert_id), true)
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : '无法创建专家草稿')
+      setError(reason instanceof Error ? reason.message : '无法创建待发布版本')
     } finally {
       setBusy(false)
     }
@@ -175,11 +176,11 @@ export default function TaskExpert({
         ? await updateExpertDraft(editor.draft.expert_id, editor.draft)
         : await createExpertDraft(editor.draft)
       setEditor({ draft: saved, persisted: true })
-      setNotice('草稿已保存')
+      setNotice('已保存为待发布')
       await refreshListsOnly()
       return saved
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : '保存专家草稿失败')
+      setError(reason instanceof Error ? reason.message : '保存待发布失败')
       return null
     } finally {
       setBusy(false)
@@ -232,7 +233,7 @@ export default function TaskExpert({
       if (editor?.draft.expert_id === pendingDelete.expert_id) setEditor(null)
       await refreshListsOnly()
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : '删除专家草稿失败')
+      setError(reason instanceof Error ? reason.message : '删除待发布失败')
     } finally {
       setPendingDelete(null)
       setBusy(false)
@@ -276,11 +277,11 @@ export default function TaskExpert({
       <div className="page-head modeling-tasks-head expert-page-head">
         <div className="expert-page-title-block">
           <h1 className="page-title">任务专家</h1>
-          <p className="page-sub">把业务角色、业务 SOP 和 Skills 组合成可复用的分析能力。</p>
+          <p className="page-sub">选择适合当前任务的专家，复用角色要求、工作指引与技能。</p>
           {!loading && (
             <div className="expert-page-summary" aria-label="专家配置概览">
               <span><strong>{experts.length}</strong> 个已发布版本</span>
-              <span><strong>{drafts.length}</strong> 个待编辑草稿</span>
+              <span><strong>{drafts.length}</strong> 个待发布版本</span>
             </div>
           )}
         </div>
@@ -322,19 +323,21 @@ export default function TaskExpert({
                           <span className="expert-list-status">已发布</span>
                         </div>
                       </div>
-                      <p>{expert.description}</p>
+                      <p title={expert.description}>{expert.description}</p>
                       <div className="expert-card-tags">
-                        {expert.tags.map((tag) => <span key={tag} className="expert-card-tag">{tag}</span>)}
-                        <span className="expert-card-tag is-neutral">{countBoundSkills(expert)} 个 Skill</span>
-                        <span className="expert-card-tag is-neutral">{expert.sop_stages.length} 个 SOP 阶段</span>
+                        {expert.tags.slice(0, 3).map((tag) => <span key={tag} className="expert-card-tag">{tag}</span>)}
+                        {expert.tags.length > 3 && <span className="expert-card-tag is-neutral" title={expert.tags.slice(3).join('、')}>另有 {expert.tags.length - 3} 个标签</span>}
                       </div>
+                      <div className="expert-card-meta"><span>{countBoundSkills(expert)} 项技能</span><span>{expert.sop_stages.length} 项工作指引</span><span>版本 {expert.version}</span></div>
                     </div>
                     <div className="expert-list-controls">
-                      <span className="expert-list-version">版本 {expert.version}</span>
                       <div className="expert-list-actions">
+                        <button type="button" className="is-primary" onClick={() => onSelect(expert.expert_id)} disabled={busy || !expert.enabled}>使用专家</button>
                         <button type="button" onClick={() => setViewing({ expert, statusLabel: '已发布' })}>查看</button>
-                        <button type="button" className="is-primary" onClick={() => void configureExpert(expert)} disabled={busy}>编辑</button>
-                        <button type="button" className="is-danger" onClick={() => setPendingExpertDelete(expert)}>删除</button>
+                        <MoreActions label={expert.name} actions={[
+                          { label: '编辑专家', onSelect: () => void configureExpert(expert), disabled: busy },
+                          { label: '删除专家', danger: true, onSelect: () => setPendingExpertDelete(expert), disabled: busy },
+                        ]} />
                       </div>
                     </div>
                   </li>
@@ -346,13 +349,13 @@ export default function TaskExpert({
           <section className="expert-section" aria-labelledby="draft-experts-title">
             <div className="expert-section-head">
               <div>
-                <h2 id="draft-experts-title">草稿</h2>
-                <p>草稿不会影响已发布版本，可持续调整后再发布。</p>
+                <h2 id="draft-experts-title">待发布</h2>
+                <p>待发布版本不影响线上的已发布版本，核对无误后即可发布。</p>
               </div>
               <span>{drafts.length}</span>
             </div>
             {drafts.length === 0 ? (
-              <div className="expert-empty-state">暂无待编辑草稿。</div>
+              <div className="expert-empty-state">暂无待发布的专家。</div>
             ) : (
               <ul className="expert-draft-list">
                 {drafts.map((draft) => (
@@ -360,14 +363,14 @@ export default function TaskExpert({
                     <div>
                       <div className="expert-draft-title-row">
                         <strong>{draft.name}</strong>
-                        <span>草稿</span>
+                        <span>待发布</span>
                       </div>
                       <span>{draft.expert_id} · v{draft.version}</span>
                     </div>
                     <div className="expert-list-actions">
-                      <button type="button" onClick={() => setViewing({ expert: draft, statusLabel: '草稿' })}>查看</button>
+                      <button type="button" onClick={() => setViewing({ expert: draft, statusLabel: '待发布' })}>查看</button>
                       <button type="button" className="is-primary" onClick={() => openEditor(draft, true)}>继续编辑</button>
-                      <button type="button" className="is-danger" onClick={() => setPendingDelete(draft)}>删除</button>
+                      <MoreActions label={draft.name} actions={[{ label: '删除待发布', danger: true, onSelect: () => setPendingDelete(draft), disabled: busy }]} />
                     </div>
                   </li>
                 ))}
@@ -379,10 +382,10 @@ export default function TaskExpert({
 
       <ConfirmDialog
         open={pendingDelete !== null}
-        title={`删除草稿「${pendingDelete?.name ?? ''}」`}
-        description="只会删除未发布草稿，已发布版本和历史运行不受影响。"
+        title={`删除待发布「${pendingDelete?.name ?? ''}」`}
+        description="只会移除尚未发布的配置，已发布版本和历史运行不受影响。"
         detail={pendingDelete ? `${pendingDelete.expert_id} · v${pendingDelete.version}` : undefined}
-        confirmLabel={busy ? '正在删除…' : '删除草稿'}
+        confirmLabel={busy ? '正在删除…' : '删除待发布'}
         tone="danger"
         onConfirm={() => void confirmDelete()}
         onCancel={() => setPendingDelete(null)}
@@ -391,7 +394,7 @@ export default function TaskExpert({
       <ConfirmDialog
         open={pendingExpertDelete !== null}
         title={`删除专家「${pendingExpertDelete?.name ?? ''}」`}
-        description="将移除该已发布专家及其版本记录与同名草稿；删除后无法再被新任务选择，已完成的运行不受影响。"
+        description="将移除该已发布专家及其版本记录与同名待发布版本；删除后无法再被新任务选择，已完成的运行不受影响。"
         detail={pendingExpertDelete ? `${pendingExpertDelete.expert_id} · v${pendingExpertDelete.version}` : undefined}
         confirmLabel={busy ? '正在删除…' : '删除专家'}
         tone="danger"
@@ -410,7 +413,7 @@ export default function TaskExpert({
   )
 }
 
-/** 专家详情弹窗：只读展示已发布专家或草稿的完整配置。 */
+/** 专家详情弹窗：只读展示已发布专家或待发布版本的完整配置。 */
 function ExpertDetailDialog({
   view,
   skills,
@@ -741,11 +744,11 @@ function ExpertEditor({
     <div className="page expert-editor-page">
       <header className="expert-editor-head">
         <div>
-          <h1>{state.persisted ? `编辑 ${draft.name || '专家草稿'}` : '新建专家'}</h1>
-          <p>保存草稿后先校验依赖，再发布为任务可加载的固定版本。</p>
+          <h1>{state.persisted ? `编辑 ${draft.name || '未命名专家'}` : '新建专家'}</h1>
+          <p>保存为待发布后先校验依赖，再发布成任务可加载的固定版本。</p>
         </div>
         <div className="expert-editor-actions">
-          <button type="button" onClick={onSave} disabled={busy}>{busy ? '处理中…' : '保存草稿'}</button>
+          <button type="button" onClick={onSave} disabled={busy}>{busy ? '处理中…' : '保存为待发布'}</button>
           <button type="button" onClick={onValidate} disabled={busy}>校验配置</button>
           <button type="button" className="is-primary" onClick={onPublish} disabled={busy}>发布版本</button>
         </div>

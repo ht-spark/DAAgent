@@ -13,6 +13,7 @@ import {
   type ProjectSummary,
 } from '../api'
 import ConfirmDialog from './ConfirmDialog'
+import { pushModalLayer } from '../modalLayer'
 
 /** 侧边栏拖拽宽度：与项目侧栏同一套 pointer 拖拽 + localStorage 记忆 */
 const SIDEBAR_DEFAULT_WIDTH = 260
@@ -44,16 +45,17 @@ function loadSidebarWidth(): number {
 type Props = {
   section: string
   collapsed: boolean
+  mobileOpen: boolean
+  onClose: () => void
   activeDiscussionId: string | null
   activeProjectId: string | null
-  onProjectChange: (projectId: string | null) => void
+  onProjectChange: (projectId: string | null, projectTitle?: string) => void
   onHome: () => void
   onModeling: () => void
   onBrainstorm: () => void
-  onConverter: () => void
   onTaskExpert: () => void
   onSkills: () => void
-  onOpenDiscussion: (id: string, projectId: string | null) => void
+  onOpenDiscussion: (id: string, projectId: string | null, projectTitle?: string) => void
   onSettings: () => void
   onDiscussionDeleted?: (id: string) => void
 }
@@ -65,13 +67,14 @@ const LOGO = (
 export default function Sidebar({
   section,
   collapsed,
+  mobileOpen,
+  onClose,
   activeDiscussionId,
   activeProjectId,
   onProjectChange,
   onHome,
   onModeling,
   onBrainstorm,
-  onConverter,
   onTaskExpert,
   onSkills,
   onOpenDiscussion,
@@ -93,6 +96,8 @@ export default function Sidebar({
   const sidebarWidthRef = useRef(SIDEBAR_DEFAULT_WIDTH)
   // 侧栏根节点：收起时用 inert 把整棵子树移出可聚焦范围（详见下方 effect）
   const asideRef = useRef<HTMLElement | null>(null)
+  const onCloseRef = useRef(onClose)
+  onCloseRef.current = onClose
   const resizeStateRef = useRef<{ pointerId: number; startX: number; startWidth: number } | null>(null)
   const [pendingDelete, setPendingDelete] = useState<BrainstormDiscussionSummary | null>(null)
   const [busy, setBusy] = useState(false)
@@ -100,12 +105,17 @@ export default function Sidebar({
   const [expandedProjectIds, setExpandedProjectIds] = useState<Set<string>>(new Set())
 
   useEffect(() => {
+    if (!mobileOpen) return
+    return pushModalLayer(() => onCloseRef.current(), asideRef.current)
+  }, [mobileOpen])
+
+  useEffect(() => {
     void fetchProjects()
       .then((items) => {
         setProjects(items)
         if (!activeProjectId && items.length) {
           setExpandedProjectIds(new Set([items[0].id]))
-          onProjectChange(items[0].id)
+          onProjectChange(items[0].id, items[0].title)
         }
       })
       .catch(() => setProjects([]))
@@ -171,7 +181,7 @@ export default function Sidebar({
       const project = await createProject(rootPath)
       setProjects(await fetchProjects())
       setExpandedProjectIds((current) => new Set(current).add(project.id))
-      onProjectChange(project.id)
+      onProjectChange(project.id, project.title)
     } catch (error) {
       setProjectError(error instanceof Error ? error.message : '添加项目失败')
     }
@@ -198,7 +208,7 @@ export default function Sidebar({
         next.delete(project.id)
         return next
       })
-      onProjectChange(remaining[0]?.id ?? null)
+      onProjectChange(remaining[0]?.id ?? null, remaining[0]?.title)
     } catch (error) {
       setProjectError(error instanceof Error ? error.message : '移除项目失败')
     }
@@ -219,7 +229,7 @@ export default function Sidebar({
       else next.add(project.id)
       return next
     })
-    if (project.id !== activeProjectId) onProjectChange(project.id)
+    if (project.id !== activeProjectId) onProjectChange(project.id, project.title)
   }
 
   async function handleRenameSubmit(item: BrainstormDiscussionSummary) {
@@ -358,6 +368,11 @@ export default function Sidebar({
   return (
     <aside
       ref={asideRef}
+      id="app-sidebar"
+      role={mobileOpen ? 'dialog' : undefined}
+      aria-modal={mobileOpen || undefined}
+      aria-label="主导航"
+      tabIndex={-1}
       className={`sidebar ${collapsed ? 'sidebar--collapsed' : ''} ${isResizing ? 'is-resizing' : ''}`}
       aria-hidden={collapsed}
     >
@@ -397,6 +412,11 @@ export default function Sidebar({
             <span className="logo-sub sidebar-sub">数据分析智能体</span>
           </div>
         </div>
+        <button type="button" className="mobile-nav-close" aria-label="关闭主导航" onClick={onClose}>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" aria-hidden="true">
+            <path d="m6 6 12 12M18 6 6 18" />
+          </svg>
+        </button>
       </div>
 
       <div className="rail-section">
@@ -420,26 +440,6 @@ export default function Sidebar({
             <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
           </svg>
           <span className="nav-text sidebar-collapse-hide">知识库</span>
-        </button>
-        <button
-          className={`nav-item ${section === 'converter' ? 'active' : ''}`}
-          onClick={onConverter}
-          title={collapsed ? '文档转换' : undefined}
-        >
-          <svg
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="1.8"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          >
-            <path d="M4 8h12" />
-            <path d="m13 5 3 3-3 3" />
-            <path d="M20 16H8" />
-            <path d="m11 13-3 3 3 3" />
-          </svg>
-          <span className="nav-text sidebar-collapse-hide">文档转换</span>
         </button>
         <button
           className={`nav-item ${section === 'task-expert' ? 'active' : ''}`}
@@ -587,7 +587,7 @@ export default function Sidebar({
                                   <button
                                     type="button"
                                     className="session-open"
-                                    onClick={() => onOpenDiscussion(item.id, project.id)}
+                                    onClick={() => onOpenDiscussion(item.id, project.id, project.title)}
                                     title={item.title}
                                   >
                                     <span className="session-text">

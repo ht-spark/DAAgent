@@ -21,12 +21,18 @@ MAX_ARCHIVE_BYTES = 50 * 1024 * 1024
 MAX_ARCHIVE_FILES = 500
 MAX_MEMBER_BYTES = 100 * 1024 * 1024
 UPLOADED_MARKER = ".daagent-uploaded"
+# 随平台提供的固定技能，保留标识以防个人上传覆盖，即使某个目录暂时缺失也不放行。
+SYSTEM_SKILL_IDS = frozenset({"docx", "markitdown", "pdf", "skill-creator", "xlsx"})
 AUTO_REFERENCE_SUFFIXES = {".csv", ".json", ".md", ".markdown", ".txt", ".yaml", ".yml"}
 IGNORED_ROOT_FILES = {"skill.md", "readme.md", "daagent.yaml", UPLOADED_MARKER}
 
 
 class SkillRegistryError(ValueError):
     """Skill 包格式、路径或清单不合法。"""
+
+
+class SystemSkillError(SkillRegistryError):
+    """个人技能管理操作试图修改平台固定技能。"""
 
 
 class SkillRegistry:
@@ -135,6 +141,8 @@ class SkillRegistry:
             if len(candidates) != 1:
                 raise SkillRegistryError("压缩包必须且只能包含一个 SKILL.md")
             metadata = self._load_metadata(candidates[0])
+            if metadata.skill_id in SYSTEM_SKILL_IDS:
+                raise SystemSkillError("系统技能不支持上传覆盖，请为个人技能使用不同的 name")
             target_dir = self._skill_directory(metadata.skill_id)
             staging = self.root / f".{metadata.skill_id}-{next(tempfile._get_candidate_names())}"
             shutil.copytree(candidates[0], staging)
@@ -159,6 +167,8 @@ class SkillRegistry:
     def uninstall(self, skill_id: str) -> None:
         """删除一个已安装 Skill 的目录，供前端卸载使用。"""
         directory = self._skill_directory(skill_id)
+        if directory.name in SYSTEM_SKILL_IDS:
+            raise SystemSkillError("系统技能由平台维护，不能删除")
         # 目录必须已经是一个合法 Skill，避免误删同名的空目录或普通文件
         if not (directory / "SKILL.md").is_file():
             raise SkillRegistryError(f"Skill 不存在: {skill_id}")
@@ -205,6 +215,7 @@ class SkillRegistry:
             name=str(front_matter.get("title") or skill_id).strip(),
             description=description,
             bundle_hash=_bundle_hash(directory),
+            source="system" if skill_id in SYSTEM_SKILL_IDS else "personal",
             references=references,
             assets=assets,
             scripts=scripts,
