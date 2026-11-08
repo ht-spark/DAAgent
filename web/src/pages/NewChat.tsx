@@ -853,6 +853,7 @@ const AgentTaskCard = memo(function AgentTaskCard({
   const completedCount = items.filter((item) => item.status === 'completed').length
   const failedCount = items.filter((item) => item.status === 'failed').length
   const terminatedCount = items.filter((item) => item.status === 'terminated').length
+  const skippedCount = items.filter((item) => item.status === 'skipped').length
   const runningCount = items.filter((item) => item.status === 'in_progress').length
   const pendingCount = items.filter((item) => item.status === 'pending').length
   const progress = total ? Math.round((completedCount / total) * 100) : 0
@@ -871,6 +872,8 @@ const AgentTaskCard = memo(function AgentTaskCard({
       ? `· ${failedCount} 失败`
       : terminatedCount > 0
         ? `· ${terminatedCount} 已终止`
+        : skippedCount > 0
+          ? `· ${skippedCount} 已省略`
         : runningCount > 0
           ? `· ${runningCount} 进行中`
           : ''

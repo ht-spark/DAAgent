@@ -102,13 +102,16 @@ DAAgent 是一个以 LLM 为决策核心、以受限工具为执行边界的任�
 
 复杂任务的 Todo 可以声明依赖和预期输出。对于重复的同一工具失败，运行时按“工具名、参数、规范化错误”累计失败次数；达到熔断阈值后停止盲目重试，Planner 可以在限定次数内创建恢复计划。
 
+成功路径也支持有限的计划复审，详见 §3.5；已确认的工具与技能观察会在 Todo 之间传递，不再只依赖结果摘要。
+
 ### 3.2 Agent 状态与决策模型
 
 | 模块                                        | 职责                                                                                                                                            |
 | ------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
 | `data_analysis/agent/state.py`            | 定义`AgentState`、`AnalysisPlan`、`TodoItem`、`Action`、`Finish`、`Observation`、工作轨迹和产物引用，并在边界处进行 Pydantic 校验。 |
 | `data_analysis/agent/planner.py`          | 将用户目标和当前工具规格转换为至多 12 个可验收 Todo；处理工具反复失败后的恢复规划。                                                             |
-| `data_analysis/agent/loop.py`             | 组装系统提示、历史、当前任务和工具描述；解析 LLM 返回的`action` 或 `finish`，并处理格式纠错与迭代上限。                                     |
+| `data_analysis/agent/loop.py`             | 组装任务上下文；保留单步 JSON 入口，批量入口支持原生工具调用、有限纠错与协议回退。 |
+| `data_analysis/agent/decision.py`         | 从注册表绑定原生工具 schema，完整校验一次回复中的全部调用，生成有序 `ActionBatch`。 |
 | `data_analysis/agent/graph.py`            | 执行基本 ReAct 循环和 Plan-and-Execute 循环，将计划、Todo、动作、观察和完成状态作为事件输出。                                                   |
 | `data_analysis/context/rolling_memory.py` | 对历史会话生成摘要与工具摘要，保留近期原文，从而控制多轮对话上下文规模。                                                                        |
 
@@ -129,6 +132,43 @@ DAAgent 是一个以 LLM 为决策核心、以受限工具为执行边界的任�
 成本以美元估算，不代表供应商账单。`.env` 中 `AGENT_LLM_INPUT_COST_PER_MILLION`、`AGENT_LLM_OUTPUT_COST_PER_MILLION` 默认留空；配置当前模型每百万 token 的输入、输出美元单价后才估算，缺少价格或用量时为 `null`。单价越高估算同比增加，不影响决策。切换模型必须同步调整单价。
 
 `LLM_STREAM_USAGE` 默认 `auto`，沿用客户端对供应商的兼容策略；支持流式用量的自定义端点可设为 `true` 请求计量尾片段，不支持该请求的端点设为 `false`。该开关只控制是否请求计量，未返回的用量仍为未知。
+
+### 3.4 原生工具调用与并行执行（P0-3）
+
+服务端默认 `AGENT_TOOL_MODE=auto`，通过 `AgentLoop.step_batch()` 接收原生 `tool_calls`。schema 直接来自 `ToolSpec.parameters`，本地绑定不额外发起能力探测请求。Planner 和技能协议保持现有语义；最终回答继续使用 `finish` JSON。每轮是独立的模型请求，工具结果以有界 `observations` 状态回传，不保留悬空的 assistant tool call 消息。
+
+- 流式调用完整聚合 `AIMessageChunk`，包括只有工具参数或 usage 的片段；执行前检查原始参数 JSON 已闭合。未知工具、无效参数、重复调用 ID、截断回复及超过 16 个调用的批次均不执行部分结果。
+- `auto` 在明确不支持工具协议或原生输出无法解析时，记录 `fallback` span，并在本次运行余下决策中使用 JSON；认证、限流和超时直接上抛。`native` 不自动降级。`AgentLoop.step()` 始终保留单工具 JSON 语义，不会投影并丢弃批次中的其他调用。
+- 工具默认 `mutating=True`、`parallel_safe=False`。只有显式标注只读且可安全并行的工具可以并行；数据画像、取行、数学关系探索、文本附件/项目读取与搜索、产物检查、网页检索已标注。知识库检索与视觉调用暂时串行，避免共享模型初始化与调用状态竞态。
+- `Harness.execute_many()` 默认最多并行 4 个工具，由 `AGENT_MAX_PARALLEL_TOOLS` 控制（1～16，1 为全部串行）。写文件、动态代码、终端、未标注工具或任一非并行工具混入时，整批按原顺序串行；每条终端调用仍独立等待人工批准。技能操作保持单个执行。
+- 图调度在执行前拦截历史及批内重复调用。每批只推进一次决策预算，每个工具分别产生观察与 span；结果按输入顺序写回，已执行完的并行结果会全部记录后再处理熔断。是否合并独立查询由 LLM 判断，不注入固定分析方法。
+- `call_id` 贯穿动作、观察与前端轨迹，解决同名工具并发时结果错配；旧事件缺少 ID 时沿用串行关联。模型绑定后继续包装 `TracedLlmClient`，并行分支显式继承父 span，取消包装线程也继承追踪上下文。
+
+回滚：设置 `AGENT_TOOL_MODE=json` 恢复单工具决策；仅需限制资源时设置 `AGENT_MAX_PARALLEL_TOOLS=1`。当前通过 mock 模型、真实调度器与本地工具验证功能；未运行真实供应商的性能评测，不声称达到固定的决策轮数降幅。
+
+### 3.5 动态重规划与观察可见（P0-4）
+
+`AgentState.recent_observations` 保存最近 16 条真实工具/技能观察，窗口大小覆盖一个最大原生工具批次。它是有界证据窗口，不保存无限执行历史；原 `observations` 仍用于当前 Todo，运行级状态不会重复聚合完整观察历史。Planner 初始规划、失败恢复、成功复审和后续 Todo/最终汇总均能看到该窗口，统一复用观察投影。超长文本保留头尾及截断标记，巨大数组等超过预算时显式变为 JSON 预览，不能当作完整证据。
+
+`Planner.reassess()` 根据目标、近期观察、当前计划、已完成摘要和产物，返回 `continue`、`revise` 或 `finish_early`。框架只提供时机，证据是否充分、是否改写以及使用何种方法都由 LLM 判断。复审失败会记录警告并沿用原计划，用户取消照常上抛。
+
+- 服务端默认开启 `AGENT_ADAPTIVE_REPLAN_ENABLED=true`。默认 `AGENT_REPLAN_CHECK_INTERVAL=0`，只在仍有剩余工作、出现新观察的 Todo 边界复审；正数额外按决策批次间隔复审。相同证据不会在间隔与边界重复请求。
+- 默认最多复审 6 次（`AGENT_MAX_PLAN_REVIEWS`，含继续与失败），成功路径最多改变计划 2 次（`AGENT_MAX_ADAPTIVE_REPLANS`，含提前结束）。失败恢复仍有独立预算；不重置共享 `RunBudget`。每次复审仍受 Planner 现有格式纠错次数约束，token 消耗照常计量。
+- `merge_revised_plan()` 只替换未完成任务，保留已完成、失败或已省略任务的结果；新 ID 带修订前缀，依赖只能指向新任务或已完成的历史任务，未知依赖、循环、预填结果和历史 ID 冲突均被拒绝。产物与工作轨迹保留在原运行状态中。
+- 提前结束只停止剩余调度；未执行任务明确标为 `skipped`，仍进入执行 Agent 的最终汇总并可继续必要工具核验，不把省略项伪装成完成。最终交付接入 P0-5 独立验证器。
+- 计划事件携带 `revision_kind` 和任务状态快照。前端保留已完成状态，明确展示“已省略”，旧历史事件不覆盖新快照。`replanning_summary` 在完成事件和助手消息元数据中记录复审、成功路径改变及失败恢复次数；复审有独立 `plan/reassess_*` span。
+
+库级 `iter_plan_graph()` / `run_plan_graph()` 的动态复审默认关闭，兼容既有调用者；服务层显式按配置开启。设 `AGENT_ADAPTIVE_REPLAN_ENABLED=false` 可关闭成功路径复审，观察可见与既有失败恢复仍保留。
+
+### 3.6 独立验证与反思闭环（P0-5）
+
+`Verifier.verify(state, plan, answer)` 在统一交付出口返回严格结构化的 `Verification`：`pass`、`fail` 或 `uncertain`，附问题、证据定位与真实检查文件清单。Planner 直接回答、计划汇总以及显式启用验证的基础 ReAct 均在写历史和发送正文之前复核；Todo 摘要不等同于最终交付。
+
+确定性检查只访问授权产物目录：检查交付引用的文件存在且非空，解析符号链接后阻止越界；对不超过 2 MB 的 JSON / Python 做解析或静态语法检查，绝不执行候选代码。每次最多检查 100 个引用，超限披露。其他格式不宣称做内容验证。独立语义请求使用 `prompts/verifier.md`，比对目标、近期对话、真实观察、计划状态与候选答案；数字不采用简单文本匹配，缺少证据和截断不会直接判定事实错误，模型异常降为不确定，用户取消照常传播。
+
+明确失败后把结构化问题作为验证观察交回 LLM，自主选择补查或修正。服务端默认 `AGENT_VERIFIER_ENABLED=true`、`AGENT_MAX_VERIFY_RETRIES=1`（0～3）；修订共用原运行预算、终端审批和工具熔断。仍失败或修订无法继续时按 uncertain 交付并在正文披露问题。关闭语义复核仍做文件检查，同时公开验证范围。库调用只有显式传入 `verifier=` 才启用，保持旧调用兼容。
+
+复核结果复用公开轨迹的 `agent_reasoning` 事件，并附 `verification`；最终 `verification_summary` 保存到完成事件和消息元数据，含状态、问题、检查路径、尝试及修订次数。每次复核有 `verify/verify_delivery` span，语义请求沿用已有 LLM token 与费用计量。
 
 ## 4. 工具架构
 

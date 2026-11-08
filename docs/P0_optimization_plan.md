@@ -1,6 +1,6 @@
 # DAAgent P0 能力优化改进方案
 
-> 版本：v1.0（设计稿） | 日期：2026-11-08 | 状态：P0-1 已实现，其余项目待分阶段实施
+> 版本：v1.0（设计稿） | 日期：2026-11-08 | 状态：P0-1、P0-3、P0-4 已实现，其余项目待分阶段实施
 > 适用范围：`data_analysis/` 统一 Agent 运行时与 `server/` 服务层
 > 输入基线：`docs/Architecture.md`、`docs/Project.md`、`README.md`；主流能力基线参照附录 B
 > 关联文档：本文只覆盖 P0（运行时基础设施）。P1（MCP/A2A、子代理、浏览器、SQL、多模态）与 P2（认证、多租户、队列、限流）另行规划。
@@ -228,17 +228,19 @@ class ActionBatch(BaseModel):
 **设计**：
 
 1. **协议适配**：`create_llm`（`llm.py:14-103`）保持返回普通客户端；新增 `NativeToolClient`（`data_analysis/agent/decision.py`）调用 `ChatOpenAI.bind_tools(schema_list)`，把 `AIMessage.tool_calls` 解析为 `ActionBatch`。schema 直接从 `registry.specs()` 的 `ToolSpec.parameters`（`registry.py:79-102`，已保证合法 JSON）生成，禁止手写第二份 schema。
-2. **兼容性**：`AgentLoop.step()` 保留原语义（返回单个 `Decision`），新增 `step_batch()` 返回 `ActionBatch | Finish`；`step()` 实现为 `step_batch()` 的单元素投影，旧测试与 `iter_graph`（`graph.py:76-120`）不受影响。
-3. **并行策略**：`ToolSpec` 增加 `mutating: bool = False`、`parallel_safe: bool = True`、`network: bool = False`、`risk` 与 `timeout_seconds`。注册时标注：`profile_data`、`inspect_data_rows`、`read_*`、`search_workspace_text`、`search_web`、`search_knowledge_base` 为只读可并行；`execute_python`、`write_artifact`、`write_workspace_file`、`edit_workspace_file`、`run_terminal_command` 为 `mutating=True`，**一律串行**。`registry.py:826` 的终端工具同时 `parallel_safe=False`。
+2. **兼容性（实施调整）**：`AgentLoop.step()` 完整保留单工具 JSON 语义；`step_batch()` 返回 `ActionBatch | SkillAction | Finish`，生产调度走新入口。避免把批次投影成一个动作而丢失其他调用。技能继续使用独立运行时，最终回答仍为 JSON。
+3. **并行策略（实施调整）**：`ToolSpec` 默认 `mutating=True`、`parallel_safe=False`，新增 `network` 标记。对数据画像、取行、关系探索、文本读取、项目目录/文件读取与搜索、产物检查和网页检索显式许可并行；代码、写入、终端与未知工具全部串行。知识库及视觉调用暂时串行以避开共享模型状态；`risk` 与单工具超时策略留在 P0-8 按实际需要补充。
 4. **执行**：`Harness.execute_many(actions)` 用 `ThreadPoolExecutor(max_workers=max_parallel_tools)` 并行只读工具；结果**按输入顺序**组装 `Observation` 列表回写，保证事件回放与 `WorkTrajectory.observe_tool`（`state.py:458`）的确定性。含任一 `mutating` 工具时整批退化为串行。
-5. **降级链**：`tool_mode=auto` 时先探测供应商能力，失败或解析异常自动回退 JSON 协议并记 `fallback` span；`decision_retries`（`loop.py:221-258`）继续只负责格式纠错，语义错误交给下一轮观察。
+5. **降级链（实施调整）**：`tool_mode=auto` 仅做本地绑定，在真实决策请求中使用原生协议，不额外探测。明确不支持或解析异常时，本次运行后续决策回退 JSON 并记一次 `fallback` span；认证、限流与超时保持原错误。`native` 不自动降级，有限格式纠错保留。
 6. **预算语义**：一个 `ActionBatch` 记为**一次决策**（`RunBudget.iterations += 1`），但每个工具各自记一次 `Observation` 与 span，避免并行放大预算或掩盖失败。
 
 **改动文件**：新增 `data_analysis/agent/decision.py`；修改 `data_analysis/tools/registry.py`、`data_analysis/agent/loop.py`、`data_analysis/agent/graph.py`、`data_analysis/runtime/harness.py`、`server/main.py:2108-2124`。
 
-**验收标准**：评测集上 `avg_decisions` 下降 ≥20% 且 `task_success_rate` 不退化；`mutating` 工具从不出现在并行批次；同一批并行结果顺序与 `actions` 顺序一致；`tool_mode=json` 时全部旧测试通过。
+**本次验收**：原生流式多调用与用量完整保留；不支持/畸形调用回退；变更工具整批串行且逐条审批；并行结果顺序、兄弟 span、单批一次预算、调用 ID 关联正确；相关旧入口回归通过。决策轮数降低 ≥20% 的性能目标留待 P0-2 评测或真实供应商基线验证，本次不作为已完成结论。
 
-**回归测试**：`tests/unit/agents/test_action_batch.py`（tool_calls 畸形输出、未知工具名、混合 mutating/readonly 批次）；`tests/unit/runtime/test_parallel_order.py`。
+**关键回归**：`tests/unit/runtime/test_native_parallel.py`、`tests/unit/test_agent_observability_api.py` 的原生批次/逐条审批集成用例，以及 `web/src/agentTraceRows.test.ts` 的同名并发关联。复用既有 Agent、Harness、取消和注册表测试；不扩建性能评测体系。
+
+**实施补充**：最多 16 个调用一批；流式原始参数必须为完整 JSON，截断/过滤回复不执行。兼容现有动作/观察事件，新增可选 `call_id`；并行追踪使用分支上下文，绑定模型后继续采集 usage。更新配置与架构说明，保留已有工作区修改。
 
 **风险与回滚**：并行放大文件/网络竞争、模型提交相互依赖的工具。缓解：`parallel_safe` 白名单、顺序回写、默认 `max_parallel_tools=4`；一键切回 `tool_mode=json` 即为完整回滚。
 
@@ -252,41 +254,41 @@ class ActionBatch(BaseModel):
 
 **设计**：
 
-1. **上下文打通**：`Planner.build_messages` 的 context 增加 `recent_observations`（复用 `loop.py:472-516` 的 `_project_observations` 投影，不重复实现裁剪逻辑）、`completed_todos`、`available_artifacts` 摘要。字符预算沿用 `planner.py:30-41` 的常量体系。
-2. **触发器（框架只提供时机，判断交给 LLM）**：每个 Todo 完成后、每 `replan_check_interval` 次决策、熔断/新证据与计划假设冲突时，调用 `Planner.reassess(state, plan, trigger) -> PlanDecision`，输出 `continue | revise | finish_early` 与理由。`finish_early` 用于证据已充分、剩余 Todo 冗余的场景。
-3. **计划合并**：把 `_merge_recovery_plan`（`graph.py:375-415`）泛化为 `_merge_revised_plan`，保留已结束 Todo、重映射 id 与依赖、继承 `work_trajectory` 与产物引用；复用 `AnalysisPlan.validate_dependencies`（`state.py:82-112`）做无环校验。
-4. **预算拆分**：`replan_count` 拆为 `failure_replans`（沿用上限 2）与 `adaptive_replans`（上限 2），两者独立计数并写入 span，便于评测归因。
-5. **成本约束**：`reassess` 默认在 Todo 边界触发而非每步；`continue` 时不产生新 LLM 决策轮次之外的额外工具调用；可用较短的提示模板与低 `max_tokens`。
+1. **上下文打通（已实施）**：运行状态保留最近 16 条工具/技能观察，Planner 与跨 Todo/最终汇总统一复用 `_project_observations`。上下文增加 `recent_observations`、`completed_todos` 和带摘要的当前计划；巨大数组等也有显式截断预览，避免只裁剪字符串而漏掉超大结构。
+2. **复审时机（已实施）**：默认只在有剩余工作、有新观察的 Todo 边界触发；可配置按决策批次间隔触发，同一证据不重复复审。不硬编码“字段冲突”等语义触发规则，冲突与计划是否仍适用由 LLM 依据证据判断。输出 `continue | revise | finish_early` 与公开理由。
+3. **计划合并（实施调整）**：保留旧失败恢复合并入口，新增严格的 `merge_revised_plan()`。保留已结束 Todo 与原运行产物/轨迹，新任务重映射 ID；只接受新任务或已完成历史任务依赖，拒绝未知依赖、循环、预填成功和历史标识冲突。中途改写可替换尚未完成的当前 Todo。
+4. **预算（已实施）**：失败恢复与成功路径改变独立计数；默认最多 2 次成功路径改变、6 次复审（包含继续或失败），共享执行预算从不重置。复审独立记录 plan span 和真实模型用量，`replanning_summary` 写入完成事件与历史。
+5. **结束与降级（实施调整）**：可选复审失败沿用原计划，取消不被吞掉。提前结束把未执行任务标为 `skipped`，仍进入最终汇总及必要工具核验；独立验证器待 P0-5 接入。服务端默认开启，库入口默认关闭以保留调用兼容性。
 
-**改动文件**：`data_analysis/agent/planner.py`、`data_analysis/agent/graph.py`、`data_analysis/prompts/planner.md`。
+**改动文件**：Planner、Graph、State、Loop；`prompts/planner.md`、`prompts/reassess.md`；服务端装配、前端任务状态与配置/架构说明。
 
-**验收标准**：评测集"数据列与计划假设不符"用例中，Agent 改写剩余 Todo 且已完成 Todo 的 `result_summary` 与产物仍在；普通用例的 `adaptive_replans` 均值为 0（不产生无谓重规划）；`finish_early` 不跳过 P0-5 验证器。
+**本次验收**：工具观察可进入 Planner 和下一 Todo，超大结构有界；成功路径改写保留已完成项和共享预算；依赖校验、间隔提前结束、复审失败保留原计划与调用次数上限有效；服务集成验证计划快照及统计持久化。未运行真实模型评测，不声称普通任务平均重规划次数或完成率已达到固定指标。
 
-**回归测试**：`tests/unit/agents/test_reassess_plan.py`（revise 后依赖无环、id 唯一、已完成 Todo 保留）；`tests/unit/agents/test_planner_observations.py`（观察投影超长截断）。
+**关键回归**：`tests/unit/agents/test_dynamic_replanning.py`，服务端成功复审集成用例，前端快照/省略状态回归；复用现有 Agent、并行、技能、计量与 API 用例，不扩建详细性能测试集。
 
 **风险与回滚**：重规划导致循环或预算膨胀。缓解：双上限 + `reassess` 只在触发点调用 + span 监控；开关 `adaptive_replan_enabled=false` 即回到现状。
 
 ---
 
-### P0-5 独立验证器 / 反思闭环
+### P0-5 独立验证器 / 反思闭环（已实施，2026-11-08）
 
-**现状**：`prompts/planner.md:36` 要求最后一个 Todo 核验交付物，但仅为提示词；代码级校验只有终端退出码（`harness.py:102-112`）与 `Observation` 成功/错误互斥（`state.py:152-159`）；无 critic / verifier 节点。
+**实施前**：校验主要依赖提示词、工具退出码和 Observation 格式约束，没有独立交付验证节点。
 
 **目标**：`Finish` 前执行代码级确定性检查 + 语义检查；失败可回灌观察并有限次修订；无法通过时显式披露而非静默通过。
 
-**设计**：
+**实际实现与规划调整**：
 
 1. 新增 `Verifier.verify(state, plan, answer) -> Verification`（`data_analysis/agent/verifier.py`），字段：`status: pass|fail|uncertain`、`issues: list[VerificationIssue]`、`checked_artifacts`。
-2. **确定性检查（不调 LLM）**：`answer` 中引用的相对路径必须存在于 `available_artifacts`；声明的产物文件存在、非空、可解析（CSV/JSON/图片头校验）；生成的 `.py` 产物通过 `compile()` 静态语法检查；结论中的数值型断言能在 `Observation.result` 或产物内容中定位来源；所有 Todo 非 `failed`。
-3. **语义检查（LLM，独立提示词 `prompts/verifier.md`）**：结论是否回答 `state.user_query`、是否覆盖 `AnalysisPlan.todos`、是否存在与观察冲突的断言。低温度、结构化 JSON 输出，解析失败按 `uncertain` 处理，不阻断交付。
-4. **挂接位置**：`graph.py:258-282` 的最终汇总循环内，`Finish` 写消息之前（`:264-268`）。`fail` 时把 `issues` 转成 `Observation` 回灌 `final_state`，允许 `max_verify_retries=1` 次修订；仍失败则 `status=uncertain`，在 `done` 事件与答案中显式标注未通过项。
-5. **事件**：新增 `VerificationCompleted`（与现有 `PlanGraphEvent` 联合类型对齐，`graph.py:42-73`），前端可选择展示，本阶段不强制改 UI。
+2. **确定性检查（不调 LLM）**：检查回答链接交付的产物，支持相对/授权绝对 Markdown 链接和会话下载/预览地址；普通文字提及文件可能是在解释缺失，不自动视作交付承诺。在解析符号链接后检查授权目录边界，再检查文件存在、非空，小于等于 2 MB 的 JSON 和 Python 分别做解析和静态编译，不执行代码。最多检查 100 个引用，超限明确标为不确定。未登记但真实存在的授权文件也可交付，避免漏登记导致误拦截。不把所有数字做字符串匹配，不把曾失败或被省略的 Todo 自动视作最终失败；这两类判断交由语义复核，保留派生指标与动态规划的通用性。
+3. **语义检查（LLM，独立提示词 `prompts/verifier.md`）**：独立上下文包含原始目标、近期对话、真实观察、计划状态和产物元数据；候选回答单独作为待审数据。明确冲突才判 fail，证据缺失或截断按 uncertain，普通问候不强制工具证据。不机械要求完成所有 Todo，不改变供应商模型配置。不臆测文件内容；候选超过 24000 字符时不得宣称完整通过。模型返回严格结构化 JSON，空失败理由、额外字段、畸形输出或模型异常均降级为 uncertain，取消直接传播。
+4. **统一交付出口**：覆盖 Planner 直接回答、正常计划最终汇总和可选的基础 ReAct 入口；Todo 内的摘要不当作用户最终交付。候选未通过前不写入历史、不发送答案正文。fail 将问题和候选回灌为验证观察，由 LLM 自主补查或修正，默认允许 1 次修订（0～3 可配）；继续使用原运行工具预算、审批与熔断，禁止重置额度。仍失败或修订预算耗尽，保留问题、最终状态 uncertain，并在答案正文披露。
+5. **可见性与计量**：`Verification` 本身是图事件，HTTP 复用 `agent_reasoning` 展示“独立验证”及问题，同时携带结构化 `verification`。`done` 和助手历史保存 `verification_summary`（状态、问题、检查路径、尝试与修订次数）；中止历史也保存已有结果。每次复核有独立 `verify/verify_delivery` span，模型调用进入已有 token/成本统计，不增加第二套计量。
 
-**改动文件**：新增 `data_analysis/agent/verifier.py`、`data_analysis/prompts/verifier.md`；修改 `data_analysis/agent/graph.py`、`server/main.py:2545-2555`。
+**开关**：服务端默认 `AGENT_VERIFIER_ENABLED=true`、`AGENT_MAX_VERIFY_RETRIES=1`；关闭语义复核仍保留文件检查，并披露仅做文件检查。库入口通过显式 `verifier=` 启用，省略时兼容原行为。
 
-**验收标准**：评测集"故意生成错误结论 / 引用不存在产物"用例拦截率 ≥80%；正常用例因验证器新增的 LLM 调用 ≤1 次；`uncertain` 状态在 `done` 事件中可见；`Finish` 事件结构与旧版兼容。
+**本次验收**：模拟错误数值可触发真实工具补查并修正；不存在、越界和损坏的产物被拦截；无效验证输出、取消、修订耗尽和运行预算耗尽有明确边界。服务集成覆盖公开轨迹、仅交付修订答案、验证 span、token 统计和历史持久化。正常通过只新增一次语义请求，确定性失败不调用语义模型。未运行真实模型评测，不声称已达到错误拦截率 ≥80% 的规划目标。
 
-**回归测试**：`tests/unit/agents/test_verifier.py`（畸形 LLM 输出、缺失产物、数值无来源）；`tests/unit/test_verification_event.py`。
+**回归测试**：`tests/unit/agents/test_verifier.py` 和 `tests/unit/test_agent_observability_api.py`；复用相关 Planner、图调度、原生工具和计量回归，不扩展完整评测集。
 
 **风险与回滚**：语义检查误判导致正常任务反复修订。缓解：`max_verify_retries=1`、`uncertain` 不阻断、开关 `verifier_enabled=false`；确定性检查始终开启，不受开关影响。
 
@@ -350,7 +352,7 @@ class ActionBatch(BaseModel):
 
 **设计**：
 
-1. **策略元数据**：P0-3 已在 `ToolSpec` 增加 `network/mutating/risk/timeout_seconds`，本项补 `NetworkPolicy`（`runtime/policy.py` + `network_allowlist.yaml`）与 `terminal_policy.yaml`（命令白名单/黑名单、环境变量裁剪）。`Harness.execute`（`harness.py:45-128`）改为按策略执行，替换硬编码的 `TERMINAL_TOOL_NAMES` 判断（`:56-64`）。
+1. **策略元数据**：P0-3 已在 `ToolSpec` 增加 `network/mutating/parallel_safe`，本项按需补 `risk/timeout_seconds`、`NetworkPolicy`（`runtime/policy.py` + `network_allowlist.yaml`）与 `terminal_policy.yaml`（命令白名单/黑名单、环境变量裁剪）。`Harness.execute` 改为按策略执行，替换硬编码的 `TERMINAL_TOOL_NAMES` 判断。
 2. **主进程逃逸治理**：将 `search_web`、`search_knowledge_base`、两个视觉工具迁至 `SubprocessSandbox` 或专用 worker。注意 `RegisteredTool.context` 需为可 JSON 序列化（`:119-123`），因此 worker 侧用 `secret_ref` 引用而非明文密钥，由 worker 从服务端配置解析。知识库 embedding 模型改为进程内单例（`functools.lru_cache`），顺带解决 `knowledge_tools.py:52-55` 未传 `model` 导致每次重载、阻塞主进程的问题。
 3. **终端**：环境变量裁剪（剔除密钥变量）、命令策略校验、逐条人工批准保留；每次批准与执行写入审计表（关联 `run_id`、`trace_id`、`approval_id`），与 P0-6 的审批快照一致。
 4. **动态代码**：`code_tools.py` 执行前做 `ast.parse` 静态扫描，拒绝 `ctypes`、`socket`、`subprocess` 等逃逸导入；保留现有写限制但明确文档说明其为应用层防护。
@@ -443,10 +445,14 @@ flowchart LR
 | `AGENT_MAX_DECISIONS` | 160 | 整轮运行共享的决策轮数上限，含全部 Todo 与最终汇总（`main.py:153`） | 调大允许更复杂任务但放大成本与失控风险；调小会让长任务提前 `IterationLimitError` |
 | `max_todo_steps` | 30 | 单个 Todo 的决策轮数上限（`graph.py:160`），防止一个 Todo 吃掉整轮预算 | 调小会更频繁触发失败重规划；调大削弱隔离效果 |
 | `failure_replans` | 2 | 失败熔断触发的恢复规划次数上限（`graph.py:159`） | 与 `adaptive_replans` 独立计数，避免重规划无限循环 |
-| `adaptive_replans` | 2 | 成功路径上依据证据改写计划的次数上限（P0-4 新增） | 调大提升长任务适应性，同时增加 LLM 调用与步数 |
-| `replan_check_interval` | 3 | 每隔多少次决策触发一次 `reassess`（P0-4 新增） | 调小更灵敏但显著增加成本；设为 0 表示仅在 Todo 边界触发 |
-| `tool_mode` | `auto` | `native` / `json` / `auto`，控制工具调用协议与降级策略（P0-3 新增） | `json` 是完整回滚路径；`auto` 在供应商不支持 tool_calls 时自动降级 |
-| `max_parallel_tools` | 4 | 单批只读工具的最大并发数（P0-3 新增） | 调大降低延迟但放大外部搜索限流与内存压力；`mutating` 工具不受此值影响 |
+| `AGENT_ADAPTIVE_REPLAN_ENABLED` | `true`（服务端） | 开启成功路径复审；库级调度入口默认关闭以兼容旧调用 | `false` 关闭复审，真实观察可见与失败恢复仍保留 |
+| `AGENT_MAX_ADAPTIVE_REPLANS` / `max_adaptive_replans` | 2 | 成功路径计划改变次数上限，含提前结束；范围 0～8 | 调大增加适应机会和模型开销；0 禁用，与失败恢复预算独立 |
+| `AGENT_REPLAN_CHECK_INTERVAL` / `replan_check_interval` | 0 | 0 只在 Todo 边界复审；正数按工具决策批次间隔，范围 0～160 | 调小提高中途响应速度与开销；无新证据时不重复复审 |
+| `AGENT_MAX_PLAN_REVIEWS` / `max_plan_reviews` | 6 | 复审次数上限，含继续与失败；范围 0～24 | 调大增加额外模型调用；0 禁用，每次还受 Planner 格式纠错次数限制 |
+| `MAX_RECENT_OBSERVATIONS` | 16 | 跨 Todo 传递的真实工具/技能观察窗口，覆盖一个最大工具批次 | 调大增加内存和可见历史；提示词仍经过有界投影 |
+| `AGENT_TOOL_MODE` / `tool_mode` | `auto`（服务端）；`json`（旧单步兼容构造） | `native` / `json` / `auto`，控制批量入口的协议与降级策略 | `json` 恢复单工具；`auto` 在明确不支持或解析失败后降级，`native` 保留错误 |
+| `AGENT_MAX_PARALLEL_TOOLS` / `max_parallel_tools` | 4 | 显式许可的只读工具最大并发数，1～16 | 1 禁用并行；调大增加内存与外部请求压力，任何写入/非并行工具令整批串行 |
+| `ActionBatch.actions` 数量上限 | 16 | 限制单次模型回复的执行放大 | 超出时拒绝整批并纠错/降级；调整需同步 schema 与协议提示，不改变并发上限 |
 | `verifier_enabled` | `true` | 是否启用语义验证器（P0-5 新增）；确定性检查始终开启 | 关闭后仅保留文件/引用/语法检查，成本下降但错误结论拦截率下降 |
 | `max_verify_retries` | 1 | 验证失败后允许回灌观察并修订的次数（P0-5 新增） | 调大会提高修复率但可能造成循环；超出后按 `uncertain` 显式披露 |
 | `checkpoint_enabled` | `true` | 是否按事件落盘状态快照（P0-6 新增） | 关闭后回到纯内存运行，失去崩溃恢复能力 |
@@ -488,14 +494,15 @@ flowchart LR
 ## 9. 验收清单
 
 - [x] A：`TracedLlmClient` 可在不改 `AgentLoop`/`Planner` 构造的前提下采集 usage
-- [x] A（P0-1）：span 树覆盖 run/plan/todo/llm/tool/skill/approval；verify 类型预留，节点待 P0-5 接入
+- [x] A（P0-1、P0-5）：span 树覆盖 run/plan/todo/llm/tool/skill/approval/verify
 - [ ] A：`pytest -m eval` 无 API key、无网络可运行，含 ≥20 条用例
 - [ ] A：基线指标与阈值文件入库，退化时 CI 非零退出
-- [ ] B：`tool_calls` 与 JSON 双协议可用，`auto` 降级有 span 记录
-- [ ] B：`mutating` 工具零并行、批量结果顺序确定
+- [x] B：`tool_calls` 与 JSON 双协议可用，`auto` 降级有 span 记录
+- [x] B：`mutating` 工具零并行、批量结果顺序确定
 - [ ] B：`avg_decisions` 下降 ≥20% 且完成率不退化
-- [ ] B：`reassess`  revise 后依赖无环、已完成 Todo 与产物保留
-- [ ] C：错误结论拦截率 ≥80%，`uncertain` 在 `done` 中显式披露
+- [x] B：`reassess` revise 后依赖无环、已完成 Todo 与产物保留
+- [x] C（P0-5）：独立复核、有限修订与 `uncertain` 在 `done` 中显式披露
+- [ ] C：真实模型评测集错误结论拦截率 ≥80%
 - [ ] C：进程重启可从检查点续跑，`RunBudget` 不重复计数
 - [ ] C：审批等待中重启可继续批准
 - [ ] D：记忆冲突用例以本次观察为准，关闭记忆时行为不变

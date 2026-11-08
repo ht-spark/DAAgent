@@ -2,9 +2,11 @@
 
 import json
 import sys
+import threading
 from types import SimpleNamespace
 
 import pytest
+from langchain_core.messages import AIMessage
 
 from data_analysis.experts import ExpertRegistry
 from data_analysis.skills import SkillRegistry
@@ -38,6 +40,8 @@ def api_context(tmp_path, monkeypatch):
         executable=sys.executable, source="test", name="mock",
     ))
     monkeypatch.setattr(main, "_agent_chat_runs", {})
+    # 既有计量用例只覆盖原调度；独立验证在专门集成用例中启用。
+    monkeypatch.setattr(main, "Verifier", lambda *args, **kwargs: None)
     monkeypatch.setattr(main, "FINAL_ANSWER_CHUNK_DELAY_SECONDS", 0)
     monkeypatch.setattr(main, "AGENT_COMMAND_APPROVAL_TIMEOUT_SECONDS", 0.01)
     skills = SkillRegistry(tmp_path / "skills")
@@ -63,6 +67,32 @@ async def _start(monkeypatch, decisions):
         reasoning_effort=None, knowledge_base_id=None, knowledge_base_ids=None,
         skill_ids=None, expert_id=None, project_id=None,
     )
+
+
+@pytest.mark.asyncio
+async def test_verification_is_visible_traced_and_persisted(api_context, monkeypatch):
+    from data_analysis.agent.verifier import Verifier
+
+    monkeypatch.setattr(main, "Verifier", Verifier)
+    response = await _start(monkeypatch, [
+        {"type": "finish", "answer": "文件已生成：[报告](missing.md)"},
+        {"type": "finish", "answer": "尚未生成报告，无法交付该文件。"},
+        {"status": "pass", "issues": [], "checked_artifacts": []},
+    ])
+    events = [json.loads(line) async for line in response.body_iterator]
+    checks = [event for event in events if event.get("verification")]
+    assert [event["verification"]["status"] for event in checks] == ["fail", "pass"]
+    assert all(event["type"] == "agent_reasoning" for event in checks)
+    answer = "".join(event["content"] for event in events if event["type"] == "token")
+    assert "missing.md" not in answer and "尚未生成" in answer
+    done = events[-1]
+    assert done["verification_summary"]["status"] == "pass"
+    assert done["verification_summary"]["repairs"] == 1
+    metadata = store.get_session(done["discussion_id"])["messages"][-1]["metadata"]
+    assert metadata["verification_summary"] == done["verification_summary"]
+    spans = store.list_agent_spans(done["run_id"])
+    assert sum(span["kind"] == "verify" for span in spans) == 2
+    assert done["usage_summary"]["input_tokens"] == 30
 
 
 @pytest.mark.asyncio
@@ -135,3 +165,98 @@ def test_optional_pricing_configuration(api_context, monkeypatch):
     assert main._agent_token_pricing().estimate(100, 50) == pytest.approx(0.0002)
     monkeypatch.setenv("AGENT_LLM_INPUT_COST_PER_MILLION", "nan")
     assert main._agent_token_pricing() is None
+
+
+@pytest.mark.asyncio
+async def test_native_batch_stream_preserves_parallel_reads_and_each_terminal_approval(api_context, monkeypatch):
+    """真实服务装配走原生批次，安全查询并行，两个终端调用分别审批。"""
+    finish = {"type": "finish", "answer": "完成"}
+    responses = iter([
+        AIMessage(content="", tool_calls=[
+            {"name": "read", "args": {"index": i}, "id": f"read-{i}"} for i in range(2)
+        ], usage_metadata={"input_tokens": 10, "output_tokens": 2, "total_tokens": 12}),
+        AIMessage(content="", tool_calls=[
+            {"name": "run_terminal_command", "args": {"command": str(i)}, "id": f"terminal-{i}"} for i in range(2)
+        ], usage_metadata={"input_tokens": 10, "output_tokens": 2, "total_tokens": 12}),
+        AIMessage(content=json.dumps(finish), usage_metadata={"input_tokens": 10, "output_tokens": 2, "total_tokens": 12}),
+        AIMessage(content=json.dumps(finish), usage_metadata={"input_tokens": 10, "output_tokens": 2, "total_tokens": 12}),
+    ])
+
+    class Client:
+        def invoke(self, messages):
+            return AIMessage(content=json.dumps({"objective": "核验", "todos": [
+                {"id": "t1", "objective": "核验", "expected_outputs": ["证据"]},
+            ]}), usage_metadata={"input_tokens": 10, "output_tokens": 2, "total_tokens": 12})
+
+        def bind_tools(self, tools):
+            return SimpleNamespace(invoke=lambda messages: next(responses))
+
+    barrier = threading.Barrier(2)
+
+    def read(arguments, context):
+        barrier.wait(timeout=3)
+        return arguments["index"]
+
+    registry = ToolRegistry()
+    registry.register_in_process(ToolSpec("read", "读取", mutating=False, parallel_safe=True), read)
+    commands = []
+    registry.register_in_process(ToolSpec("run_terminal_command", "执行"), lambda args, ctx: commands.append(args["command"]))
+    monkeypatch.setenv("AGENT_TOOL_MODE", "auto")
+    monkeypatch.setenv("AGENT_MAX_PARALLEL_TOOLS", "2")
+    monkeypatch.setattr(main, "create_agent_tool_registry", lambda *args, **kwargs: registry)
+    monkeypatch.setattr(main, "_discussion_llm_by_id", lambda *args: Client())
+    response = await main.agent_profile_stream_endpoint(
+        message="核验", discussion_id=None, title=None, files=None, config_id=None,
+        reasoning_effort=None, knowledge_base_id=None, knowledge_base_ids=None,
+        skill_ids=None, expert_id=None, project_id=None,
+    )
+    events = []
+    approvals = []
+    async for line in response.body_iterator:
+        event = json.loads(line)
+        events.append(event)
+        if event["type"] == "agent_command_approval_required":
+            approvals.append(event["approval_id"])
+            main._pending_agent_commands[event["approval_id"]].set_result(True)
+    assert len(approvals) == 2 and commands == ["0", "1"]
+    assert events[-1]["type"] == "done"
+    assert events[-1]["usage_summary"]["input_tokens"] == 50
+    observations = [event for event in events if event["type"] == "agent_observation"]
+    assert [event["call_id"] for event in observations] == ["read-0", "read-1", "terminal-0", "terminal-1"]
+    assert all(event["success"] for event in observations)
+
+
+@pytest.mark.asyncio
+async def test_successful_review_updates_plan_snapshot_and_saved_counters(api_context, monkeypatch):
+    """服务默认装配能在成功 Todo 后复审，历史与完成事件保留同一计数。"""
+    registry = ToolRegistry()
+    registry.register_in_process(ToolSpec("read", "读取"), lambda args, ctx: {"rows": 7, "columns": ["actual"]})
+    monkeypatch.setattr(main, "create_agent_tool_registry", lambda *args, **kwargs: registry)
+    monkeypatch.setenv("AGENT_ADAPTIVE_REPLAN_ENABLED", "true")
+    monkeypatch.setenv("AGENT_REPLAN_CHECK_INTERVAL", "0")
+    monkeypatch.setenv("AGENT_MAX_ADAPTIVE_REPLANS", "2")
+    monkeypatch.setenv("AGENT_MAX_PLAN_REVIEWS", "6")
+    finish = {"type": "finish", "answer": "依据实际字段完成核验"}
+    response = await _start(monkeypatch, [
+        {"objective": "核验", "todos": [
+            {"id": "read", "objective": "读取", "expected_outputs": ["证据"]},
+            {"id": "old", "objective": "旧假设", "expected_outputs": ["核验"]},
+        ]},
+        {"type": "action", "tool_name": "read", "arguments": {}},
+        finish,
+        {"action": "revise", "reasoning_summary": "实际字段不同，更新剩余核验", "todos": [
+            {"id": "actual", "objective": "核验实际字段", "expected_outputs": ["真实证据"], "depends_on": ["read"]},
+        ]},
+        finish, finish,
+    ])
+    events = [json.loads(line) async for line in response.body_iterator]
+    plans = [event for event in events if event["type"] == "agent_plan"]
+    assert len(plans) == 2 and plans[-1]["revision_kind"] == "adaptive"
+    assert plans[-1]["todos"][0]["status"] == "completed"
+    assert plans[-1]["todos"][1]["id"] == "adaptive_1_actual"
+    done = events[-1]
+    assert done["type"] == "done"
+    assert done["replanning_summary"] == {"reviews": 1, "adaptive_replans": 1, "failure_replans": 0}
+    metadata = store.get_session(done["discussion_id"])["messages"][-1]["metadata"]
+    assert metadata["replanning_summary"] == done["replanning_summary"]
+    assert any(span["name"] == "reassess_todo_completed" for span in store.list_agent_spans(done["run_id"]))

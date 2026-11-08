@@ -30,6 +30,13 @@ class TracedLlmClient:
             raise AttributeError(name)
         return getattr(self._client, name)
 
+    def bind_tools(self, tools: list[dict[str, Any]], **kwargs: Any) -> "TracedLlmClient":
+        """工具绑定后继续使用同一计量容器，避免原生调用绕开用量采集。"""
+        bound = self._client.bind_tools(tools, **kwargs)
+        return TracedLlmClient(
+            bound, self._trace, model_name=self._model_name, pricing=self._pricing,
+        )
+
     @property
     def disable_streaming(self) -> Any:
         """读取底层流式开关，保留现有空流降级逻辑。"""

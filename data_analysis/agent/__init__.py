@@ -2,6 +2,7 @@
 
 from .loop import (
     Action,
+    ActionBatch,
     AgentLoop,
     AgentLoopError,
     AgentStateView,
@@ -24,11 +25,13 @@ from .state import (
     discover_artifacts,
     summarize_tool_payload,
 )
-from .planner import Planner, PlannerError
+from .planner import PlanDecision, Planner, PlannerError
+from .verifier import Verification, VerificationIssue, Verifier
 from .state import AnalysisPlan, TodoItem
 
 __all__ = [
     "Action",
+    "ActionBatch",
     "AgentLoop",
     "AgentLoopError",
     "AgentMessage",
@@ -49,7 +52,11 @@ __all__ = [
     "discover_artifacts",
     "summarize_tool_payload",
     "Planner",
+    "PlanDecision",
     "PlannerError",
+    "Verification",
+    "VerificationIssue",
+    "Verifier",
     "ToolSpec",
     "UnknownToolError",
 ]

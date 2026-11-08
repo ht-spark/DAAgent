@@ -98,6 +98,7 @@ test('deriveTodoStates 忽略不属于当前计划的陈旧任务 ID', () => {
     completed: 0,
     failed: 0,
     terminated: 0,
+    skipped: 0,
   })
 })
 
@@ -118,6 +119,7 @@ test('countTodoStates 汇总各状态数量', () => {
     completed: 1,
     failed: 1,
     terminated: 0,
+    skipped: 0,
   })
 })
 
@@ -138,6 +140,7 @@ test('运行终止时将进行中与等待中的任务同步标记为已终止',
     completed: 1,
     failed: 0,
     terminated: 2,
+    skipped: 0,
   })
 })
 
@@ -149,6 +152,20 @@ test('summarizeTodoObjective 压缩空白并限制任务摘要长度', () => {
     '基于画像结果， 抽样查看 data.csv 的真实记录以核验关键字段…',
   )
   assert.equal(summarizeTodoObjective('生成数据画像。'), '生成数据画像')
+})
+
+test('重规划状态快照保留已完成项，省略项不被旧启动事件覆盖', () => {
+  const original = planEvent(['t1', 't2'])
+  const revised: AgentPlan = {
+    ...original,
+    revision_kind: 'early_finish',
+    todos: original.todos.map((todo, index) => ({ ...todo, status: index === 0 ? 'completed' : 'skipped' })),
+  }
+  const states = deriveTodoStates(revised, [
+    original, { type: 'agent_todo_started', todo_id: 't2', objective: '旧工作' }, revised,
+  ])
+  assert.deepEqual(states, { t1: 'completed', t2: 'skipped' })
+  assert.equal(countTodoStates(revised, states).skipped, 1)
 })
 
 test('isActivityEvent 过滤计划与任务生命周期事件', () => {

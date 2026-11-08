@@ -20,6 +20,9 @@ from pydantic import (
 from ..experts.models import ExpertContext
 from ..skills.models import SkillContext, SkillObservation
 
+# 最近观察窗口默认保留 16 条，覆盖一个最大工具批次；调大增加跨 Todo 证据与内存开销。
+MAX_RECENT_OBSERVATIONS = 16
+
 
 class TodoItem(BaseModel):
     """顶层执行计划中的一个可独立完成的任务。"""
@@ -28,7 +31,7 @@ class TodoItem(BaseModel):
 
     id: str
     objective: str
-    status: Literal["pending", "in_progress", "completed", "failed"] = "pending"
+    status: Literal["pending", "in_progress", "completed", "failed", "skipped"] = "pending"
     depends_on: list[str] = Field(default_factory=list)
     expected_outputs: list[str] = Field(min_length=1)
     result_summary: str | None = None
@@ -140,6 +143,7 @@ class Observation(BaseModel):
     error: str | None = None
     duration_ms: int = Field(default=0, ge=0)
     span_id: str | None = Field(default=None, min_length=1)
+    call_id: str | None = Field(default=None, min_length=1)
     input_tokens: int | None = Field(default=None, ge=0, strict=True)
     output_tokens: int | None = Field(default=None, ge=0, strict=True)
     cost_estimate: float | None = Field(default=None, ge=0, allow_inf_nan=False)
@@ -710,6 +714,13 @@ class AgentState(BaseModel):
     available_artifacts: list[ArtifactReference] = Field(default_factory=list)
     messages: list[AgentMessage] = Field(default_factory=list)
     observations: list[Observation] = Field(default_factory=list)
+    recent_observations: list[Observation | SkillObservation] = Field(
+        default_factory=list, max_length=MAX_RECENT_OBSERVATIONS,
+    )
+    plan_reviews: int = Field(default=0, ge=0)
+    verification_summary: dict[str, JsonValue] | None = None
+    adaptive_replans: int = Field(default=0, ge=0)
+    failure_replans: int = Field(default=0, ge=0)
     expert_context: ExpertContext = Field(default_factory=ExpertContext)
     skill_context: SkillContext = Field(default_factory=SkillContext)
     skill_observations: list[SkillObservation] = Field(default_factory=list)
@@ -773,16 +784,18 @@ class AgentState(BaseModel):
         """
         self.messages.append(AgentMessage(role=role, content=content))
 
-    def record_observation(self, observation: Observation) -> None:
+    def record_observation(self, observation: Observation, *, count_iteration: bool = True) -> None:
         """记录本决策循环的一次工具观察，并推进一步决策轮次。
 
         Args:
             observation: Harness 返回的标准化工具结果。
+            count_iteration: 默认推进一步；同一批次只有首条观察推进决策预算。
         """
         self.observations.append(observation)
         self.absorb_observation(observation)
-        self.iteration += 1
-        self.run_budget.iterations += 1
+        if count_iteration:
+            self.iteration += 1
+            self.run_budget.iterations += 1
 
     def absorb_observation(self, observation: Observation) -> None:
         """只聚合观察带来的轨迹与真实产物，不保留结果、不推进决策轮次。
@@ -793,6 +806,7 @@ class AgentState(BaseModel):
         Args:
             observation: Harness 返回的标准化工具结果。
         """
+        self._remember_observation(observation)
         self.work_trajectory.observe_tool(
             observation.tool_name,
             result=observation.result,
@@ -814,6 +828,7 @@ class AgentState(BaseModel):
 
     def absorb_skill_observation(self, observation: SkillObservation) -> None:
         """把 Skill 操作摘要加入跨 Todo 工作轨迹。"""
+        self._remember_observation(observation)
         target = observation.resource_id or observation.entrypoint_id or observation.operation
         if observation.success:
             self.work_trajectory.add_note(
@@ -844,6 +859,11 @@ class AgentState(BaseModel):
                 continue
             self.work_trajectory.add_modified(artifact.relative_path)
             self._upsert_artifact(artifact)
+
+    def _remember_observation(self, observation: Observation | SkillObservation) -> None:
+        """仅保留有界近期证据；完整轨迹与产物仍通过现有通道保存。"""
+        self.recent_observations.append(observation)
+        del self.recent_observations[:-MAX_RECENT_OBSERVATIONS]
 
     def _upsert_artifact(self, artifact: ArtifactReference) -> None:
         """按相对路径更新产物状态，避免同一文件重复进入上下文。"""

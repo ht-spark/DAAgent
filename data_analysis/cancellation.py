@@ -15,6 +15,7 @@ import subprocess
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
+from contextvars import copy_context
 from typing import Any
 
 __all__ = [
@@ -151,7 +152,9 @@ def invoke_cancellable(
         except BaseException as exc:  # noqa: BLE001 - 透传给等待方
             error["exc"] = exc
 
-    thread = threading.Thread(target=_worker, daemon=True, name="cancellable-invoke")
+    # 继承调用分支的追踪上下文，避免工具内部的模型调用丢失父节点。
+    context = copy_context()
+    thread = threading.Thread(target=lambda: context.run(_worker), daemon=True, name="cancellable-invoke")
     thread.start()
     while thread.is_alive():
         if cancel_check():

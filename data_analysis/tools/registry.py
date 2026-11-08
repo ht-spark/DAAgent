@@ -83,6 +83,10 @@ class ToolSpec:
     name: str
     description: str
     parameters: Mapping[str, JsonValue] = field(default_factory=dict)
+    # 未标注工具默认视为可能写入且不可并行；并行必须同时显式声明只读与安全。
+    mutating: bool = True
+    parallel_safe: bool = False
+    network: bool = False
 
     def __post_init__(self) -> None:
         """规范化文本并冻结参数模式的顶层映射。"""
@@ -252,6 +256,7 @@ def create_data_profile_registry(
     registry.register(
         ToolSpec(
             name="profile_data",
+            mutating=False, parallel_safe=True,
             description=(
                 "对本次运行已授权的全部数据文件生成增强画像，包括表规模、字段类型、"
                 "缺失与重复、数值和分类分布、离群点、候选键、时间与空间字段、"
@@ -270,6 +275,7 @@ def create_data_profile_registry(
     registry.register(
         ToolSpec(
             name="inspect_data_rows",
+            mutating=False, parallel_safe=True,
             description=(
                 "按用户指定范围查看一张表的真实数据记录，用于核实字段取值、"
                 "定位异常样本或基于具体行形成洞察。start_row 从 1 开始且不含表头，"
@@ -356,6 +362,7 @@ def create_agent_tool_registry(
         registry.register(
             ToolSpec(
                 name="explore_math_models",
+                mutating=False, parallel_safe=True,
                 description=(
                     "对已授权数据做数学建模探索：发现变量间函数规律"
                     "（线性/多项式/对数/指数/幂律拟合），可选目标列时拟合多元"
@@ -411,6 +418,7 @@ def create_agent_tool_registry(
         registry.register(
             ToolSpec(
                 name="read_attachment_file",
+                mutating=False, parallel_safe=True,
                 description=(
                     "按 available_data_files 中的 file_path 读取用户上传的文本或代码附件，"
                     "包括 .py；不执行脚本。上传附件不属于项目目录，不要用"
@@ -485,6 +493,7 @@ def create_agent_tool_registry(
         registry.register_in_process(
             ToolSpec(
                 name="search_knowledge_base",
+                mutating=False, parallel_safe=False, network=True,
                 description=(
                     "按需检索用户为当前会话预先选定的知识库。仅当回答依赖业务口径、"
                     "内部资料、历史结论或其他知识库事实时调用；普通问答、纯计算或现有"
@@ -511,6 +520,7 @@ def create_agent_tool_registry(
     registry.register_in_process(
         ToolSpec(
             name="search_web",
+            mutating=False, parallel_safe=True, network=True,
             description=(
                 "按需联网检索公开网页。仅当问题依赖近期变化、外部事实、最新资料或"
                 "需要可核验网页来源，而现有对话、附件和知识库信息不足时调用；不要"
@@ -539,6 +549,7 @@ def create_agent_tool_registry(
         registry.register(
             ToolSpec(
                 name="list_workspace_directory",
+                mutating=False, parallel_safe=True,
                 description=(
                     "列出当前项目目录的直接子目录和文件，用于逐层探索项目布局。"
                     "默认查看项目根目录；自动跳过依赖、版本库和缓存目录。"
@@ -557,6 +568,7 @@ def create_agent_tool_registry(
         registry.register(
             ToolSpec(
                 name="list_workspace_files",
+                mutating=False, parallel_safe=True,
                 description=(
                     "列出当前项目目录中的文件。只读取项目目录，自动跳过 .git、"
                     ".venv、node_modules、outputs 和缓存目录。"
@@ -576,6 +588,7 @@ def create_agent_tool_registry(
         registry.register(
             ToolSpec(
                 name="read_workspace_file",
+                mutating=False, parallel_safe=True,
                 description=(
                     "读取当前项目目录内一个 UTF-8 文本文件。路径必须来自"
                     " list_workspace_directory 或 list_workspace_files；支持项目相对路径和"
@@ -604,6 +617,7 @@ def create_agent_tool_registry(
         registry.register(
             ToolSpec(
                 name="search_workspace_text",
+                mutating=False, parallel_safe=True,
                 description="在当前项目的 UTF-8 文本文件中搜索固定字符串。",
                 parameters={
                     "type": "object",
@@ -716,6 +730,7 @@ def create_agent_tool_registry(
     registry.register(
         ToolSpec(
             name="inspect_artifact",
+            mutating=False, parallel_safe=True,
             description=(
                 "读取并复核当前会话中已经生成的文本、代码、Markdown、JSON 或 CSV "
                 "产物。生成或修改代码及文本产物后，在最终回答前调用此工具确认实际"
@@ -742,6 +757,7 @@ def create_agent_tool_registry(
         registry.register_in_process(
             ToolSpec(
                 name="inspect_generated_image",
+                mutating=False, parallel_safe=False, network=True,
                 description=(
                     "调用当前视觉模型复核已经生成的图片产物。生成或修改图片后，在"
                     "最终回答前调用此工具检查图表数据表达、标题、坐标轴、图例、布局"
@@ -777,6 +793,7 @@ def create_agent_tool_registry(
         registry.register_in_process(
             ToolSpec(
                 name="inspect_image",
+                mutating=False, parallel_safe=False, network=True,
                 description=(
                     "调用当前视觉模型查看一张已上传图片。适用于读取图片中的文字、"
                     "表格、公式、图表、几何关系和建模约束。file_path 必须从"

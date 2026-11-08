@@ -6,7 +6,7 @@ import type { AgentTraceEvent } from './api'
 export type AgentPlan = Extract<AgentTraceEvent, { type: 'agent_plan' }>
 
 /** 单个任务的执行状态 */
-export type TodoStatus = 'pending' | 'in_progress' | 'completed' | 'failed' | 'terminated'
+export type TodoStatus = 'pending' | 'in_progress' | 'completed' | 'failed' | 'terminated' | 'skipped'
 
 /** 任务状态映射：任务 ID -> 执行状态 */
 export type TodoStateMap = Record<string, TodoStatus>
@@ -18,6 +18,7 @@ export const TODO_STATUS_LABELS: Record<TodoStatus, string> = {
   completed: '已完成',
   failed: '失败',
   terminated: '已终止',
+  skipped: '已省略',
 }
 
 const DEFAULT_TODO_SUMMARY_LENGTH = 34
@@ -66,8 +67,11 @@ export function deriveTodoStates(
 ): TodoStateMap {
   const states: TodoStateMap = {}
   if (!plan) return states
-  plan.todos.forEach((todo) => { states[todo.id] = 'pending' })
-  trace.forEach((event) => {
+  plan.todos.forEach((todo) => { states[todo.id] = todo.status ?? 'pending' })
+  // 新版计划携带状态快照；旧计划缺少快照时仍从完整历史恢复状态。
+  const snapshotIndex = plan.todos.some((todo) => todo.status !== undefined) ? trace.lastIndexOf(plan) : -1
+  const subsequentEvents = snapshotIndex >= 0 ? trace.slice(snapshotIndex + 1) : trace
+  subsequentEvents.forEach((event) => {
     if (event.type !== 'agent_todo_started'
       && event.type !== 'agent_todo_completed'
       && event.type !== 'agent_todo_failed') {
@@ -90,13 +94,14 @@ export function deriveTodoStates(
 export function countTodoStates(
   plan: AgentPlan | undefined,
   states: TodoStateMap,
-): { pending: number; inProgress: number; completed: number; failed: number; terminated: number } {
-  const counts = { pending: 0, inProgress: 0, completed: 0, failed: 0, terminated: 0 }
+): { pending: number; inProgress: number; completed: number; failed: number; terminated: number; skipped: number } {
+  const counts = { pending: 0, inProgress: 0, completed: 0, failed: 0, terminated: 0, skipped: 0 }
   plan?.todos.forEach((todo) => {
     const status = states[todo.id]
     if (status === 'completed') counts.completed += 1
     else if (status === 'failed') counts.failed += 1
     else if (status === 'terminated') counts.terminated += 1
+    else if (status === 'skipped') counts.skipped += 1
     else if (status === 'in_progress') counts.inProgress += 1
     else counts.pending += 1
   })

@@ -26,6 +26,7 @@ from ..experts.models import ExpertContext
 from ..tools.registry import ToolSpec
 from ..skills.models import SkillAction, SkillContext
 from ..cancellation import invoke_cancellable, raise_if_cancelled
+from ..observability.trace import RunTrace
 from .state import clip_text, summarize_tool_payload
 
 # 观察记忆预算：最近的结果优先原样保留，更早的折叠成摘要行，避免单次 run 撑爆窗口
@@ -99,6 +100,7 @@ class Action(BaseModel):
     thought: str = ""
     tool_name: str = Field(min_length=1)
     arguments: dict[str, Any] = Field(default_factory=dict)
+    call_id: str | None = Field(default=None, min_length=1)
     # 兼容旧状态模型的内部字段；对外只公开 thought 摘要。
     reasoning: str = ""
 
@@ -146,8 +148,17 @@ Decision: TypeAlias = Action | SkillAction | Finish
 _DECISION_ADAPTER = TypeAdapter(Decision)
 
 
+class ActionBatch(BaseModel):
+    """一次模型决策产生的有序调用；运行时决定能否并行执行。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    # 每次最多接收 16 个调用，限制单次回复的执行放大；不是并发数，超出时纠错或回退。
+    actions: list[Action] = Field(min_length=1, max_length=16)
+
+
 class AgentLoop:
-    """Ask an LLM for exactly one validated action or final answer per step."""
+    """统一单步 JSON 与批量原生工具决策，工具由执行层运行。"""
 
     def __init__(
         self,
@@ -159,6 +170,8 @@ class AgentLoop:
         decision_retries: int = 5,
         cancel_check: Callable[[], bool] | None = None,
         progress_callback: ProgressCallback | None = None,
+        tool_mode: Literal["json", "native", "auto"] = "json",
+        trace: RunTrace | None = None,
     ) -> None:
         """Initialize the decision-only loop.
 
@@ -170,6 +183,8 @@ class AgentLoop:
             decision_retries: 决策格式错误或工具名无效时的纠错重试次数。
             cancel_check: 用户请求终止时返回 True；将在调用 LLM 前后检查。
             progress_callback: 接收可公开思考摘要的流式更新。
+            tool_mode: 默认 json 保持单步兼容；auto 优先原生且可回退，native 显式要求原生。
+            trace: 记录协议回退，不影响正常模型计量。
 
         Raises:
             ValueError: If configuration is empty, duplicated, or out of range.
@@ -180,6 +195,8 @@ class AgentLoop:
             raise ValueError("max_iterations 必须大于 0")
         if decision_retries < 0:
             raise ValueError("decision_retries 不能为负数")
+        if tool_mode not in {"json", "native", "auto"}:
+            raise ValueError("tool_mode 必须为 json、native 或 auto")
         tool_names = [tool.name for tool in tools]
         if len(tool_names) != len(set(tool_names)):
             raise ValueError("工具名称不能重复")
@@ -193,6 +210,61 @@ class AgentLoop:
         self._cancel_check = cancel_check
         self._progress_callback = progress_callback
         self._progress_sequence = 0
+        self._tool_mode = tool_mode
+        self._trace = trace
+        self._native_client: Any = None
+        self._native_disabled = False
+
+    def step_batch(self, state: AgentStateView) -> ActionBatch | SkillAction | Finish:
+        """优先使用原生工具调用；JSON 模式继续复用经过验证的单步决策。
+
+        Args:
+            state: 本次决策的状态与工具观察。
+
+        Returns:
+            有序工具调用、单个技能操作或最终回答。
+        """
+        from .decision import NativeToolClient, is_native_unsupported, parse_native_response
+
+        if self._tool_mode == "json" or self._native_disabled or not self._tools:
+            decision = self.step(state)
+            return ActionBatch(actions=[decision]) if isinstance(decision, Action) else decision
+        if state.iteration < 0:
+            raise ValueError("state.iteration 不能为负数")
+        if self._used_iterations(state) >= self._max_iterations:
+            raise IterationLimitError(f"Agent 已达到最大决策轮数 {self._max_iterations}")
+        raise_if_cancelled(self._cancel_check)
+        try:
+            if self._native_client is None:
+                self._native_client = NativeToolClient(self._llm, self._tools).bind()
+            messages = self.build_messages(state, native=True)
+            for attempt in range(self._decision_retries + 1):
+                self._progress_sequence += 1
+                response, text = invoke_llm_with_public_progress(
+                    self._native_client, messages, summary_key="thought",
+                    stream_id=f"react-{self._progress_sequence}",
+                    initial_text="正在分析当前状态并决定下一步…",
+                    progress_callback=self._progress_callback, cancel_check=self._cancel_check,
+                    preserve_response=True,
+                )
+                try:
+                    return parse_native_response(response, text, self._tool_names)
+                except DecisionParseError as exc:
+                    if self._tool_mode == "auto" or attempt >= self._decision_retries:
+                        raise
+                    messages.append(("user", f"上一条原生调用无效：{exc}。请修正全部调用后重新提交。"))
+        except Exception as exc:
+            if self._tool_mode != "auto" or not (
+                isinstance(exc, DecisionParseError) or is_native_unsupported(exc)
+            ):
+                raise
+            self._native_disabled = True
+            if self._trace is not None:
+                span = self._trace.begin("fallback", "native_to_json")
+                self._trace.end(span, error_type=type(exc).__name__)
+            decision = self.step(state)
+            return ActionBatch(actions=[decision]) if isinstance(decision, Action) else decision
+        raise DecisionParseError("原生工具调用未产生决策")
 
     def step(self, state: AgentStateView) -> Decision:
         """Return the next decision without executing the selected tool.
@@ -276,7 +348,7 @@ class AgentLoop:
             "请严格按既定协议重新输出一个 JSON 对象。"
         )
 
-    def build_messages(self, state: AgentStateView) -> list[tuple[str, str]]:
+    def build_messages(self, state: AgentStateView, *, native: bool = False) -> list[tuple[str, str]]:
         """Build provider-neutral chat messages for one ReAct decision."""
         tools = [
             {
@@ -300,6 +372,8 @@ class AgentLoop:
             "没有可用工具时只能输出 finish。answer 中的换行必须按 JSON 规则转义。"
             "answer 中出现的双引号也必须转义。"
         )
+        if native:
+            protocol = (Path(__file__).resolve().parents[1] / "prompts" / "native_tools.md").read_text(encoding="utf-8")
         skill_context = getattr(state, "skill_context", SkillContext())
         if skill_context.active_skills:
             protocol += (
@@ -332,6 +406,9 @@ class AgentLoop:
                 )
             )
         messages.extend(_conversation_messages(state.messages))
+        local_observations = [*state.observations, *getattr(state, "skill_observations", ())]
+        local_ids = {id(item) for item in local_observations}
+        prior_observations = [item for item in getattr(state, "recent_observations", ()) if id(item) not in local_ids]
         context: dict[str, Any] = {
             "user_query": state.user_query,
             "iteration": state.iteration,
@@ -357,7 +434,7 @@ class AgentLoop:
             "project_id": getattr(state, "project_id", None),
             "workspace_enabled": bool(getattr(state, "workspace_root", None)),
             "active_expert": _active_expert_view(expert_context),
-            "observations": _project_observations(state.observations),
+            "observations": _project_observations([*prior_observations, *state.observations]),
             "skill_observations": _project_observations(
                 getattr(state, "skill_observations", ())
             ),
@@ -500,6 +577,17 @@ def _project_observations(observations: Sequence[Any]) -> dict[str, Any]:
         recent = [
             _shrink_json(recent[0], max_string_chars=MAX_OBSERVATION_STRING_CHARS)
         ]
+        if len(_json_text(recent[0])) > MAX_OBSERVATION_CONTEXT_CHARS:
+            # 巨大数值数组或很多短字段也会超预算；显式回传 JSON 预览，不冒充完整结构。
+            source = recent[0]
+            metadata = {
+                key: source[key] for key in ("tool_name", "operation", "skill_id", "success", "span_id", "call_id")
+                if isinstance(source, Mapping) and key in source
+            }
+            recent = [{**metadata, "result": {
+                "truncated": True,
+                "preview": _clip_observation_text(_json_text(source), MAX_OBSERVATION_CONTEXT_CHARS // 2),
+            }}]
 
     older = items[: index + 1]
     digests = [
@@ -581,6 +669,7 @@ def invoke_llm_with_public_progress(
     initial_text: str,
     progress_callback: ProgressCallback | None,
     cancel_check: Callable[[], bool] | None,
+    preserve_response: bool = False,
 ) -> tuple[Any, str]:
     """调用模型并流式发送结构化输出中的可公开摘要字段。"""
     if progress_callback is None:
@@ -588,7 +677,7 @@ def invoke_llm_with_public_progress(
             lambda: llm.invoke(messages),
             cancel_check=cancel_check,
         )
-        return response, _response_text(response)
+        return response, _safe_response_text(response) if preserve_response else _response_text(response)
 
     progress_callback(stream_id, initial_text, False)
     stream_method = getattr(llm, "stream", None)
@@ -598,30 +687,37 @@ def invoke_llm_with_public_progress(
                 lambda: llm.invoke(messages),
                 cancel_check=cancel_check,
             )
-            return response, _response_text(response)
+            return response, _safe_response_text(response) if preserve_response else _response_text(response)
         finally:
             progress_callback(stream_id, "", True)
 
     try:
-        def consume_stream() -> str:
+        def consume_stream() -> tuple[Any, str]:
             """在可取消工作线程中消费模型流，并推送公开摘要。"""
             chunks: list[str] = []
             last_summary = ""
+            response: Any = None
             stream = stream_method(messages)
-            for chunk in stream:
-                raise_if_cancelled(cancel_check)
-                text = _safe_response_text(chunk)
-                if not text:
-                    continue
-                chunks.append(text)
-                summary = _partial_json_string("".join(chunks), summary_key).strip()
-                if summary and summary != last_summary:
-                    progress_callback(stream_id, summary, False)
-                    last_summary = summary
-            return "".join(chunks)
+            try:
+                for chunk in stream:
+                    raise_if_cancelled(cancel_check)
+                    if preserve_response:
+                        response = chunk if response is None else response + chunk
+                    text = _safe_response_text(chunk)
+                    if not text:
+                        continue
+                    chunks.append(text)
+                    summary = _partial_json_string("".join(chunks), summary_key).strip()
+                    if summary and summary != last_summary:
+                        progress_callback(stream_id, summary, False)
+                        last_summary = summary
+            finally:
+                if callable(getattr(stream, "close", None)):
+                    stream.close()
+            return response, "".join(chunks)
 
         try:
-            response_text = invoke_cancellable(
+            response, response_text = invoke_cancellable(
                 consume_stream,
                 cancel_check=cancel_check,
             )
@@ -630,7 +726,11 @@ def invoke_llm_with_public_progress(
                 lambda: llm.invoke(messages),
                 cancel_check=cancel_check,
             )
-            return response, _response_text(response)
+            return response, _safe_response_text(response) if preserve_response else _response_text(response)
+        if preserve_response and (
+            getattr(response, "tool_calls", None) or getattr(response, "invalid_tool_calls", None)
+        ):
+            return response, response_text
         if not response_text.strip():
             progress_callback(
                 stream_id,
@@ -646,8 +746,8 @@ def invoke_llm_with_public_progress(
                 lambda: llm.invoke(messages),
                 cancel_check=cancel_check,
             )
-            return response, _response_text(response)
-        return response_text, response_text
+            return response, _safe_response_text(response) if preserve_response else _response_text(response)
+        return response if preserve_response else response_text, response_text
     finally:
         progress_callback(stream_id, "", True)
 

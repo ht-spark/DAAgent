@@ -6,9 +6,9 @@ import json
 import re
 from pathlib import Path
 from collections.abc import Callable, Mapping
-from typing import Any, Sequence
+from typing import Any, Literal, Sequence
 
-from pydantic import ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from ..experts.models import ExpertContext
 from ..tools.registry import ToolSpec
@@ -18,13 +18,15 @@ from .loop import (
     LlmClient,
     ProgressCallback,
     invoke_llm_with_public_progress,
+    _project_observations,
 )
-from .state import AgentState, AnalysisPlan, clip_text
+from .state import AgentState, AnalysisPlan, TodoItem, clip_text
 
 _PLANNER_PROMPT_PATH = Path(__file__).resolve().parents[1] / "prompts" / "planner.md"
 _AGENT_SYSTEM_PROMPT_PATH = (
     Path(__file__).resolve().parents[1] / "prompts" / "system.md"
 )
+_REASSESS_PROMPT_PATH = Path(__file__).resolve().parents[1] / "prompts" / "reassess.md"
 
 # Planner 会话原文视野：短会话时滚动摘要为空，必须补上最近轮次以免误规划
 MAX_PLANNER_HISTORY_MESSAGES = 8          # 注入的最近对话条数
@@ -43,6 +45,76 @@ MAX_RECOVERY_RESULT_CHARS = 1_000         # 重规划时单条已完成结果的
 
 class PlannerError(RuntimeError):
     """Planner 无法生成有效执行计划。"""
+
+
+class PlanDecision(BaseModel):
+    """只选择继续、改写未完成任务或提前汇总，不直接生成工具事实。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    action: Literal["continue", "revise", "finish_early"]
+    reasoning_summary: str = Field(min_length=1)
+    todos: list[TodoItem] = Field(default_factory=list, max_length=12)
+
+    @field_validator("reasoning_summary")
+    @classmethod
+    def normalize_reason(cls, value: str) -> str:
+        """公开理由不能为空白。"""
+        if not value.strip():
+            raise ValueError("复审理由不能为空")
+        return value.strip()
+
+    @model_validator(mode="after")
+    def validate_revision(self) -> "PlanDecision":
+        """只有改写动作可以携带待执行任务，禁止预填执行成功。"""
+        if (self.action == "revise") != bool(self.todos):
+            raise ValueError("revise 必须提供剩余任务，其他动作不得提供 todos")
+        if any(todo.status != "pending" or todo.result_summary is not None for todo in self.todos):
+            raise ValueError("新任务必须为 pending，不能预填结果")
+        return self
+
+
+def merge_revised_plan(
+    previous: AnalysisPlan, todos: Sequence[TodoItem | dict[str, Any]], revision: int,
+) -> AnalysisPlan:
+    """保留已结束结果，校验并命名剩余计划；未知或不可满足的依赖直接拒绝。
+
+    Args:
+        previous: 当前执行计划。
+        todos: 复审提出的全部剩余任务，可引用已完成任务或本次新任务。
+        revision: 本次自适应改写序号，用于分配不冲突的任务标识。
+
+    Returns:
+        已验证标识唯一、依赖可满足且无环的新计划。
+    """
+    proposed = [TodoItem.model_validate(todo) for todo in todos]
+    preserved = [todo.model_copy(deep=True) for todo in previous.todos
+                 if todo.status in {"completed", "failed", "skipped"}]
+    preserved_ids = {todo.id for todo in preserved}
+    completed_ids = {todo.id for todo in preserved if todo.status == "completed"}
+    new_ids = [todo.id for todo in proposed]
+    if len(set(new_ids)) != len(new_ids) or set(new_ids) & preserved_ids:
+        raise ValueError("剩余任务标识重复或与已保留任务冲突")
+    mapping = {todo.id: f"adaptive_{revision}_{todo.id}" for todo in proposed}
+    if set(mapping.values()) & preserved_ids:
+        raise ValueError("重映射后的标识与历史任务冲突")
+    revised = []
+    for todo in proposed:
+        if todo.status != "pending" or todo.result_summary is not None:
+            raise ValueError("剩余任务不能预填状态或结果")
+        dependencies = []
+        for required in todo.depends_on:
+            if required in mapping:
+                dependencies.append(mapping[required])
+            elif required in completed_ids:
+                dependencies.append(required)
+            else:
+                raise ValueError(f"剩余任务依赖未知或未完成的历史任务：{required}")
+        revised.append(todo.model_copy(update={"id": mapping[todo.id], "depends_on": dependencies}, deep=True))
+    return AnalysisPlan(
+        objective=previous.objective, reasoning_summary=previous.reasoning_summary,
+        todos=[*preserved, *revised],
+    )
 
 
 class Planner:
@@ -176,14 +248,72 @@ class Planner:
             run_budget=state.run_budget,
             skill_context=state.skill_context,
             skill_observations=list(state.skill_observations),
+            recent_observations=list(state.recent_observations),
+            analysis_plan=plan,
+            expert_context=state.expert_context,
         )
         recovery = self.create_plan(recovery_state, allow_direct=False)
         if isinstance(recovery, Finish):  # pragma: no cover - allow_direct=False 已拦截
             raise PlannerError("失败恢复必须返回可执行计划")
         return recovery
 
+    def reassess(self, state: AgentState, plan: AnalysisPlan, trigger: str) -> PlanDecision:
+        """基于实际观察复审剩余计划，有限纠错后仍失败时交给调度器保留原计划。
+
+        Args:
+            state: 含真实近期观察、轨迹与产物的运行状态。
+            plan: 当前完整计划，已完成结果只能复用。
+            trigger: 调度器提供的复审时机，不替模型决定分析路径。
+
+        Returns:
+            已校验的继续、改写或提前汇总决策。
+        """
+        context = self._build_context(state, plan)
+        context["review_trigger"] = trigger
+        context["review_budget_used"] = state.plan_reviews
+        try:
+            template = _REASSESS_PROMPT_PATH.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise PlannerError("无法读取计划复审提示词") from exc
+        messages = [
+            ("system", f"{_load_agent_system_prompt()}{_expert_directive(state.expert_context)}"),
+            ("user", template.replace("{{CONTEXT_JSON}}", json.dumps(context, ensure_ascii=False, indent=2))),
+        ]
+        for attempt in range(self._retries + 1):
+            raise_if_cancelled(self._cancel_check)
+            self._progress_sequence += 1
+            _, raw = invoke_llm_with_public_progress(
+                self._llm, messages, summary_key="reasoning_summary",
+                stream_id=f"planner-{self._progress_sequence}", initial_text="正在根据工具证据复审剩余计划…",
+                progress_callback=self._progress_callback, cancel_check=self._cancel_check,
+            )
+            try:
+                text = re.sub(r"^\s*<think>.*?</think>\s*", "", raw, count=1, flags=re.DOTALL | re.IGNORECASE)
+                text = re.sub(r"^\s*```(?:json)?\s*|\s*```\s*$", "", text.strip())
+                decision = PlanDecision.model_validate_json(text)
+                if decision.action == "revise":
+                    if len(decision.todos) > self._max_todos:
+                        raise ValueError("剩余任务超过规划上限")
+                    merge_revised_plan(plan, decision.todos, state.adaptive_replans + 1)
+                return decision
+            except (ValidationError, ValueError) as exc:
+                if attempt >= self._retries:
+                    raise PlannerError("无法生成有效计划复审决策") from exc
+                messages.extend([("assistant", raw), ("user", f"复审决策无效：{exc}。请修正后只输出合法 JSON。")])
+        raise PlannerError("计划复审未产生决策")
+
     def build_messages(self, state: AgentState) -> list[tuple[str, str]]:
         """构造负责请求分流与规划、不执行工具的 Planner 消息。"""
+        context = self._build_context(state)
+        prompt = _render_planner_prompt(context, self._max_todos)
+        expert_directive = _expert_directive(state.expert_context)
+        return [
+            ("system", f"{_load_agent_system_prompt()}{expert_directive}"),
+            ("user", prompt),
+        ]
+
+    def _build_context(self, state: AgentState, plan: AnalysisPlan | None = None) -> dict[str, Any]:
+        """初始规划、失败恢复与成功路径复审共用同一证据投影。"""
         tools = [
             {"name": tool.name, "description": tool.description}
             for tool in self._tools
@@ -200,8 +330,22 @@ class Planner:
         trajectory_view["artifact_descriptions"] = dict(
             trajectory.artifact_descriptions
         )
+        current_plan = plan or state.analysis_plan
+        plan_view = current_plan.model_dump(mode="json") if current_plan else None
+        if plan_view:
+            for item in plan_view["todos"]:
+                if item["result_summary"] is not None:
+                    item["result_summary"] = clip_text(item["result_summary"], MAX_RECOVERY_RESULT_CHARS)
         context = {
             "user_query": state.user_query,
+            "recent_observations": _project_observations(state.recent_observations or state.observations),
+            "current_todo_id": state.current_todo_id,
+            "current_plan": plan_view,
+            "completed_todos": [
+                {"id": todo.id, "objective": todo.objective,
+                 "result_summary": clip_text(todo.result_summary or "", MAX_RECOVERY_RESULT_CHARS)}
+                for todo in current_plan.todos if todo.status == "completed"
+            ] if current_plan else [],
             "available_data_files": [
                 {
                     "file_name": Path(path).name,
@@ -248,12 +392,7 @@ class Planner:
                 for active in state.skill_context.active_skills
             ],
         }
-        prompt = _render_planner_prompt(context, self._max_todos)
-        expert_directive = _expert_directive(state.expert_context)
-        return [
-            ("system", f"{_load_agent_system_prompt()}{expert_directive}"),
-            ("user", prompt),
-        ]
+        return context
 
 
 def _expert_directive(context: ExpertContext) -> str:

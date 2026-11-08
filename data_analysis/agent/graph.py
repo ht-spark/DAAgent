@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable, Iterator
+import logging
+from collections.abc import Generator, Iterable, Iterator
+from contextlib import nullcontext
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
-from .loop import Action, AgentLoop, Finish
-from .planner import Planner
+from .loop import Action, ActionBatch, AgentLoop, Finish, IterationLimitError
+from .planner import Planner, merge_revised_plan
+from .verifier import Verification, Verifier
 from .state import AgentState, AnalysisPlan, Observation, TodoItem, clip_text
 from ..cancellation import TaskCancelledError
 from ..observability.trace import RunTrace
@@ -34,11 +38,12 @@ __all__ = [
     "run_plan_graph",
 ]
 
-GraphEvent = Action | SkillAction | Observation | SkillObservation | Finish
+GraphEvent = Action | SkillAction | Observation | SkillObservation | Finish | Verification
 
 # Todo 结果进入后续 prompt 的字符预算，避免长回答被反复整段复制
 MAX_RESULT_SUMMARY_CHARS = 2_000          # 单个 Todo 结果摘要的字符上限
 MAX_PLAN_RESULTS_CHARS = 16_000           # 单次 prompt 内全部已完成结果的总预算
+LOGGER = logging.getLogger(__name__)
 
 
 class PlanCreated(BaseModel):
@@ -46,6 +51,7 @@ class PlanCreated(BaseModel):
 
     model_config = ConfigDict(frozen=True)
     plan: AnalysisPlan
+    revision_kind: Literal["initial", "failure", "adaptive", "early_finish"] = "initial"
 
 
 class TodoStarted(BaseModel):
@@ -80,6 +86,9 @@ def iter_graph(
     loop: AgentLoop,
     harness: Harness,
     skill_runtime: SkillRuntime | None = None,
+    *,
+    verifier: Verifier | None = None,
+    max_verify_retries: int = 1,
 ) -> Iterator[GraphEvent]:
     """逐事件运行思考、执行、观察循环。
 
@@ -101,25 +110,17 @@ def iter_graph(
     repeats = RepeatGuard()
     skill_repeats: set[str] = set()
     while True:
-        decision = loop.step(state)
+        decision = _step_decision(loop, state)
         if isinstance(decision, Finish):
-            state.append_message("user", state.user_query)
-            state.append_message("assistant", decision.answer)
-            yield decision
+            yield from _verify_delivery(decision, state, loop, harness, skill_runtime,
+                                        verifier, max_verify_retries)
             return
+        failure_summary = yield from _run_decision(
+            decision, state, harness, repeats, failures, skill_runtime, skill_repeats,
+        )
+        if failure_summary is not None:
+            raise RepeatedToolFailureError(failure_summary)
 
-        yield decision
-        if isinstance(decision, SkillAction):
-            observation = _execute_skill_once(decision, skill_runtime, skill_repeats)
-            state.record_skill_observation(observation)
-        else:
-            observation = _execute_once(decision, harness, repeats)
-            state.record_observation(observation)
-        yield observation
-        if isinstance(decision, Action) and isinstance(observation, Observation):
-            circuit = failures.record(decision, observation)
-            if circuit is not None:
-                raise RepeatedToolFailureError(_failure_summary(circuit))
 
 
 def run_graph(
@@ -127,6 +128,9 @@ def run_graph(
     loop: AgentLoop,
     harness: Harness,
     skill_runtime: SkillRuntime | None = None,
+    *,
+    verifier: Verifier | None = None,
+    max_verify_retries: int = 1,
 ) -> Finish:
     """运行思考—执行—观察循环，直到 Agent 返回最终回答。
 
@@ -144,7 +148,8 @@ def run_graph(
     Raises:
         AgentLoopError: LLM 决策无效或超过最大迭代次数。
     """
-    for event in iter_graph(state, loop, harness, skill_runtime):
+    for event in iter_graph(state, loop, harness, skill_runtime,
+                            verifier=verifier, max_verify_retries=max_verify_retries):
         if isinstance(event, Finish):
             return event
     raise RuntimeError("Agent 图未产生最终回答")
@@ -161,6 +166,12 @@ def iter_plan_graph(
     max_replans: int = 2,
     max_todo_steps: int = 30,
     trace: RunTrace | None = None,
+    adaptive_replan_enabled: bool = False,
+    max_adaptive_replans: int = 2,
+    replan_check_interval: int = 0,
+    max_plan_reviews: int = 6,
+    verifier: Verifier | None = None,
+    max_verify_retries: int = 1,
 ) -> Iterator[PlanGraphEvent]:
     """按原事件语义调度计划，并可选采集规划与 Todo 片段。
 
@@ -174,20 +185,54 @@ def iter_plan_graph(
         max_replans: 默认最多恢复规划 2 次；调大增加恢复机会和模型开销。
         max_todo_steps: 默认每个 Todo 30 步；调大允许更复杂子任务。
         trace: 当前运行独享的追踪容器；省略时不采集。
+        adaptive_replan_enabled: 库入口默认关闭以兼容旧调用，服务端默认开启。
+        max_adaptive_replans: 默认最多 2 次成功路径的计划改变，与失败恢复独立；0 禁用。
+        replan_check_interval: 默认 0 只在 Todo 边界复审；正数按决策批次间隔复审，越小开销越高。
+        max_plan_reviews: 默认最多 6 次复审（含继续和失败）；0 禁用，限制额外模型开销。
+        verifier: 独立交付验证器；省略时保留旧库调用行为。
+        max_verify_retries: 默认只允许 1 次失败修订，0 只验证不修订；不得超过 3。
     """
-    iterator = _iter_plan_graph(
+    if type(max_verify_retries) is not int or not 0 <= max_verify_retries <= 3:
+        raise ValueError("验证修订次数必须为 0 到 3 的整数")
+    source = _iter_plan_graph(
         state, planner, loop, harness, skill_runtime=skill_runtime,
         failure_threshold=failure_threshold, max_replans=max_replans,
         max_todo_steps=max_todo_steps, trace=trace,
+        adaptive_replan_enabled=adaptive_replan_enabled, max_adaptive_replans=max_adaptive_replans,
+        replan_check_interval=replan_check_interval, max_plan_reviews=max_plan_reviews,
     )
+
+    active = None
+
+    def deliver() -> Iterator[PlanGraphEvent]:
+        """覆盖计划直接回答和正常汇总两个出口，候选答案不提前写入历史。"""
+        nonlocal active
+        try:
+            for event in source:
+                if isinstance(event, Finish):
+                    if trace is not None:
+                        trace.end(active)
+                        active = None
+                    yield from _verify_delivery(event, state, loop, harness, skill_runtime,
+                                                verifier, max_verify_retries, trace)
+                    return
+                yield event
+        finally:
+            source.close()
+
+    iterator = deliver()
     if trace is None:
         yield from iterator
         return
     active = trace.begin("plan", "create_plan")
     try:
         for event in iterator:
-            if isinstance(event, (PlanCreated, Finish)):
-                trace.end(active)
+            if isinstance(event, (PlanCreated, Finish, Verification)):
+                interrupted = isinstance(event, PlanCreated) and event.revision_kind in {"adaptive", "early_finish"}
+                if interrupted and active is not None and active.kind == "todo":
+                    trace.end(active, status="cancelled", error_type="PlanRevised")
+                else:
+                    trace.end(active)
                 active = None
             elif isinstance(event, TodoStarted):
                 active = trace.begin("todo", event.todo_id)
@@ -222,6 +267,10 @@ def _iter_plan_graph(
     max_replans: int = 2,
     max_todo_steps: int = 30,
     trace: RunTrace | None = None,
+    adaptive_replan_enabled: bool = False,
+    max_adaptive_replans: int = 2,
+    replan_check_interval: int = 0,
+    max_plan_reviews: int = 6,
 ) -> Iterator[PlanGraphEvent]:
     """运行顶层 Plan-and-Execute，并复用原有 ReAct 完成每个 Todo。
 
@@ -237,17 +286,64 @@ def _iter_plan_graph(
     """
     if max_todo_steps < 1:
         raise ValueError("max_todo_steps 必须大于 0")
+    if any(type(value) is not int or value < 0 for value in (max_adaptive_replans, replan_check_interval, max_plan_reviews)):
+        raise ValueError("复审间隔与预算必须为非负整数")
     plan = planner.create_plan(state)
     if isinstance(plan, Finish):
-        state.append_message("user", state.user_query)
-        state.append_message("assistant", plan.answer)
         yield plan
         return
     state.analysis_plan = plan
     replan_count = 0
     yield PlanCreated(plan=plan)
+    last_review_iteration = -1
+    finished_early = False
 
-    while True:
+    def maybe_reassess(trigger: str) -> PlanCreated | None:
+        """只提供复审时机；有新观察、预算未耗尽时才请求模型判断。"""
+        nonlocal plan, last_review_iteration, finished_early
+        if not adaptive_replan_enabled or not callable(getattr(planner, "reassess", None)):
+            return None
+        if state.plan_reviews >= max_plan_reviews or state.adaptive_replans >= max_adaptive_replans:
+            return None
+        if not state.recent_observations or state.run_budget.iterations == last_review_iteration:
+            return None
+        if not any(item.status in {"pending", "in_progress"} for item in plan.todos):
+            return None
+        last_review_iteration = state.run_budget.iterations
+        state.plan_reviews += 1
+        scope = trace.span("plan", f"reassess_{trigger}") if trace else nullcontext()
+        try:
+            with scope:
+                decision = planner.reassess(state, plan, trigger)
+                if decision.action == "continue":
+                    return None
+                if decision.action == "revise":
+                    revised = merge_revised_plan(plan, decision.todos, state.adaptive_replans + 1)
+                    revision_kind = "adaptive"
+                else:
+                    revised = plan.model_copy(deep=True)
+                    for item in revised.todos:
+                        if item.status in {"pending", "in_progress"}:
+                            item.status = "skipped"
+                            item.result_summary = f"未执行；计划复审后省略：{decision.reasoning_summary}"
+                    revision_kind = "early_finish"
+                revised.reasoning_summary = decision.reasoning_summary
+        except TaskCancelledError:
+            raise
+        except Exception as exc:
+            # 可选复审失败不破坏已经可执行的计划；预算仍计入，避免反复请求。
+            LOGGER.warning("计划复审未完成，继续原计划：%s", type(exc).__name__)
+            state.work_trajectory.add_note("本次可选计划复审失败，保留原计划继续执行。")
+            return None
+        state.adaptive_replans += 1
+        state.current_todo_id = None
+        state.work_trajectory.add_decision(f"计划复审 {decision.action}：{decision.reasoning_summary}")
+        plan = revised
+        state.analysis_plan = plan
+        finished_early = revision_kind == "early_finish"
+        return PlanCreated(plan=plan, revision_kind=revision_kind)
+
+    while not finished_early:
         todo = _next_todo(plan)
         if todo is None:
             break
@@ -267,7 +363,7 @@ def _iter_plan_graph(
                     f"{max_todo_steps}：{_repeat_hint(repeats)}"
                 )
                 break
-            decision = loop.step(todo_state)
+            decision = _step_decision(loop, todo_state)
             if isinstance(decision, Finish):
                 todo.status = "completed"
                 todo.result_summary = decision.answer
@@ -278,26 +374,22 @@ def _iter_plan_graph(
                     result_summary=decision.answer,
                 )
                 break
-            yield decision
-            if isinstance(decision, SkillAction):
-                observation = _execute_skill_once(decision, skill_runtime, skill_repeats, trace)
-                todo_state.record_skill_observation(observation)
-                state.absorb_skill_observation(observation)
-            else:
-                observation = _execute_once(decision, harness, repeats, trace)
-                todo_state.record_observation(observation)
-                # 运行级状态只聚合产物与轨迹，不重复留存结果、也不重复计入预算
-                state.absorb_observation(observation)
-            yield observation
-            if isinstance(decision, SkillAction):
-                continue
-            circuit = failures.record(decision, observation)
-            if circuit is None:
-                continue
-            failure_summary = _failure_summary(circuit)
-            break
+            failure_summary = yield from _run_decision(
+                decision, todo_state, harness, repeats, failures,
+                skill_runtime, skill_repeats, parent_state=state, trace=trace,
+            )
+            if failure_summary is not None:
+                break
+            if replan_check_interval > 0 and todo_state.iteration % replan_check_interval == 0:
+                revision_event = maybe_reassess("decision_interval")
+                if revision_event is not None:
+                    yield revision_event
+                    break
 
         if failure_summary is None:
+            revision_event = maybe_reassess("todo_completed")
+            if revision_event is not None:
+                yield revision_event
             continue
 
         todo.status = "failed"
@@ -315,35 +407,166 @@ def _iter_plan_graph(
             failure_summary=failure_summary,
         )
         replan_count += 1
+        state.failure_replans += 1
         plan = _merge_recovery_plan(plan, recovery, replan_count)
         state.analysis_plan = plan
-        yield PlanCreated(plan=plan)
+        yield PlanCreated(plan=plan, revision_kind="failure")
 
     final_state = _final_state(state, plan)
     final_failures = FailureTracker(threshold=failure_threshold)
     final_repeats = RepeatGuard()
     final_skill_repeats: set[str] = set()
     while True:
-        decision = loop.step(final_state)
+        decision = _step_decision(loop, final_state)
         if isinstance(decision, Finish):
-            state.append_message("user", state.user_query)
-            state.append_message("assistant", decision.answer)
             yield decision
             return
+        failure_summary = yield from _run_decision(
+            decision, final_state, harness, final_repeats, final_failures,
+            skill_runtime, final_skill_repeats, parent_state=state, trace=trace,
+        )
+        if failure_summary is not None:
+            raise RepeatedToolFailureError(failure_summary)
+
+
+
+def _verify_delivery(
+    candidate: Finish, state: AgentState, loop: AgentLoop, harness: Harness,
+    skill_runtime: SkillRuntime | None, verifier: Verifier | None,
+    max_retries: int, trace: RunTrace | None = None,
+) -> Iterator[GraphEvent]:
+    """在同一运行预算内补查并复核，最终只提交一次用户可见回答。"""
+    if type(max_retries) is not int or not 0 <= max_retries <= 3:
+        raise ValueError("验证修订次数必须为 0 到 3 的整数")
+    if verifier is None:
+        state.append_message("user", state.user_query)
+        state.append_message("assistant", candidate.answer)
+        yield candidate
+        return
+    repair = _final_state(state, state.analysis_plan) if state.analysis_plan else state.model_copy(deep=True)
+    repair.run_budget = state.run_budget
+    failures, repeats, skill_repeats = FailureTracker(), RepeatGuard(), set()
+    attempts, repairs = 0, 0
+    while verifier is not None:
+        result = verifier.verify(state, state.analysis_plan, candidate.answer)
+        attempts += 1
+        if result.status == "fail" and attempts <= max_retries:
+            state.verification_summary = {**result.model_dump(), "attempts": attempts, "repairs": repairs}
+            yield result
+            repairs += 1
+            feedback = Observation(tool_name="independent_verifier", success=True, result={
+                "verification": result.model_dump(), "candidate_answer": clip_text(candidate.answer, 24_000),
+                "instruction": "候选交付未通过，请按问题补查真实证据或修正回答，再返回 finish。不得把复核意见当成新的计算事实。",
+            })
+            repair.record_observation(feedback, count_iteration=False)
+            repair_stopped = False
+            while True:
+                try:
+                    decision = _step_decision(loop, repair)
+                except IterationLimitError:
+                    repair_stopped = True
+                    break
+                if isinstance(decision, Finish):
+                    candidate = decision
+                    break
+                failure = yield from _run_decision(
+                    decision, repair, harness, repeats, failures, skill_runtime,
+                    skill_repeats, parent_state=state, trace=trace,
+                )
+                if failure is not None:
+                    repair_stopped = True
+                    break
+            if not repair_stopped:
+                continue
+        if result.status == "fail":
+            result = result.model_copy(update={"status": "uncertain"})
+        state.verification_summary = {**result.model_dump(), "attempts": attempts, "repairs": repairs}
+        yield result
+        if result.status == "uncertain":
+            disclosure = "\n\n> 独立验证：未完全通过。" + "；".join(issue.message for issue in result.issues)
+            candidate = candidate.model_copy(update={"answer": candidate.answer + disclosure})
+        break
+    state.append_message("user", state.user_query)
+    state.append_message("assistant", candidate.answer)
+    yield candidate
+
+
+def _step_decision(loop: AgentLoop, state: AgentState) -> ActionBatch | Action | SkillAction | Finish:
+    """生产循环走批量入口，同时兼容旧调用方提供的单步替身。"""
+    batch_step = getattr(loop, "step_batch", None)
+    return batch_step(state) if callable(batch_step) else loop.step(state)
+
+
+def _run_decision(
+    decision: ActionBatch | Action | SkillAction,
+    state: AgentState,
+    harness: Harness,
+    repeats: RepeatGuard,
+    failures: FailureTracker,
+    skill_runtime: SkillRuntime | None,
+    skill_repeats: set[str],
+    *,
+    parent_state: AgentState | None = None,
+    trace: RunTrace | None = None,
+) -> Generator[GraphEvent, None, str | None]:
+    """保持旧动作/观察事件协议；一批只消耗一个决策预算。"""
+    if isinstance(decision, SkillAction):
         yield decision
-        if isinstance(decision, SkillAction):
-            observation = _execute_skill_once(decision, skill_runtime, final_skill_repeats, trace)
-            final_state.record_skill_observation(observation)
-            state.absorb_skill_observation(observation)
-        else:
-            observation = _execute_once(decision, harness, final_repeats, trace)
-            final_state.record_observation(observation)
-            state.absorb_observation(observation)
+        observation = _execute_skill_once(decision, skill_runtime, skill_repeats, trace)
+        state.record_skill_observation(observation)
+        if parent_state is not None:
+            parent_state.absorb_skill_observation(observation)
         yield observation
-        if isinstance(decision, Action) and isinstance(observation, Observation):
-            circuit = final_failures.record(decision, observation)
-            if circuit is not None:
-                raise RepeatedToolFailureError(_failure_summary(circuit))
+        return None
+    actions = decision.actions if isinstance(decision, ActionBatch) else [decision]
+    parallel = len(actions) > 1 and harness.can_parallel(actions)
+    if parallel:
+        yield from actions
+        observations = _execute_batch_once(actions, harness, repeats)
+    failure_summary = None
+    for index, action in enumerate(actions):
+        if parallel:
+            observation = observations[index]
+        else:
+            # 每个串行动作单独让出控制，HTTP 层仍可逐条等待人工批准。
+            yield action
+            observation = _execute_once(action, harness, repeats, trace)
+        state.record_observation(observation, count_iteration=index == 0)
+        if parent_state is not None:
+            parent_state.absorb_observation(observation)
+        yield observation
+        circuit = failures.record(action, observation)
+        if circuit is not None and failure_summary is None:
+            failure_summary = _failure_summary(circuit)
+            if not parallel:
+                break
+    return failure_summary
+
+
+def _execute_batch_once(
+    actions: list[Action], harness: Harness, repeats: RepeatGuard,
+) -> list[Observation]:
+    """先拦截历史重复和批内重复，再有序合并真正执行的结果。"""
+    observations: dict[int, Observation] = {}
+    pending: list[tuple[int, Action]] = []
+    seen: set[str] = set()
+    for index, action in enumerate(actions):
+        fingerprint = json.dumps(
+            {"tool": action.tool_name, "arguments": action.arguments},
+            ensure_ascii=False, sort_keys=True,
+        )
+        notice = repeats.check(action)
+        if notice is not None or fingerprint in seen:
+            error = notice.message() if notice else "同一批次的相同工具与参数已拦截，请复用本批结果。"
+            observations[index] = harness.rejected(action, error)
+        else:
+            seen.add(fingerprint)
+            pending.append((index, action))
+    results = harness.execute_many([action for _, action in pending])
+    for (index, action), observation in zip(pending, results, strict=True):
+        observations[index] = observation
+        repeats.record(action, observation)
+    return [observations[index] for index in range(len(actions))]
 
 
 def _execute_skill_once(
@@ -410,8 +633,12 @@ def _execute_once(
     """
     notice = repeats.check(decision)
     if notice is not None:
+        reject = getattr(harness, "rejected", None)
+        if trace is None and callable(reject):
+            return reject(decision, notice.message())
         observation = Observation(
             tool_name=decision.tool_name,
+            call_id=decision.call_id,
             success=False,
             error=notice.message(),
         )
@@ -442,10 +669,20 @@ def run_plan_graph(
     loop: AgentLoop,
     harness: Harness,
     skill_runtime: SkillRuntime | None = None,
+    *,
+    adaptive_replan_enabled: bool = False,
+    max_adaptive_replans: int = 2,
+    replan_check_interval: int = 0,
+    max_plan_reviews: int = 6,
+    verifier: Verifier | None = None,
+    max_verify_retries: int = 1,
 ) -> Finish:
     """运行 Plan-and-Execute，直到最终汇总回答产生。"""
     for event in iter_plan_graph(
-        state, planner, loop, harness, skill_runtime=skill_runtime
+        state, planner, loop, harness, skill_runtime=skill_runtime,
+        adaptive_replan_enabled=adaptive_replan_enabled, max_adaptive_replans=max_adaptive_replans,
+        replan_check_interval=replan_check_interval, max_plan_reviews=max_plan_reviews,
+        verifier=verifier, max_verify_retries=max_verify_retries,
     ):
         if isinstance(event, Finish):
             return event
@@ -540,6 +777,7 @@ def _project_results(
             {
                 "id": todo.id,
                 "objective": todo.objective,
+                "status": todo.status,
                 "result_summary": text,
             }
         )
@@ -577,6 +815,7 @@ def _todo_state(state: AgentState, todo: TodoItem) -> AgentState:
         expert_context=state.expert_context,
         skill_context=state.skill_context,
         skill_observations=list(state.skill_observations),
+        recent_observations=list(state.recent_observations),
     )
 
 
@@ -588,6 +827,7 @@ def _final_state(state: AgentState, plan: AnalysisPlan) -> AgentState:
         f"执行计划结果：{json.dumps(results, ensure_ascii=False)}\n\n"
         "请综合所有 Todo 结果回答原始用户问题。不得声称未在结果中出现的事实；"
         "如确需补充核验，可以继续使用现有工具，否则直接返回 finish。"
+        "skipped 表示尚未执行且被复审省略，不得把这些任务说成已完成；应交代证据边界。"
     )
     return AgentState(
         user_query=query,
@@ -604,4 +844,5 @@ def _final_state(state: AgentState, plan: AnalysisPlan) -> AgentState:
         expert_context=state.expert_context,
         skill_context=state.skill_context,
         skill_observations=list(state.skill_observations),
+        recent_observations=list(state.recent_observations),
     )

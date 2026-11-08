@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+from contextlib import nullcontext
 
 from ..agent.loop import Action
 from ..agent.state import Observation
@@ -28,6 +30,7 @@ class Harness:
         execution_context: ExecutionContext | None = None,
         cancel_check: Callable[[], bool] | None = None,
         trace: RunTrace | None = None,
+        max_parallel_tools: int = 4,
     ) -> None:
         """初始化执行框架。
 
@@ -38,6 +41,8 @@ class Harness:
             execution_context: 当前 Run 可由工具自动继承的动态执行上下文。
             cancel_check: 用户请求终止时返回 True，将打断工具执行。
             trace: 本次运行的可选本地追踪容器。
+            max_parallel_tools: 默认 4 个只读工具并发，范围 1～16；设为 1 完全串行。
+                调大增加吞吐和内存/外部服务压力，不会放开有写入副作用的工具。
         """
         self._registry = registry
         self._sandbox = sandbox or SubprocessSandbox()
@@ -45,6 +50,71 @@ class Harness:
         self._execution_context = execution_context
         self._cancel_check = cancel_check
         self._trace = trace
+        if type(max_parallel_tools) is not int or not 1 <= max_parallel_tools <= 16:
+            raise ValueError("max_parallel_tools 必须为 1～16 的整数")
+        self._max_parallel_tools = max_parallel_tools
+
+    def can_parallel(self, actions: Sequence[Action]) -> bool:
+        """整批仅包含显式许可的只读工具时才允许并行。"""
+        if len(actions) < 2 or self._max_parallel_tools == 1:
+            return False
+        for action in actions:
+            if action.tool_name in TERMINAL_TOOL_NAMES:
+                return False
+            try:
+                spec = self._registry.resolve(action.tool_name).spec
+            except ToolNotFoundError:
+                return False
+            if spec.mutating or not spec.parallel_safe:
+                return False
+        return True
+
+    def execute_many(self, actions: Sequence[Action]) -> list[Observation]:
+        """有界并行执行安全只读批次，返回顺序始终与输入一致。
+
+        Args:
+            actions: 已校验且参数互不依赖的调用；含写操作时整批串行。
+
+        Returns:
+            与 actions 一一对应的观察；取消时停止等待并撤销尚未启动的调用。
+        """
+        if not self.can_parallel(actions):
+            return [self.execute(action) for action in actions]
+        raise_if_cancelled(self._cancel_check)
+        parent_id = self._trace.current_span_id if self._trace else None
+
+        def execute_branch(action: Action) -> Observation:
+            scope = self._trace.parent_scope(parent_id) if self._trace else nullcontext()
+            with scope:
+                return self.execute(action)
+
+        executor = ThreadPoolExecutor(max_workers=self._max_parallel_tools, thread_name_prefix="agent-tools")
+        futures = [executor.submit(execute_branch, action) for action in actions]
+        try:
+            results = []
+            for future in futures:
+                while True:
+                    raise_if_cancelled(self._cancel_check)
+                    try:
+                        # 每 100ms 检查一次取消，避免等待排在前面的慢工具阻塞取消。
+                        results.append(future.result(timeout=0.1))
+                        break
+                    except FutureTimeoutError:
+                        if future.done():
+                            raise
+            return results
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
+
+    def rejected(self, action: Action, error: str) -> Observation:
+        """为重复拦截等未执行调用生成可关联、可追踪的失败观察。"""
+        span = self._trace.begin("tool", action.tool_name) if self._trace else None
+        if self._trace:
+            self._trace.end(span, status="error", error_type="RepeatedToolCall")
+        return Observation(
+            tool_name=action.tool_name, call_id=action.call_id, success=False, error=error,
+            span_id=span.span_id if span else None,
+        )
 
     def execute(self, action: Action) -> Observation:
         """执行一个 Action 并始终转换为标准 Observation。
@@ -56,7 +126,7 @@ class Harness:
             包含结果、错误与耗时的标准化 Observation。
         """
         if self._trace is None:
-            return self._execute(action)
+            return self._execute(action).model_copy(update={"call_id": action.call_id})
         with self._trace.span("tool", action.tool_name) as span:
             observation = self._execute(action)
             self._trace.end(
@@ -66,6 +136,7 @@ class Harness:
             )
             return observation.model_copy(update={
                 "span_id": span.span_id if span else None,
+                "call_id": action.call_id,
                 "input_tokens": span.input_tokens if span else None,
                 "output_tokens": span.output_tokens if span else None,
                 "cost_estimate": span.cost_estimate if span else None,

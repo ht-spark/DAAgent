@@ -36,6 +36,7 @@ from data_analysis.agent.graph import (
 )
 from data_analysis.agent.loop import Action, AgentLoop, Finish
 from data_analysis.agent.planner import Planner
+from data_analysis.agent.verifier import Verification, Verifier
 from data_analysis.agent.state import (
     AgentMessage,
     AgentState,
@@ -1309,20 +1310,27 @@ def _final_answer_chunks(answer: str) -> list[str]:
 
 
 def _agent_event_payload(
-    event: Action | SkillAction | Observation | SkillObservation | Finish | PlanCreated | TodoStarted | TodoCompleted | TodoFailed,
+    event: Action | SkillAction | Observation | SkillObservation | Finish | Verification | PlanCreated | TodoStarted | TodoCompleted | TodoFailed,
 ) -> dict[str, object]:
     """把内部 Agent 事件转换为可公开展示的精简载荷。"""
+    if isinstance(event, Verification):
+        label = {"pass": "通过", "fail": "发现问题，正在修订", "uncertain": "未完全通过"}[event.status]
+        return {"type": "agent_reasoning", "summary": "独立验证：" + label + (
+            "。" + "；".join(issue.message for issue in event.issues) if event.issues else ""
+        ), "verification": event.model_dump()}
     if isinstance(event, PlanCreated):
         payload: dict[str, object] = {
             "type": "agent_plan",
             "objective": event.plan.objective,
             "reasoning_summary": event.plan.reasoning_summary,
+            "revision_kind": event.revision_kind,
             "todos": [
                 {
                     "id": todo.id,
                     "objective": todo.objective,
                     "depends_on": todo.depends_on,
                     "expected_outputs": todo.expected_outputs,
+                    "status": todo.status,
                 }
                 for todo in event.plan.todos
             ],
@@ -1357,6 +1365,8 @@ def _agent_event_payload(
             "thought": event.thought,
             "tool_name": event.tool_name,
         }
+        if event.call_id is not None:
+            payload["call_id"] = event.call_id
         # 只保留摘要类短参数：它们是「读取 · path」「运行命令 · command」这类
         # 单行轨迹摘要的唯一来源；完整 arguments 可能含大段正文（content、
         # old_text、new_text 等），既不适合公开展示也会撑大持久化体积。
@@ -1407,6 +1417,8 @@ def _agent_event_payload(
         "output_tokens": event.output_tokens,
         "cost_estimate": event.cost_estimate,
     }
+    if event.call_id is not None:
+        payload["call_id"] = event.call_id
     if isinstance(event.result, dict):
         if event.tool_name in {"edit_workspace_file", "edit_attachment_file"}:
             payload["details"] = str(event.result.get("diff", ""))[:8000]
@@ -2015,6 +2027,65 @@ def _agent_token_pricing() -> TokenPricing | None:
         return None
 
 
+def _agent_tool_options() -> tuple[str, int]:
+    """读取协议与并行配置；无效值使用安全默认值并记录警告。"""
+    # 默认 auto：本地绑定后在真实决策中尝试原生协议，不额外发起探测调用。
+    # json 完全恢复单工具协议；native 强制原生，遇到不支持时直接报错。
+    mode = os.getenv("AGENT_TOOL_MODE", "auto").strip().lower()
+    if mode not in {"json", "native", "auto"}:
+        logger.warning("AGENT_TOOL_MODE 无效，使用 auto")
+        mode = "auto"
+    # 默认 4，允许 1～16；设为 1 禁用工具并行，调大会增加内存与外部请求压力。
+    # 此上限只用于显式许可的只读工具，写入、终端与未标注工具始终串行。
+    try:
+        parallel = int(os.getenv("AGENT_MAX_PARALLEL_TOOLS", "4"))
+        if not 1 <= parallel <= 16:
+            raise ValueError("并发数超出范围")
+    except ValueError:
+        logger.warning("AGENT_MAX_PARALLEL_TOOLS 无效，使用 4")
+        parallel = 4
+    return mode, parallel
+
+
+def _agent_replan_options() -> dict[str, bool | int]:
+    """读取有界的动态复审选项；不改变失败熔断的恢复预算。"""
+    # 默认开启动态复审；false 恢复旧调度，只关闭复审，仍保留真实观察可见能力。
+    enabled = os.getenv("AGENT_ADAPTIVE_REPLAN_ENABLED", "true").strip().lower()
+    options: dict[str, bool | int] = {"adaptive_replan_enabled": enabled not in {"false", "0", "off", "no"}}
+    # 成功路径最多改变计划 2 次（允许 0～8），提高会增加重规划开销；0 禁用。
+    # 默认间隔 0 只在 Todo 边界；允许 0～160，正数越小越频繁请求复审。
+    # 默认最多复审 6 次（允许 0～24），含 continue 与失败，限制额外模型调用；0 禁用。
+    for name, key, default, maximum in (
+        ("AGENT_MAX_ADAPTIVE_REPLANS", "max_adaptive_replans", 2, 8),
+        ("AGENT_REPLAN_CHECK_INTERVAL", "replan_check_interval", 0, 160),
+        ("AGENT_MAX_PLAN_REVIEWS", "max_plan_reviews", 6, 24),
+    ):
+        try:
+            value = int(os.getenv(name, str(default)))
+            if not 0 <= value <= maximum:
+                raise ValueError("超出有效范围")
+        except ValueError:
+            logger.warning("%s 无效，使用默认值 %s", name, default)
+            value = default
+        options[key] = value
+    return options
+
+
+def _agent_verify_options() -> tuple[bool, int]:
+    """读取语义验证开关和修订上限，确定性文件检查始终保留。"""
+    # 默认开启语义复核；关闭后不新增模型请求，但最终结果标明仅做文件检查。
+    enabled = os.getenv("AGENT_VERIFIER_ENABLED", "true").strip().lower() not in {"false", "0", "off", "no"}
+    # 默认修订 1 次，允许 0～3；增大会提高补查成本，0 表示只检查并披露。
+    try:
+        retries = int(os.getenv("AGENT_MAX_VERIFY_RETRIES", "1"))
+        if not 0 <= retries <= 3:
+            raise ValueError("超出有效范围")
+    except ValueError:
+        logger.warning("AGENT_MAX_VERIFY_RETRIES 无效，使用 1")
+        retries = 1
+    return enabled, retries
+
+
 @app.post("/api/agent/chat/stream")
 @app.post("/api/agent/profile/stream", include_in_schema=False)
 async def agent_profile_stream_endpoint(
@@ -2226,6 +2297,11 @@ async def agent_profile_stream_endpoint(
             },
         )
 
+    tool_mode, max_parallel_tools = _agent_tool_options()
+    replan_options = _agent_replan_options()
+    verifier_enabled, max_verify_retries = _agent_verify_options()
+    verifier = Verifier(llm, semantic_enabled=verifier_enabled,
+                        cancel_check=_agent_cancel_check, trace=run_trace)
     loop = AgentLoop(
         llm,
         registry.specs(),
@@ -2234,6 +2310,8 @@ async def agent_profile_stream_endpoint(
         decision_retries=8,
         cancel_check=_agent_cancel_check,
         progress_callback=publish_agent_progress,
+        tool_mode=tool_mode,
+        trace=run_trace,
     )
     planner = Planner(
         llm,
@@ -2276,6 +2354,7 @@ async def agent_profile_stream_endpoint(
         execution_context=execution_context,
         cancel_check=_agent_cancel_check,
         trace=run_trace,
+        max_parallel_tools=max_parallel_tools,
     )
     skill_runtime = SkillRuntime(
         _skill_registry,
@@ -2331,6 +2410,9 @@ async def agent_profile_stream_endpoint(
                     "agent_run_id": run_id,
                     "trace_id": run_trace.trace_id,
                     "usage_summary": run_trace.usage_summary(),
+                    "replanning_summary": {"reviews": state.plan_reviews, "adaptive_replans": state.adaptive_replans,
+                                           "failure_replans": state.failure_replans},
+                    "verification_summary": state.verification_summary,
                     "agent_trace": trace,
                     "work_trajectory": state.work_trajectory.model_dump(),
                 },
@@ -2375,6 +2457,9 @@ async def agent_profile_stream_endpoint(
                 harness,
                 skill_runtime=skill_runtime,
                 trace=run_trace,
+                **replan_options,
+                verifier=verifier,
+                max_verify_retries=max_verify_retries,
             )
             async with asyncio.timeout(AGENT_RUN_TIMEOUT_SECONDS):
                 while True:
@@ -2623,6 +2708,9 @@ async def agent_profile_stream_endpoint(
                 "agent_run_id": run_id,
                 "trace_id": run_trace.trace_id,
                 "usage_summary": usage_summary,
+                "replanning_summary": {"reviews": state.plan_reviews, "adaptive_replans": state.adaptive_replans,
+                                       "failure_replans": state.failure_replans},
+                "verification_summary": state.verification_summary,
                 "agent_trace": trace,
                 "agent_artifacts": artifacts,
                 "context_usage": context_usage,
@@ -2639,6 +2727,9 @@ async def agent_profile_stream_endpoint(
                 "run_id": run_id,
                 "trace_id": run_trace.trace_id,
                 "usage_summary": usage_summary,
+                "replanning_summary": {"reviews": state.plan_reviews, "adaptive_replans": state.adaptive_replans,
+                                       "failure_replans": state.failure_replans},
+                "verification_summary": state.verification_summary,
                 "artifacts": artifacts,
                 "sources": knowledge_sources,
                 "context_usage": context_usage,

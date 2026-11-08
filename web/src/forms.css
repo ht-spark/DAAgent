@@ -9157,13 +9157,16 @@
   color: var(--danger, #b91c1c);
 }
 
-.agent-task-item.is-terminated .agent-task-dot {
+.agent-task-item.is-terminated .agent-task-dot,
+.agent-task-item.is-skipped .agent-task-dot {
   border-color: var(--rag-text-muted);
   background: var(--rag-text-muted);
 }
 
 .agent-task-item.is-terminated .agent-task-objective,
-.agent-task-item.is-terminated .agent-task-status {
+.agent-task-item.is-terminated .agent-task-status,
+.agent-task-item.is-skipped .agent-task-objective,
+.agent-task-item.is-skipped .agent-task-status {
   color: var(--rag-text-muted);
 }
 

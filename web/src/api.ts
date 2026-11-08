@@ -712,11 +712,13 @@ export type AgentTraceEvent = {
   type: 'agent_plan'
   objective: string
   reasoning_summary?: string
+  revision_kind?: 'initial' | 'failure' | 'adaptive' | 'early_finish'
   todos: Array<{
     id: string
     objective: string
     depends_on: string[]
     expected_outputs: string[]
+    status?: 'pending' | 'in_progress' | 'completed' | 'failed' | 'skipped'
   }>
 } | {
   type: 'agent_todo_started'
@@ -737,15 +739,18 @@ export type AgentTraceEvent = {
   type: 'agent_action'
   thought: string
   tool_name: string
+  call_id?: string
   code?: string
   /** 摘要类短参数（路径、命令、查询词等），用于生成单行轨迹摘要 */
   arguments?: Record<string, string>
 } | {
   type: 'agent_reasoning'
   summary: string
+  verification?: VerificationResult
 } | {
   type: 'agent_observation'
   tool_name: string
+  call_id?: string
   success: boolean
   duration_ms: number
   summary?: Record<string, number> | null
@@ -786,6 +791,12 @@ export type ContextUsage = {
   estimated_tokens: number
   threshold_tokens: number
   remaining_tokens: number
+}
+
+export type VerificationResult = {
+  status: 'pass' | 'fail' | 'uncertain'
+  issues: { code: string; message: string; evidence: string }[]
+  checked_artifacts: string[]
 }
 
 export async function decideAgentCommand(approvalId: string, approved: boolean): Promise<void> {
@@ -894,6 +905,7 @@ async function consumeAgentChatStream(res: Response, handlers: AgentChatHandlers
         sources?: KnowledgeSourceCitation[]
         context_usage?: ContextUsage
         usage_summary?: unknown
+        verification_summary?: VerificationResult & { attempts: number; repairs: number }
       }
       if (event.type === 'agent_started' && event.run_id) {
         handlers.onStarted(event.run_id, event.files ?? [], event.discussion_id, event.message)

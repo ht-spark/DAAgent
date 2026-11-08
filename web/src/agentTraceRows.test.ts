@@ -44,6 +44,20 @@ function observation(
   return { type: 'agent_observation', tool_name: tool, success: true, duration_ms: 1200, ...extra }
 }
 
+test('同名工具并行结果按调用标识匹配，保留各自的状态与摘要', () => {
+  const rows = buildAgentTraceRows([
+    action('read_workspace_file', { relative_path: 'a.csv' }, { call_id: 'a', thought: '' }),
+    action('read_workspace_file', { relative_path: 'b.csv' }, { call_id: 'b', thought: '' }),
+    observation('read_workspace_file', { call_id: 'a', success: false, error: '文件不可读' }),
+    observation('read_workspace_file', { call_id: 'b' }),
+  ])
+  assert.equal(rows.length, 2)
+  assert.equal(rows[0].status, 'failed')
+  assert.equal(rows[1].status, 'success')
+  assert.match(rows[0].summary ?? '', /a.csv/)
+  assert.match(rows[1].summary ?? '', /b.csv/)
+})
+
 test('summarizeText 只保留首行并按长度截断', () => {
   assert.equal(summarizeText('第一行\n第二行'), '第一行')
   assert.equal(summarizeText('  a   b  '), 'a b')

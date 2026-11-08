@@ -215,8 +215,9 @@ export function buildAgentTraceRows(
 ): AgentTraceRow[] {
   const running = Boolean(options.running)
   const rows: AgentTraceRow[] = []
-  /** 最近一个已发起、尚未收到结果的工具行：后续批准与观测都并入它 */
+  /** 串行审批仍使用最近动作；并行结果按调用标识关联各自的工具行。 */
   let pendingTool: AgentTraceRow | null = null
+  const pendingCalls = new Map<string, AgentTraceRow>()
 
   trace.forEach((event, index) => {
     const id = `${event.type}-${index}`
@@ -230,6 +231,7 @@ export function buildAgentTraceRows(
           status: 'idle',
         })
         pendingTool = null
+        pendingCalls.clear()
         break
       }
       case 'agent_thinking': {
@@ -297,6 +299,7 @@ export function buildAgentTraceRows(
         }
         rows.push(tool)
         pendingTool = tool
+        if (event.call_id) pendingCalls.set(event.call_id, tool)
         break
       }
       case 'agent_skill_action': {
@@ -327,8 +330,9 @@ export function buildAgentTraceRows(
         break
       }
       case 'agent_observation': {
-        const target = pendingTool
-        pendingTool = null
+        const target = event.call_id ? pendingCalls.get(event.call_id) : pendingTool
+        if (event.call_id) pendingCalls.delete(event.call_id)
+        if (target === pendingTool) pendingTool = null
         if (!target) {
           // 没有对应动作的观测（异常轨迹）：单独成行，避免信息丢失
           rows.push({
@@ -417,10 +421,12 @@ export function buildAgentTraceRows(
   })
 
   if (running) {
-    // 已发起但还没等到结果的工具行必定是最后一行（其批准与观测都并入本行）；
-    // 等待人工批准时保持等待态，不再补一行思考占位。
+    // 并行批次中较早发起的工具也可能仍在执行，不能只检查最后一行。
+    const activeCalls = [...pendingCalls.values()].filter((row) => row.status === 'running')
     const last = rows[rows.length - 1]
-    if (last?.status === 'running') {
+    if (activeCalls.length) {
+      activeCalls.forEach((row) => { if (!row.meta) row.meta = '执行中' })
+    } else if (last?.status === 'running') {
       if (!last.meta) last.meta = '执行中'
     } else if (last?.status !== 'waiting') {
       rows.push({
