@@ -496,6 +496,8 @@ export type BrainstormDiscussion = BrainstormDiscussionSummary & {
       agent_trace?: AgentTraceEvent[]
       agent_artifacts?: AgentArtifact[]
       context_usage?: ContextUsage
+      usage_summary?: unknown
+      trace_id?: string
       sources?: KnowledgeSourceCitation[]
     }
   }>
@@ -804,6 +806,7 @@ export type AgentChatHandlers = {
   onToken: (content: string) => void
   onDone: (discussionId: string, runId: string, artifacts: AgentArtifact[], sources?: KnowledgeSourceCitation[], contextUsage?: ContextUsage) => void
   onCancelled?: () => void
+  onUsage?: (runId: string, usageSummary: unknown) => void
 }
 
 export async function fetchActiveAgentChatRun(discussionId: string): Promise<{ run_id: string; message: string } | null> {
@@ -890,6 +893,7 @@ async function consumeAgentChatStream(res: Response, handlers: AgentChatHandlers
         artifacts?: AgentArtifact[]
         sources?: KnowledgeSourceCitation[]
         context_usage?: ContextUsage
+        usage_summary?: unknown
       }
       if (event.type === 'agent_started' && event.run_id) {
         handlers.onStarted(event.run_id, event.files ?? [], event.discussion_id, event.message)
@@ -907,6 +911,10 @@ async function consumeAgentChatStream(res: Response, handlers: AgentChatHandlers
         await handlers.onApprovalRequired(event as Extract<AgentTraceEvent, { type: 'agent_command_approval_required' }>)
       }
       if (event.type === 'token' && event.content) handlers.onToken(event.content)
+      if (['done', 'error', 'cancelled'].includes(event.type)
+        && event.run_id && Object.prototype.hasOwnProperty.call(event, 'usage_summary')) {
+        handlers.onUsage?.(event.run_id, event.usage_summary)
+      }
       if (event.type === 'error') throw new Error(event.detail ?? '数据 Agent 运行失败。')
       if (event.type === 'cancelled') handlers.onCancelled?.()
       if (event.type === 'done' && event.discussion_id && event.run_id) {

@@ -7,6 +7,7 @@ from collections.abc import Callable
 
 from ..agent.loop import Action
 from ..agent.state import Observation
+from ..observability.trace import RunTrace
 from ..tools.registry import ToolNotFoundError, ToolRegistry
 from ..tools.terminal_tools import TERMINAL_TOOL_NAMES
 from .execution_context import ExecutionContext
@@ -26,6 +27,7 @@ class Harness:
         terminal_approval: Callable[[Action], bool] | None = None,
         execution_context: ExecutionContext | None = None,
         cancel_check: Callable[[], bool] | None = None,
+        trace: RunTrace | None = None,
     ) -> None:
         """初始化执行框架。
 
@@ -35,12 +37,14 @@ class Harness:
             terminal_approval: 终端调用的一次性人工批准检查。
             execution_context: 当前 Run 可由工具自动继承的动态执行上下文。
             cancel_check: 用户请求终止时返回 True，将打断工具执行。
+            trace: 本次运行的可选本地追踪容器。
         """
         self._registry = registry
         self._sandbox = sandbox or SubprocessSandbox()
         self._terminal_approval = terminal_approval
         self._execution_context = execution_context
         self._cancel_check = cancel_check
+        self._trace = trace
 
     def execute(self, action: Action) -> Observation:
         """执行一个 Action 并始终转换为标准 Observation。
@@ -51,6 +55,24 @@ class Harness:
         Returns:
             包含结果、错误与耗时的标准化 Observation。
         """
+        if self._trace is None:
+            return self._execute(action)
+        with self._trace.span("tool", action.tool_name) as span:
+            observation = self._execute(action)
+            self._trace.end(
+                span, status="ok" if observation.success else "error",
+                error_type=None if observation.success else "ToolExecutionError",
+                duration_ms=observation.duration_ms,
+            )
+            return observation.model_copy(update={
+                "span_id": span.span_id if span else None,
+                "input_tokens": span.input_tokens if span else None,
+                "output_tokens": span.output_tokens if span else None,
+                "cost_estimate": span.cost_estimate if span else None,
+            })
+
+    def _execute(self, action: Action) -> Observation:
+        """保留原有执行语义，由外层统一采集所有返回分支。"""
         started_at = time.monotonic()
         raise_if_cancelled(self._cancel_check)
         if action.tool_name in TERMINAL_TOOL_NAMES and (

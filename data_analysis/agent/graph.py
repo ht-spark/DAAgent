@@ -10,6 +10,8 @@ from pydantic import BaseModel, ConfigDict
 from .loop import Action, AgentLoop, Finish
 from .planner import Planner
 from .state import AgentState, AnalysisPlan, Observation, TodoItem, clip_text
+from ..cancellation import TaskCancelledError
+from ..observability.trace import RunTrace
 from ..skills.models import SkillAction, SkillObservation
 from ..skills.runtime import SkillRuntime
 from ..runtime.failure_tracker import (
@@ -158,6 +160,68 @@ def iter_plan_graph(
     failure_threshold: int = 3,
     max_replans: int = 2,
     max_todo_steps: int = 30,
+    trace: RunTrace | None = None,
+) -> Iterator[PlanGraphEvent]:
+    """按原事件语义调度计划，并可选采集规划与 Todo 片段。
+
+    Args:
+        state: 本次运行的可变状态。
+        planner: 顶层规划器。
+        loop: ReAct 决策循环。
+        harness: 工具执行框架。
+        skill_runtime: 可选技能运行时。
+        failure_threshold: 默认 3 次相同失败熔断；调大允许更多失败重试。
+        max_replans: 默认最多恢复规划 2 次；调大增加恢复机会和模型开销。
+        max_todo_steps: 默认每个 Todo 30 步；调大允许更复杂子任务。
+        trace: 当前运行独享的追踪容器；省略时不采集。
+    """
+    iterator = _iter_plan_graph(
+        state, planner, loop, harness, skill_runtime=skill_runtime,
+        failure_threshold=failure_threshold, max_replans=max_replans,
+        max_todo_steps=max_todo_steps, trace=trace,
+    )
+    if trace is None:
+        yield from iterator
+        return
+    active = trace.begin("plan", "create_plan")
+    try:
+        for event in iterator:
+            if isinstance(event, (PlanCreated, Finish)):
+                trace.end(active)
+                active = None
+            elif isinstance(event, TodoStarted):
+                active = trace.begin("todo", event.todo_id)
+            elif isinstance(event, TodoCompleted):
+                trace.end(active)
+                active = None
+            elif isinstance(event, TodoFailed):
+                trace.end(active, status="error", error_type="TodoFailed")
+                active = None
+            yield event
+            if isinstance(event, TodoFailed):
+                active = trace.begin("plan", "recovery_plan")
+    except BaseException as exc:
+        trace.end(
+            active,
+            status="cancelled" if isinstance(exc, (TaskCancelledError, GeneratorExit)) else "error",
+            error_type=type(exc).__name__,
+        )
+        raise
+    finally:
+        iterator.close()
+
+
+def _iter_plan_graph(
+    state: AgentState,
+    planner: Planner,
+    loop: AgentLoop,
+    harness: Harness,
+    *,
+    skill_runtime: SkillRuntime | None = None,
+    failure_threshold: int = 3,
+    max_replans: int = 2,
+    max_todo_steps: int = 30,
+    trace: RunTrace | None = None,
 ) -> Iterator[PlanGraphEvent]:
     """运行顶层 Plan-and-Execute，并复用原有 ReAct 完成每个 Todo。
 
@@ -216,11 +280,11 @@ def iter_plan_graph(
                 break
             yield decision
             if isinstance(decision, SkillAction):
-                observation = _execute_skill_once(decision, skill_runtime, skill_repeats)
+                observation = _execute_skill_once(decision, skill_runtime, skill_repeats, trace)
                 todo_state.record_skill_observation(observation)
                 state.absorb_skill_observation(observation)
             else:
-                observation = _execute_once(decision, harness, repeats)
+                observation = _execute_once(decision, harness, repeats, trace)
                 todo_state.record_observation(observation)
                 # 运行级状态只聚合产物与轨迹，不重复留存结果、也不重复计入预算
                 state.absorb_observation(observation)
@@ -268,11 +332,11 @@ def iter_plan_graph(
             return
         yield decision
         if isinstance(decision, SkillAction):
-            observation = _execute_skill_once(decision, skill_runtime, final_skill_repeats)
+            observation = _execute_skill_once(decision, skill_runtime, final_skill_repeats, trace)
             final_state.record_skill_observation(observation)
             state.absorb_skill_observation(observation)
         else:
-            observation = _execute_once(decision, harness, final_repeats)
+            observation = _execute_once(decision, harness, final_repeats, trace)
             final_state.record_observation(observation)
             state.absorb_observation(observation)
         yield observation
@@ -283,6 +347,24 @@ def iter_plan_graph(
 
 
 def _execute_skill_once(
+    decision: SkillAction,
+    runtime: SkillRuntime | None,
+    fingerprints: set[str],
+    trace: RunTrace | None = None,
+) -> SkillObservation:
+    """记录技能操作的耗时与状态，包含拒绝和重复拦截。"""
+    if trace is None:
+        return _execute_skill_untraced(decision, runtime, fingerprints)
+    with trace.span("skill", f"{decision.skill_id}/{decision.operation}") as span:
+        observation = _execute_skill_untraced(decision, runtime, fingerprints)
+        trace.end(
+            span, status="ok" if observation.success else "error",
+            error_type=None if observation.success else "SkillExecutionError",
+        )
+        return observation
+
+
+def _execute_skill_untraced(
     decision: SkillAction,
     runtime: SkillRuntime | None,
     fingerprints: set[str],
@@ -319,6 +401,7 @@ def _execute_once(
     decision: Action,
     harness: Harness,
     repeats: RepeatGuard,
+    trace: RunTrace | None = None,
 ) -> Observation:
     """执行一次决策；参数完全相同的重复调用直接拦截，不再真正执行。
 
@@ -327,11 +410,16 @@ def _execute_once(
     """
     notice = repeats.check(decision)
     if notice is not None:
-        return Observation(
+        observation = Observation(
             tool_name=decision.tool_name,
             success=False,
             error=notice.message(),
         )
+        if trace is not None:
+            span = trace.begin("tool", decision.tool_name)
+            trace.end(span, status="error", error_type="RepeatedToolCall")
+            observation = observation.model_copy(update={"span_id": span.span_id if span else None})
+        return observation
     observation = harness.execute(decision)
     repeats.record(decision, observation)
     return observation

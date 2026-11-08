@@ -4,6 +4,8 @@ from __future__ import annotations
 import sys
 from types import ModuleType
 
+import pytest
+
 from data_analysis.llm import create_llm
 
 
@@ -59,3 +61,18 @@ def test_create_llm_omits_reasoning_effort_when_close(monkeypatch):
 
     assert isinstance(llm, FakeChatOpenAI)
     assert "reasoning_effort" not in captured
+
+
+@pytest.mark.parametrize("setting, expected", [("true", True), ("false", False), ("auto", None)])
+def test_stream_usage_configuration_preserves_provider_compatibility(monkeypatch, setting, expected):
+    """流式计量可显式开关，默认由客户端决定供应商兼容行为。"""
+    captured = {}
+    fake_module = ModuleType("langchain_openai")
+    fake_module.ChatOpenAI = lambda **kwargs: captured.update(kwargs)
+    monkeypatch.setitem(sys.modules, "langchain_openai", fake_module)
+    monkeypatch.setenv("LLM_STREAM_USAGE", setting)
+    create_llm(provider="custom", api_key="test", base_url="https://example.invalid/v1", model="mock", fallback_env=False)
+    if expected is None:
+        assert "stream_usage" not in captured
+    else:
+        assert captured["stream_usage"] is expected

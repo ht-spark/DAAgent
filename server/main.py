@@ -64,6 +64,10 @@ from data_analysis.context import (
     estimate_context_usage_after_turn,
 )
 from data_analysis.cancellation import TaskCancelledError
+from data_analysis.observability.client import TracedLlmClient
+from data_analysis.observability.exporter import LocalTraceExporter
+from data_analysis.observability.trace import RunTrace
+from data_analysis.observability.usage import TokenPricing
 from data_analysis.llm import (
     LLM_CALL_TIMEOUT_SECONDS as AGENT_LLM_TIMEOUT_SECONDS,
     create_llm,
@@ -142,6 +146,7 @@ from server.schemas import (
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 ARTIFACTS_ROOT = PROJECT_ROOT / "artifacts"
 AGENT_RUNTIME_ROOT = PROJECT_ROOT / ".runtime" / "agent_uploads"
+AGENT_TRACE_ROOT = PROJECT_ROOT / ".runtime" / "agent_traces"
 SKILLS_ROOT = PROJECT_ROOT / "data_analysis" / "skills"
 EXPERTS_ROOT = PROJECT_ROOT / "data_analysis" / "experts"
 # 启动时只清理超过 24 小时的附件运行目录，避免误删另一个仍在运行的服务实例。
@@ -169,6 +174,7 @@ class AgentChatRun:
     cancel_requested: bool = False
     approval_id: str | None = None
     runtime_dir: Path | None = None
+    run_trace: RunTrace | None = None
 
 
 _agent_chat_runs: dict[str, AgentChatRun] = {}
@@ -199,15 +205,42 @@ async def _publish_agent_chat_run(run: AgentChatRun, stream) -> None:
     """独立于浏览器连接运行 Agent 并缓存可重放事件。"""
     try:
         async for line in stream:
+            if run.run_trace is not None:
+                payload = json.loads(line)
+                if payload.get("type") in {"error", "cancelled"}:
+                    run.run_trace.finish(
+                        "cancelled" if payload["type"] == "cancelled" else "error",
+                        "TaskCancelledError" if payload["type"] == "cancelled" else "RunFailed",
+                    )
+                    payload.update({
+                        "run_id": run.run_trace.run_id,
+                        "trace_id": run.run_trace.trace_id,
+                        "usage_summary": run.run_trace.usage_summary(),
+                    })
+                    line = json.dumps(payload, ensure_ascii=False) + "\n"
             async with run.condition:
                 run.events.append(line)
                 run.condition.notify_all()
     except Exception as exc:
+        if run.run_trace is not None:
+            run.run_trace.finish("error", type(exc).__name__)
         logger.exception("Background Agent chat run failed")
+        payload = {"type": "error", "detail": f"Agent 运行失败：{exc}"}
+        if run.run_trace is not None:
+            payload.update({
+                "run_id": run.run_trace.run_id,
+                "trace_id": run.run_trace.trace_id,
+                "usage_summary": run.run_trace.usage_summary(),
+            })
         async with run.condition:
-            run.events.append(json.dumps({"type": "error", "detail": f"Agent 运行失败：{exc}"}, ensure_ascii=False) + "\n")
+            run.events.append(json.dumps(payload, ensure_ascii=False) + "\n")
             run.condition.notify_all()
     finally:
+        if run.run_trace is not None:
+            run.run_trace.finish(
+                "cancelled" if run.cancel_requested else "error",
+                "TaskCancelledError" if run.cancel_requested else "StreamClosed",
+            )
         if run.runtime_dir is not None:
             await asyncio.to_thread(_cleanup_agent_runtime_dir, run.runtime_dir)
         async with run.condition:
@@ -1369,6 +1402,10 @@ def _agent_event_payload(
         "duration_ms": event.duration_ms,
         "summary": result_summary,
         "error": event.error,
+        "span_id": event.span_id,
+        "input_tokens": event.input_tokens,
+        "output_tokens": event.output_tokens,
+        "cost_estimate": event.cost_estimate,
     }
     if isinstance(event.result, dict):
         if event.tool_name in {"edit_workspace_file", "edit_attachment_file"}:
@@ -1960,6 +1997,24 @@ async def delete_skill_endpoint(skill_id: str) -> dict[str, str]:
     return {"removed": skill_id}
 
 
+def _agent_token_pricing() -> TokenPricing | None:
+    """读取当前运行的可选美元单价；缺失或无效时不估算成本。"""
+    # 两项默认留空，单位为美元/百万 token；必须匹配当前运行模型。
+    # 增大单价只提高成本估算，不改变模型决策、token 计数或运行预算。
+    input_price = os.getenv("AGENT_LLM_INPUT_COST_PER_MILLION")
+    output_price = os.getenv("AGENT_LLM_OUTPUT_COST_PER_MILLION")
+    if not input_price or not output_price:
+        return None
+    try:
+        return TokenPricing(
+            input_per_million=float(input_price),
+            output_per_million=float(output_price),
+        )
+    except ValueError:
+        logger.warning("模型单价配置无效，成本保留为未知")
+        return None
+
+
 @app.post("/api/agent/chat/stream")
 @app.post("/api/agent/profile/stream", include_in_schema=False)
 async def agent_profile_stream_endpoint(
@@ -2055,93 +2110,102 @@ async def agent_profile_stream_endpoint(
         )
     session_entries = stored_session.get("messages", []) if stored_session else []
     context_window_tokens = _agent_context_window_tokens(effective_config_id)
-    rolling_context = await asyncio.to_thread(
-        compile_rolling_context,
-        session_entries,
-        llm,
-        context_window_tokens=context_window_tokens,
+    run_trace = RunTrace(
+        run_id, LocalTraceExporter(AGENT_TRACE_ROOT, run_id, store.save_agent_span),
     )
-    if rolling_context.compaction_error:
-        logger.warning(
-            "Agent rolling memory compaction failed; using bounded recent context: %s",
-            rolling_context.compaction_error,
+    llm = TracedLlmClient(llm, run_trace, pricing=_agent_token_pricing())
+    try:
+        rolling_context = await asyncio.to_thread(
+            compile_rolling_context,
+            session_entries,
+            llm,
+            context_window_tokens=context_window_tokens,
         )
-    if rolling_context.compaction is not None:
-        await asyncio.to_thread(
-            store.append_message,
+        if rolling_context.compaction_error:
+            logger.warning(
+                "Agent rolling memory compaction failed; using bounded recent context: %s",
+                rolling_context.compaction_error,
+            )
+        if rolling_context.compaction is not None:
+            await asyncio.to_thread(
+                store.append_message,
+                active_discussion_id,
+                store.ROLE_TOOL,
+                rolling_context.compaction.summary,
+                rolling_context.compaction.metadata(),
+            )
+        history = [
+            AgentMessage(role=str(item["role"]), content=str(item.get("content") or ""))
+            for item in rolling_context.recent_messages
+        ]
+        prior_trajectory = collect_work_trajectory_from_session(session_entries)
+        output_dir = _agent_output_root(active_discussion_id, workspace_root)
+        artifacts_before_run = _snapshot_agent_artifacts(
             active_discussion_id,
-            store.ROLE_TOOL,
-            rolling_context.compaction.summary,
-            rolling_context.compaction.metadata(),
+            workspace_root,
         )
-    history = [
-        AgentMessage(role=str(item["role"]), content=str(item.get("content") or ""))
-        for item in rolling_context.recent_messages
-    ]
-    prior_trajectory = collect_work_trajectory_from_session(session_entries)
-    output_dir = _agent_output_root(active_discussion_id, workspace_root)
-    artifacts_before_run = _snapshot_agent_artifacts(
-        active_discussion_id,
-        workspace_root,
-    )
-    try:
-        python_environment = (
-            resolve_project_python(project)
-            if project is not None
-            else resolve_python_environment(None)
+        try:
+            python_environment = (
+                resolve_project_python(project)
+                if project is not None
+                else resolve_python_environment(None)
+            )
+        except (ProjectWorkspaceError, PythonEnvironmentError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        uploaded_paths = await _prepare_agent_data_files(files, active_discussion_id, run_id)
+        runtime_dir = uploaded_paths[0].parents[1] if uploaded_paths else None
+        attachment_context = ""
+        data_paths = uploaded_paths
+        api_settings = _read_api_settings() or {}
+        terminal_shell = _configured_terminal_shell(api_settings)
+        tavily_settings = api_settings.get("external_services", {}).get("tavily", {})
+        tavily_api_key = (
+            tavily_settings.get("apiKey")
+            if isinstance(tavily_settings, dict)
+            else None
         )
-    except (ProjectWorkspaceError, PythonEnvironmentError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    uploaded_paths = await _prepare_agent_data_files(files, active_discussion_id, run_id)
-    runtime_dir = uploaded_paths[0].parents[1] if uploaded_paths else None
-    attachment_context = ""
-    data_paths = uploaded_paths
-    api_settings = _read_api_settings() or {}
-    terminal_shell = _configured_terminal_shell(api_settings)
-    tavily_settings = api_settings.get("external_services", {}).get("tavily", {})
-    tavily_api_key = (
-        tavily_settings.get("apiKey")
-        if isinstance(tavily_settings, dict)
-        else None
-    )
-    try:
-        registry = create_agent_tool_registry(
-            data_paths,
-            output_dir,
-            vision_llm=llm,
-            knowledge_base_ids=selected_base_ids,
-            web_search_api_key=tavily_api_key,
-            workspace_root=workspace_root,
-            python_executable=python_environment.executable,
-            python_environment_source=python_environment.source,
-            python_environment_name=python_environment.name,
-            terminal_shell=terminal_shell,
-        )
-        state = AgentState(
-            # 附件上下文在流已启动后编译，避免前置模型调用阻塞 run_id 下发。
-            user_query=message,
-            memory_summary=rolling_context.memory_summary,
-            data_paths=[str(path.resolve(strict=True)) for path in data_paths],
-            output_dir=str(output_dir),
-            workspace_root=str(workspace_root) if workspace_root else None,
-            available_artifacts=prior_trajectory.enrich_artifacts(
-                discover_artifacts(output_dir)
-            ),
-            project_id=str(project["id"]) if project else None,
-            messages=history,
-            work_trajectory=prior_trajectory,
-            expert_context=expert_context,
-            skill_context=skill_context,
-        )
-        system_prompt = _load_agent_system_prompt(workspace_root)
-    except Exception:
-        if runtime_dir is not None:
-            await asyncio.to_thread(_cleanup_agent_runtime_dir, runtime_dir)
+        try:
+            registry = create_agent_tool_registry(
+                data_paths,
+                output_dir,
+                vision_llm=llm,
+                knowledge_base_ids=selected_base_ids,
+                web_search_api_key=tavily_api_key,
+                workspace_root=workspace_root,
+                python_executable=python_environment.executable,
+                python_environment_source=python_environment.source,
+                python_environment_name=python_environment.name,
+                terminal_shell=terminal_shell,
+            )
+            state = AgentState(
+                # 附件上下文在流已启动后编译，避免前置模型调用阻塞 run_id 下发。
+                user_query=message,
+                memory_summary=rolling_context.memory_summary,
+                data_paths=[str(path.resolve(strict=True)) for path in data_paths],
+                output_dir=str(output_dir),
+                workspace_root=str(workspace_root) if workspace_root else None,
+                available_artifacts=prior_trajectory.enrich_artifacts(
+                    discover_artifacts(output_dir)
+                ),
+                project_id=str(project["id"]) if project else None,
+                messages=history,
+                work_trajectory=prior_trajectory,
+                expert_context=expert_context,
+                skill_context=skill_context,
+            )
+            system_prompt = _load_agent_system_prompt(workspace_root)
+        except Exception:
+            if runtime_dir is not None:
+                await asyncio.to_thread(_cleanup_agent_runtime_dir, runtime_dir)
+            raise
+    except BaseException as exc:
+        run_trace.finish("cancelled" if isinstance(exc, (TaskCancelledError, asyncio.CancelledError)) else "error", type(exc).__name__)
         raise
     chat_run = AgentChatRun(
         active_discussion_id,
         message,
         runtime_dir=runtime_dir,
+        run_trace=run_trace,
     )
 
     def _agent_cancel_check() -> bool:
@@ -2211,6 +2275,7 @@ async def agent_profile_stream_endpoint(
         terminal_approval=consume_terminal_approval,
         execution_context=execution_context,
         cancel_check=_agent_cancel_check,
+        trace=run_trace,
     )
     skill_runtime = SkillRuntime(
         _skill_registry,
@@ -2264,6 +2329,8 @@ async def agent_profile_stream_endpoint(
                 mode="agent",
                 assistant_metadata={
                     "agent_run_id": run_id,
+                    "trace_id": run_trace.trace_id,
+                    "usage_summary": run_trace.usage_summary(),
                     "agent_trace": trace,
                     "work_trajectory": state.work_trajectory.model_dump(),
                 },
@@ -2307,6 +2374,7 @@ async def agent_profile_stream_endpoint(
                 loop,
                 harness,
                 skill_runtime=skill_runtime,
+                trace=run_trace,
             )
             async with asyncio.timeout(AGENT_RUN_TIMEOUT_SECONDS):
                 while True:
@@ -2392,6 +2460,9 @@ async def agent_profile_stream_endpoint(
                             "workspace_root": str(workspace_root),
                         }
                         trace.append(request_payload)
+                        approval_span = run_trace.begin("approval", "terminal_command")
+                        approved = False
+                        approval_error = "ApprovalDenied"
                         yield json.dumps(payload, ensure_ascii=False) + "\n"
                         yield json.dumps(request_payload, ensure_ascii=False) + "\n"
                         try:
@@ -2400,7 +2471,13 @@ async def agent_profile_stream_endpoint(
                             )
                         except TimeoutError:
                             approved = False
+                            approval_error = "ApprovalTimeout"
                         finally:
+                            run_trace.end(
+                                approval_span,
+                                status="cancelled" if chat_run.cancel_requested else "ok" if approved else "error",
+                                error_type="TaskCancelledError" if chat_run.cancel_requested else None if approved else approval_error,
+                            )
                             _pending_agent_commands.pop(approval_id, None)
                             chat_run.approval_id = None
                         if chat_run.cancel_requested:
@@ -2434,6 +2511,9 @@ async def agent_profile_stream_endpoint(
                             "workspace_root": str(workspace_root or PROJECT_ROOT),
                         }
                         trace.append(request_payload)
+                        approval_span = run_trace.begin("approval", "skill_script")
+                        approved = False
+                        approval_error = "ApprovalDenied"
                         yield json.dumps(payload, ensure_ascii=False) + "\n"
                         yield json.dumps(request_payload, ensure_ascii=False) + "\n"
                         try:
@@ -2442,7 +2522,13 @@ async def agent_profile_stream_endpoint(
                             )
                         except TimeoutError:
                             approved = False
+                            approval_error = "ApprovalTimeout"
                         finally:
+                            run_trace.end(
+                                approval_span,
+                                status="cancelled" if chat_run.cancel_requested else "ok" if approved else "error",
+                                error_type="TaskCancelledError" if chat_run.cancel_requested else None if approved else approval_error,
+                            )
                             _pending_agent_commands.pop(approval_id, None)
                             chat_run.approval_id = None
                         if approved:
@@ -2521,6 +2607,7 @@ async def agent_profile_stream_endpoint(
             context_window_tokens=context_window_tokens,
         )
         state.work_trajectory.absorb_completed_todos(state.analysis_plan)
+        usage_summary = run_trace.usage_summary()
         saved_discussion_id = await asyncio.to_thread(
             save_discussion_message,
             active_discussion_id,
@@ -2534,6 +2621,8 @@ async def agent_profile_stream_endpoint(
             mode="agent",
             assistant_metadata={
                 "agent_run_id": run_id,
+                "trace_id": run_trace.trace_id,
+                "usage_summary": usage_summary,
                 "agent_trace": trace,
                 "agent_artifacts": artifacts,
                 "context_usage": context_usage,
@@ -2542,11 +2631,14 @@ async def agent_profile_stream_endpoint(
             project_id=str(project["id"]) if project else None,
             cwd=str(workspace_root) if workspace_root else None,
         )
+        run_trace.finish()
         yield json.dumps(
             {
                 "type": "done",
                 "discussion_id": saved_discussion_id,
                 "run_id": run_id,
+                "trace_id": run_trace.trace_id,
+                "usage_summary": usage_summary,
                 "artifacts": artifacts,
                 "sources": knowledge_sources,
                 "context_usage": context_usage,

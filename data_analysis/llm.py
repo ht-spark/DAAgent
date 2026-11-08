@@ -96,6 +96,11 @@ def create_llm(
         "temperature": 0.3 if temperature is None else temperature,
         "max_tokens": 20_000 if max_tokens is None else max_tokens,
     }
+    # 默认 auto 沿用客户端的供应商兼容策略；true 请求流式 token 尾片段，
+    # false 禁用该请求。启用可补齐自定义端点计量，但不支持的端点可能拒绝请求。
+    stream_usage = os.getenv("LLM_STREAM_USAGE", "auto").strip().lower()
+    if stream_usage in {"true", "false"}:
+        kwargs["stream_usage"] = stream_usage == "true"
     if resolved_url:
         kwargs["base_url"] = resolved_url
     if reasoning_effort and reasoning_effort not in {"close", "off", "none"}:

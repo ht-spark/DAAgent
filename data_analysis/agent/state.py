@@ -139,6 +139,10 @@ class Observation(BaseModel):
     result: JsonValue = None
     error: str | None = None
     duration_ms: int = Field(default=0, ge=0)
+    span_id: str | None = Field(default=None, min_length=1)
+    input_tokens: int | None = Field(default=None, ge=0, strict=True)
+    output_tokens: int | None = Field(default=None, ge=0, strict=True)
+    cost_estimate: float | None = Field(default=None, ge=0, allow_inf_nan=False)
 
     @field_validator("tool_name")
     @classmethod

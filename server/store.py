@@ -65,6 +65,25 @@ def _connect() -> sqlite3.Connection:
             );
             CREATE INDEX IF NOT EXISTS idx_messages_session
                 ON messages(session_id, seq);
+            CREATE TABLE IF NOT EXISTS agent_spans (
+                span_id TEXT PRIMARY KEY,
+                parent_span_id TEXT,
+                trace_id TEXT NOT NULL,
+                run_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                name TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                duration_ms INTEGER NOT NULL,
+                input_tokens INTEGER,
+                output_tokens INTEGER,
+                cost_estimate REAL,
+                status TEXT NOT NULL,
+                error_type TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_agent_spans_run
+                ON agent_spans(run_id, started_at);
+            CREATE INDEX IF NOT EXISTS idx_agent_spans_trace
+                ON agent_spans(trace_id, parent_span_id);
             """
         )
         session_columns = {
@@ -97,6 +116,36 @@ def _meta(raw: str | None) -> dict[str, Any]:
     except json.JSONDecodeError:
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def save_agent_span(payload: dict[str, Any]) -> None:
+    """验证并保存计量字段；不接收调用正文或密钥。
+
+    Args:
+        payload: 一个已经结束的 span 的 JSON 字段。
+    """
+    from data_analysis.observability.trace import Span
+
+    span = Span.model_validate(payload).model_dump()
+    columns = tuple(span)
+    with _lock:
+        conn = _connect()
+        conn.execute(
+            f"INSERT OR REPLACE INTO agent_spans ({', '.join(columns)}) "
+            f"VALUES ({', '.join('?' for _ in columns)})",
+            tuple(span[column] for column in columns),
+        )
+        conn.commit()
+
+
+def list_agent_spans(run_id: str) -> list[dict[str, Any]]:
+    """按运行标识读取计量记录，供本地排查与后续评测使用。"""
+    with _lock:
+        rows = _connect().execute(
+            "SELECT * FROM agent_spans WHERE run_id=? ORDER BY started_at, span_id",
+            (run_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
 
 
 def _session_row(conn: sqlite3.Connection, session_id: str) -> sqlite3.Row | None:

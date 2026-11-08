@@ -52,6 +52,7 @@ import {
 import AgentTrace from '../components/AgentTrace'
 import CommandApprovalDialog from '../components/CommandApprovalDialog'
 import MarkdownContent from '../components/MarkdownContent'
+import TokenUsageStats from '../components/TokenUsageStats'
 import ChatModeling from './ChatModeling'
 
 type Mode = 'agent' | 'modeling'
@@ -103,6 +104,8 @@ type Message = {
   /** 本轮检索命中的知识库来源（可收起标注） */
   sources?: KnowledgeSourceCitation[]
   contextUsage?: ContextUsage
+  runId?: string
+  usageSummary?: unknown
 }
 
 function ContextUsageRing({ usage }: { usage?: ContextUsage }) {
@@ -1322,6 +1325,9 @@ export default function NewChat({
         }
         if (!active()) return
         setActiveRunId(runId)
+        setMessages((current) => current.map((item, index) => index === current.length - 1
+          ? { ...item, runId }
+          : item))
         setAgentRunTerminated(false)
         if (savedDiscussionId) {
           runningDiscussionRef.current = savedDiscussionId
@@ -1357,6 +1363,12 @@ export default function NewChat({
         if (!active()) return
         setMessages((current) => current.map((item, index) => index === current.length - 1
           ? { ...item, content: `${item.content}${content}` }
+          : item))
+      },
+      onUsage: (runId, usageSummary) => {
+        if (!active()) return
+        setMessages((current) => current.map((item, index) => index === current.length - 1
+          ? { ...item, runId, usageSummary }
           : item))
       },
       onDone: (_discussionId, _runId, artifacts, sources, contextUsage) => {
@@ -1567,6 +1579,8 @@ export default function NewChat({
             trace: m.metadata?.agent_trace,
             artifacts: m.metadata?.agent_artifacts,
             contextUsage: m.metadata?.context_usage,
+            runId: m.metadata?.agent_run_id,
+            usageSummary: m.metadata?.usage_summary,
             sources: m.sources?.length
               ? m.sources
               : m.metadata?.sources,
@@ -1935,7 +1949,6 @@ export default function NewChat({
               <textarea
                 ref={draftInputRef}
                 aria-label="描述分析或建模任务"
-                aria-describedby="task-input-hint"
                 value={draft}
                 onChange={(event) => setDraft(event.target.value)}
                 onPaste={handlePaste}
@@ -2253,7 +2266,10 @@ export default function NewChat({
                   const activeModelLabel = activeModelConfig.model || activeModelConfig.name || '未命名模型'
                   const effectiveReasoningEffort = selectedReasoningEffort
                     ?? (isReasoningEffort(activeModelConfig.reasoningEffort) ? activeModelConfig.reasoningEffort : 'close')
-                  const activeModelDisplay = `${activeModelLabel} · 思考：${reasoningEffortLabel(effectiveReasoningEffort)}`
+                  // 触发条只保留「模型名称 · 思考程度」，不再重复「思考：」这个前缀；
+                  // 档位单独成段并降一级字色，避免与模型名连读成一个词。
+                  const activeModelDisplay = activeModelLabel
+                  const activeEffortDisplay = reasoningEffortLabel(effectiveReasoningEffort)
                   const hoveredModelConfig = apiConfigs.find((config) => config.id === hoveredModelConfigId) ?? null
                   const hoveredReasoningEffort = hoveredModelConfig
                     ? (hoveredModelConfig.id === activeModelConfig.id
@@ -2268,13 +2284,23 @@ export default function NewChat({
                         if (!event.currentTarget.open) setHoveredModelConfigId(null)
                       }}
                     >
-                      <summary className={isSubmitting ? 'is-disabled' : undefined} aria-label="选择模型">
+                      {/* 视觉上去掉「思考：」前缀后，读屏仍要能听出这是思考档位 */}
+                      <summary
+                        className={isSubmitting ? 'is-disabled' : undefined}
+                        aria-label={`选择模型，当前 ${activeModelDisplay}，思考程度${activeEffortDisplay}`}
+                      >
                         <span className="rag-model-badge" aria-hidden="true">
                           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
                             <path d="M12 3l1.8 4.8L19 9.6l-4.2 3.2L16.2 18 12 15.2 7.8 18l1.4-5.2L5 9.6l5.2-1.8L12 3z" strokeLinejoin="round" />
                           </svg>
                         </span>
-                        <span className="rag-model-name">{activeModelDisplay}</span>
+                        <span className="rag-model-name">
+                          {activeModelDisplay}
+                          <span className="rag-model-effort-inline">
+                            {' · '}
+                            {activeEffortDisplay}
+                          </span>
+                        </span>
                         <span className="rag-kb-chevron" aria-hidden="true" />
                       </summary>
                       <div className="rag-model-menu" role="listbox" aria-label="可用模型">
@@ -2364,7 +2390,9 @@ export default function NewChat({
                 </button>
               </div>
             </div>
-            <p className="rag-composer-hint" id="task-input-hint">Enter 发送 · Shift + Enter 换行。附件用于本轮任务，知识库可跨任务复用。</p>
+            <div className="rag-composer-footer">
+              <TokenUsageStats messages={messages} running={isSubmitting} />
+            </div>
           </div>
         </section>
 

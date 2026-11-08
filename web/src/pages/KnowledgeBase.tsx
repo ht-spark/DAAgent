@@ -53,13 +53,13 @@ export default function KnowledgeBase({
     void getKnowledgeBases()
       .then((bases) => {
         setKnowledgeBases(bases)
+        // setState 的更新函数必须是纯函数，外部回调不能写在里面，
+        // 否则 React 会在渲染期触发父组件更新并报 warning。
         setKnowledgeBaseId((current) => {
           const requested = initialKnowledgeBaseId && bases.some((base) => base.id === initialKnowledgeBaseId)
             ? initialKnowledgeBaseId
             : current
-          const next = bases.some((base) => base.id === requested) ? requested : bases[0]?.id ?? ''
-          if (next) onKnowledgeBaseIdChange?.(next)
-          return next
+          return bases.some((base) => base.id === requested) ? requested : bases[0]?.id ?? ''
         })
       })
       .catch((reason: unknown) => setError(
@@ -67,6 +67,11 @@ export default function KnowledgeBase({
       ))
       .finally(() => setBasesLoading(false))
   }, [initialKnowledgeBaseId, onKnowledgeBaseIdChange])
+
+  // 当前知识库变化时同步给上层，供「资料统计 / 分块嵌入」沿用同一个库
+  useEffect(() => {
+    if (knowledgeBaseId) onKnowledgeBaseIdChange?.(knowledgeBaseId)
+  }, [knowledgeBaseId, onKnowledgeBaseIdChange])
 
   // 切换知识库时清空本次任务列表，不加载该库历史文件
   useEffect(() => {
@@ -248,112 +253,172 @@ export default function KnowledgeBase({
       <div className="page-head">
         <div>
           <h1 className="page-title">知识库维护</h1>
-          <p className="page-sub">添加参考资料，转换后用于对话检索。已收录的资料可在「知识库统计」中管理。</p>
-        </div>
-        <div className="kb-route-controls">
-          <label>
-            <span>当前知识库</span>
-            <select
-              value={knowledgeBaseId}
-              onChange={(event) => {
-                setKnowledgeBaseId(event.target.value)
-                onKnowledgeBaseIdChange?.(event.target.value)
-              }}
-              disabled={basesLoading || knowledgeBases.length === 0 || uploading || converting || deleting}
-            >
-              {knowledgeBases.length === 0 && <option value="">{basesLoading ? '正在读取…' : '尚未创建知识库'}</option>}
-              {knowledgeBases.map((base) => (
-                <option key={base.id} value={base.id}>
-                  {base.name} · {base.document_count} 份
-                </option>
-              ))}
-            </select>
-          </label>
-          <button type="button" className="api-btn" onClick={openCreateDialog}>
-            新建知识库
-          </button>
+          <p className="page-sub">添加参考资料，转换后用于对话检索。</p>
         </div>
       </div>
 
       {error && <div className="err-box">{error}</div>}
 
       <div className="kb-layout">
-        {/* 顶部：上传文件区域（居中长条） */}
-        <div className="kb-upload-section">
-          {basesLoading ? (
-            <p className="kb-first-use" role="status">正在读取知识库…</p>
-          ) : !knowledgeBaseId ? (
-            <div className="kb-first-use">
-              <h2>先为参考资料创建一个知识库</h2>
-              <p>按主题归集文档，方便在不同任务中重复检索和引用。</p>
-              <button type="button" className="skills-upload-button" onClick={openCreateDialog}>创建知识库</button>
-              <small>本次任务的临时附件也可以直接在聊天中添加。</small>
-            </div>
-          ) : (
-          <div
-            className={`kb-upload-zone ${dragOver ? 'kb-drag-over' : ''} ${uploading ? 'kb-uploading' : ''}`}
-            onDragOver={(event) => {
-              event.preventDefault()
-              if (!uploading) setDragOver(true)
-            }}
-            onDragLeave={() => setDragOver(false)}
-            onDrop={(event) => {
-              if (uploading) { event.preventDefault(); return }
-              handleDrop(event)
-            }}
-          >
-            <input
-              ref={fileInput}
-              type="file"
-              multiple
-              hidden
-              onChange={(event) => uploadFiles(event.target.files)}
-            />
-            {uploading ? (
-              <div className="kb-upload-progress">
-                <div className="kb-upload-progress-top">
-                  <span className="kb-upload-progress-count">
-                    已上传 {uploadProgress?.done ?? 0} / {uploadProgress?.total ?? 0}
-                  </span>
-                  <span className="kb-upload-progress-name" title={uploadProgress?.currentName}>
-                    {uploadProgress?.currentName}
-                  </span>
-                </div>
-                <div className="kb-upload-progress-bar">
-                  <div
-                    className="kb-upload-progress-fill"
-                    style={{
-                      width: `${uploadProgress && uploadProgress.total > 0 ? (uploadProgress.done / uploadProgress.total) * 100 : 0}%`,
-                    }}
-                  />
-                </div>
+        {basesLoading ? (
+          <div className="kb-loading-panel" role="status" aria-live="polite">正在读取知识库…</div>
+        ) : !knowledgeBaseId ? (
+          // 空状态：左侧说明与主操作，右侧入库流程，底部格式与限制说明。
+          // 不用单张窄卡片——页面宽度足够，把"我是谁 / 下一步做什么 / 边界在哪"一次讲清。
+          <section className="kb-intro" aria-labelledby="kb-intro-title">
+            <div className="kb-intro-main">
+              <p className="kb-intro-eyebrow">知识库 · 尚未创建</p>
+              <h2 id="kb-intro-title" className="kb-intro-title">先建一个知识库，再把资料放进去</h2>
+              <p className="kb-intro-lead">
+                知识库按主题归集文档。资料上传后会转成 Markdown 并建立索引，
+                之后在分析任务里可以直接检索、引用到具体段落。
+              </p>
+              <div className="kb-intro-actions">
+                <button type="button" className="kb-intro-cta" onClick={openCreateDialog}>
+                  创建知识库
+                </button>
               </div>
-            ) : (
-              <>
-                <svg className="kb-upload-icon" viewBox="0 0 48 48" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M24 6v24" />
-                  <path d="m14 16 10-10 10 10" />
-                  <path d="M8 32v6a4 4 0 0 0 4 4h24a4 4 0 0 0 4-4v-6" />
-                </svg>
-                <span className="kb-upload-copy">
-                  <p className="kb-upload-text">将参考资料拖到这里</p>
-                  <p className="kb-upload-hint">支持 PDF / Word / Excel / TXT / Markdown，压缩包自动分批处理</p>
-                </span>
-                <button type="button" className="skills-upload-button kb-select-files" onClick={() => fileInput.current?.click()}>选择文件</button>
-              </>
-            )}
-          </div>
-          )}
-        </div>
+              <p className="kb-intro-note">本次任务的临时附件也可以直接在对话中添加，不必入库。</p>
+            </div>
+
+            <div className="kb-intro-flow">
+              <p className="kb-intro-flow-label">入库流程</p>
+              <ol className="kb-steps">
+                <li className="kb-step">
+                  <span className="kb-step-index" aria-hidden="true">01</span>
+                  <span className="kb-step-body">
+                    <strong>创建知识库</strong>
+                    <span>按主题命名，一个库对应一类资料。</span>
+                  </span>
+                </li>
+                <li className="kb-step">
+                  <span className="kb-step-index" aria-hidden="true">02</span>
+                  <span className="kb-step-body">
+                    <strong>上传并转换</strong>
+                    <span>PDF、Word、Excel、TXT、Markdown 统一转成可检索文本。</span>
+                  </span>
+                </li>
+                <li className="kb-step">
+                  <span className="kb-step-index" aria-hidden="true">03</span>
+                  <span className="kb-step-body">
+                    <strong>在任务中引用</strong>
+                    <span>对话与数据分析时按需检索，结论可回溯到原文。</span>
+                  </span>
+                </li>
+              </ol>
+            </div>
+
+            <div className="kb-intro-foot">
+              <span>支持 PDF / Word / Excel / TXT / Markdown</span>
+              <span>压缩包自动分批处理</span>
+            </div>
+          </section>
+        ) : (
+          <>
+            {/* 选库是「上传到哪里」的输入条件，和上传区放在一起，不再占页头位置 */}
+            <div className="kb-workbar">
+              <label className="kb-workbar-field">
+                <span>当前知识库</span>
+                <select
+                  value={knowledgeBaseId}
+                  onChange={(event) => setKnowledgeBaseId(event.target.value)}
+                  disabled={knowledgeBases.length === 0 || uploading || converting || deleting}
+                >
+                  {knowledgeBases.map((base) => (
+                    <option key={base.id} value={base.id}>
+                      {base.name} · {base.document_count} 份
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <button type="button" className="kb-workbar-new" onClick={openCreateDialog}>
+                新建知识库
+              </button>
+            </div>
+
+            <div
+              className={`kb-upload-zone ${dragOver ? 'kb-drag-over' : ''} ${uploading ? 'kb-uploading' : ''}`}
+              onClick={() => {
+                if (!uploading) fileInput.current?.click()
+              }}
+              onDragOver={(event) => {
+                event.preventDefault()
+                if (!uploading) setDragOver(true)
+              }}
+              onDragLeave={() => setDragOver(false)}
+              onDrop={(event) => {
+                if (uploading) { event.preventDefault(); return }
+                handleDrop(event)
+              }}
+            >
+              <input
+                ref={fileInput}
+                type="file"
+                multiple
+                hidden
+                onChange={(event) => uploadFiles(event.target.files)}
+              />
+              {uploading ? (
+                <div className="kb-upload-progress">
+                  <div className="kb-upload-progress-top">
+                    <span className="kb-upload-progress-count">
+                      已上传 {uploadProgress?.done ?? 0} / {uploadProgress?.total ?? 0}
+                    </span>
+                    <span className="kb-upload-progress-name" title={uploadProgress?.currentName}>
+                      {uploadProgress?.currentName}
+                    </span>
+                  </div>
+                  <div className="kb-upload-progress-bar">
+                    <div
+                      className="kb-upload-progress-fill"
+                      style={{
+                        width: `${uploadProgress && uploadProgress.total > 0 ? (uploadProgress.done / uploadProgress.total) * 100 : 0}%`,
+                      }}
+                    />
+                  </div>
+                </div>
+              ) : (
+                <>
+                  <span className="kb-upload-chip" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M12 16V4" />
+                      <path d="m7 9 5-5 5 5" />
+                      <path d="M4 16v2a3 3 0 0 0 3 3h10a3 3 0 0 0 3-3v-2" />
+                    </svg>
+                  </span>
+                  <span className="kb-upload-copy">
+                    <span className="kb-upload-text">拖入文件，或从本地选择</span>
+                    <span className="kb-upload-hint">PDF / Word / Excel / TXT / Markdown · 压缩包自动分批</span>
+                  </span>
+                  <button
+                    type="button"
+                    className="kb-select-files"
+                    onClick={(event) => {
+                      event.stopPropagation()
+                      fileInput.current?.click()
+                    }}
+                  >
+                    选择文件
+                  </button>
+                </>
+              )}
+            </div>
+          </>
+        )}
 
         {/* 下方：本次任务文件列表（不展示历史） */}
         {knowledgeBaseId && (
         <div className="kb-table-section">
           <div className="kb-table-head">
-            <h2>本次上传文件</h2>
-            <span className="kb-table-count">
-              {loading ? '读取中…' : `共 ${documents.length} 份 · 成功 ${successCount} · Markdown ${markdownCount} · 已转换 ${conversionCount}`}
-            </span>
+            <div className="kb-table-heading">
+              <h2>本次上传文件</h2>
+              <span className="kb-table-total">{loading ? '读取中…' : `共 ${documents.length} 份`}</span>
+            </div>
+            <ul className="kb-stat-strip" aria-label="本次上传统计">
+              <li><span>成功</span><strong>{successCount}</strong></li>
+              <li><span>Markdown</span><strong>{markdownCount}</strong></li>
+              <li><span>已转换</span><strong>{conversionCount}</strong></li>
+            </ul>
           </div>
 
           <div className="kb-table-wrapper">
@@ -379,7 +444,12 @@ export default function KnowledgeBase({
               <tbody>
                 {!loading && documents.length === 0 && (
                   <tr>
-                    <td colSpan={7} className="kb-empty-row">本次任务尚未上传文件</td>
+                    <td colSpan={7} className="kb-empty-row">
+                      <div className="kb-table-empty">
+                        <strong>还没有文件</strong>
+                        <span>把文件拖到上方区域，或点「选择文件」开始上传。</span>
+                      </div>
+                    </td>
                   </tr>
                 )}
                 {paginatedDocuments.map((doc) => (
@@ -418,7 +488,7 @@ export default function KnowledgeBase({
                     </td>
                     <td className="kb-col-unknown">
                       {doc.is_markdown ? (
-                        <span className="kb-tag kb-tag-unknown">是</span>
+                        <span className="kb-tag kb-tag-success">是</span>
                       ) : (
                         <span className="kb-tag kb-tag-normal">否</span>
                       )}
@@ -429,7 +499,7 @@ export default function KnowledgeBase({
                       ) : doc.is_conversion ? (
                         <span className="kb-tag kb-tag-success">成功</span>
                       ) : (
-                        <span className="kb-tag kb-tag-normal">—</span>
+                        <span className="kb-tag kb-tag-normal">否</span>
                       )}
                     </td>
                   </tr>
@@ -438,7 +508,8 @@ export default function KnowledgeBase({
             </table>
           </div>
 
-          {documents.length > 0 && (
+          {/* 只有一页时不显示分页器，避免纯噪音 */}
+          {totalPages > 1 && (
             <div className="kb-pagination">
               <button
                 className="kb-page-btn"
@@ -463,21 +534,27 @@ export default function KnowledgeBase({
           )}
 
           <div className="kb-actions">
+            <div className="kb-actions-utils">
+              <button
+                className="api-btn"
+                disabled={selectedIds.size === 0 || converting}
+                onClick={convertFormat}
+              >
+                {converting ? '转换中…' : '转换格式'}
+              </button>
+              <button
+                className="api-btn danger"
+                disabled={selectedIds.size === 0 || deleting}
+                onClick={requestDeleteSelected}
+              >
+                {deleting ? '删除中…' : `删除所选 (${selectedIds.size})`}
+              </button>
+            </div>
             <button
-              className="api-btn primary"
-              disabled={selectedIds.size === 0 || converting}
-              onClick={convertFormat}
+              className="api-btn primary kb-actions-next"
+              disabled={documents.length === 0}
+              onClick={onNext}
             >
-              {converting ? '转换中…' : '转换格式'}
-            </button>
-            <button
-              className="api-btn danger"
-              disabled={selectedIds.size === 0 || deleting}
-              onClick={requestDeleteSelected}
-            >
-              {deleting ? '删除中…' : `删除所选 (${selectedIds.size})`}
-            </button>
-            <button className="api-btn" disabled={documents.length === 0} onClick={onNext}>
               下一步
             </button>
           </div>
