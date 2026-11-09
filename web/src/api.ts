@@ -817,10 +817,11 @@ export type AgentChatHandlers = {
   onToken: (content: string) => void
   onDone: (discussionId: string, runId: string, artifacts: AgentArtifact[], sources?: KnowledgeSourceCitation[], contextUsage?: ContextUsage) => void
   onCancelled?: () => void
+  onPaused?: (runId: string) => void
   onUsage?: (runId: string, usageSummary: unknown) => void
 }
 
-export async function fetchActiveAgentChatRun(discussionId: string): Promise<{ run_id: string; message: string } | null> {
+export async function fetchActiveAgentChatRun(discussionId: string): Promise<{ run_id: string; message: string; interrupted?: boolean; resumable?: boolean; checkpoint_seq?: number } | null> {
   const res = await fetch(`/api/agent/discussions/${encodeURIComponent(discussionId)}/active-run`)
   if (!res.ok) throw new Error(await extractDetail(res, '获取运行任务失败'))
   return res.json()
@@ -835,6 +836,17 @@ export async function reconnectAgentChatRun(runId: string, handlers: AgentChatHa
   const res = await fetch(`/api/agent/chat/runs/${encodeURIComponent(runId)}/stream`, { signal })
   if (!res.ok) throw new Error(await extractDetail(res, '重连任务失败'))
   await consumeAgentChatStream(res, handlers)
+}
+
+export async function resumeAgentChatRun(runId: string, handlers: AgentChatHandlers, signal: AbortSignal): Promise<void> {
+  const res = await fetch(`/api/agent/chat/runs/${encodeURIComponent(runId)}/resume`, { method: 'POST', signal })
+  if (!res.ok) throw new Error(await extractDetail(res, '恢复任务失败'))
+  await consumeAgentChatStream(res, handlers)
+}
+
+export async function pauseAgentChatRun(runId: string): Promise<void> {
+  const res = await fetch(`/api/agent/chat/runs/${encodeURIComponent(runId)}/pause`, { method: 'POST' })
+  if (!res.ok) throw new Error(await extractDetail(res, '暂停任务失败'))
 }
 
 export async function streamDataAgentMessage(
@@ -923,12 +935,13 @@ async function consumeAgentChatStream(res: Response, handlers: AgentChatHandlers
         await handlers.onApprovalRequired(event as Extract<AgentTraceEvent, { type: 'agent_command_approval_required' }>)
       }
       if (event.type === 'token' && event.content) handlers.onToken(event.content)
-      if (['done', 'error', 'cancelled'].includes(event.type)
+      if (['done', 'error', 'cancelled', 'paused'].includes(event.type)
         && event.run_id && Object.prototype.hasOwnProperty.call(event, 'usage_summary')) {
         handlers.onUsage?.(event.run_id, event.usage_summary)
       }
       if (event.type === 'error') throw new Error(event.detail ?? '数据 Agent 运行失败。')
       if (event.type === 'cancelled') handlers.onCancelled?.()
+      if (event.type === 'paused' && event.run_id) handlers.onPaused?.(event.run_id)
       if (event.type === 'done' && event.discussion_id && event.run_id) {
         handlers.onDone(event.discussion_id, event.run_id, event.artifacts ?? [], event.sources, event.context_usage)
       }

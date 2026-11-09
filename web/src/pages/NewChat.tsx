@@ -16,6 +16,8 @@ import {
   projectFilePreviewUrl,
   renameBrainstormDiscussion,
   reconnectAgentChatRun,
+  resumeAgentChatRun,
+  pauseAgentChatRun,
   streamDataAgentMessage,
   syncApiSettingsCache,
   updateBrainstormDiscussionModel,
@@ -1152,6 +1154,7 @@ export default function NewChat({
   const [isMessageScrollbarVisible, setIsMessageScrollbarVisible] = useState(false)
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [activeRunId, setActiveRunId] = useState<string | null>(null)
+  const [resumableAgentRunId, setResumableAgentRunId] = useState<string | null>(null)
   const [isStopping, setIsStopping] = useState(false)
   const [files, setFiles] = useState<File[]>([])
   const [skills, setSkills] = useState<SkillInfo[]>([])
@@ -1210,6 +1213,7 @@ export default function NewChat({
   // 人工批准弹窗：请求内容 + 结算回调（Promise 流内等待用户点按钮）
   const [approval, setApproval] = useState<ApprovalRequest | null>(null)
   const approvalResolveRef = useRef<((approved: boolean) => void) | null>(null)
+  const approvalInterruptedRef = useRef(false)
   const streamControllerRef = useRef<AbortController | null>(null)
   const runningDiscussionRef = useRef<string | null>(null)
   const detachedRef = useRef(false)
@@ -1360,7 +1364,8 @@ export default function NewChat({
         })
         approvalResolveRef.current = null
         setApproval(null)
-        if (active()) await decideAgentCommand(event.approval_id, approved)
+        if (active() && !approvalInterruptedRef.current) await decideAgentCommand(event.approval_id, approved)
+        approvalInterruptedRef.current = false
       },
       onToken: (content) => {
         if (!active()) return
@@ -1399,6 +1404,16 @@ export default function NewChat({
         setIsSubmitting(false)
         setIsStopping(false)
         setAgentRunTerminated(true)
+        runningDiscussionRef.current = null
+      },
+      onPaused: (runId) => {
+        if (!active()) return
+        setResumableAgentRunId(runId)
+        setActiveRunId(null)
+        setIsSubmitting(false)
+        setIsStopping(false)
+        setApproval(null)
+        approvalInterruptedRef.current = false
         runningDiscussionRef.current = null
       },
     }
@@ -1535,6 +1550,7 @@ export default function NewChat({
     approvalResolveRef.current = null
     setApproval(null)
     setActiveRunId(null)
+    setResumableAgentRunId(null)
     setIsSubmitting(false)
     setIsStopping(false)
     setAgentRunTerminated(false)
@@ -1557,6 +1573,7 @@ export default function NewChat({
       }))
       .then(({ discussion, activeRun }) => {
         if (cancelled) return
+        setResumableAgentRunId(null)
         const activeRunId = activeRun?.run_id
         if (activeRunId && discussion.messages.some((item) => item.metadata?.agent_run_id === activeRunId)) {
           activeRun = null
@@ -1605,7 +1622,16 @@ export default function NewChat({
         setSelectedReasoningEffort(
           isReasoningEffort(discussion.reasoning_effort) ? discussion.reasoning_effort : null,
         )
-        if (activeRun) {
+        if (activeRun?.interrupted) {
+          setResumableAgentRunId(activeRun.run_id)
+          setIsSubmitting(false)
+          setActiveRunId(null)
+          const controller = new AbortController()
+          streamControllerRef.current = controller
+          runningDiscussionRef.current = discussionId
+          void reconnectAgentChatRun(activeRun.run_id, createStreamHandlers(controller), controller.signal)
+            .catch(() => { if (!controller.signal.aborted) setResumableAgentRunId(activeRun.run_id) })
+        } else if (activeRun) {
           const controller = new AbortController()
           streamControllerRef.current = controller
           runningDiscussionRef.current = discussionId
@@ -1714,12 +1740,30 @@ export default function NewChat({
     }
   }
 
+  async function pauseActiveRun() {
+    if (!activeRunId || isStopping) return
+    setIsStopping(true)
+    approvalInterruptedRef.current = true
+    try {
+      await pauseAgentChatRun(activeRunId)
+      approvalResolveRef.current?.(false)
+    } catch (error) {
+      approvalInterruptedRef.current = false
+      setIsStopping(false)
+      setMessages((current) => current.map((item, index) => index === current.length - 1
+        ? { ...item, content: error instanceof Error ? error.message : '暂停任务失败。' } : item))
+    }
+  }
+
   async function stopActiveRun() {
     if (!activeRunId || isStopping) return
     setIsStopping(true)
+    approvalInterruptedRef.current = true
     try {
       await cancelAgentChatRun(activeRunId)
+      approvalResolveRef.current?.(false)
     } catch (error) {
+      approvalInterruptedRef.current = false
       setIsStopping(false)
       setMessages((current) => current.map((item, index) => index === current.length - 1
         ? { ...item, content: `${item.content}\n\n${error instanceof Error ? error.message : '终止任务失败。'}` }
@@ -1880,6 +1924,43 @@ export default function NewChat({
           </div>
 
           <div className="rag-composer-wrap">
+            {resumableAgentRunId && (
+              <div className="rag-composer-context" role="status">
+                <span>任务已暂停或中断，已保存执行进度。</span>
+                <button className="btn-ghost" type="button" onClick={() => {
+                  const runId = resumableAgentRunId
+                  const controller = new AbortController()
+                  streamControllerRef.current = controller
+                  runningDiscussionRef.current = discussionId ?? null
+                  setIsSubmitting(true)
+                  setResumableAgentRunId(null)
+                  setActiveRunId(runId)
+                  setAgentTrace([])
+                  setMessages((current) => current.map((item, index) => index === current.length - 1
+                    ? { ...item, content: '', trace: [] } : item))
+                  void resumeAgentChatRun(runId, createStreamHandlers(controller), controller.signal).catch((error) => {
+                    if (controller.signal.aborted) return
+                    setIsSubmitting(false)
+                    setActiveRunId(null)
+                    setResumableAgentRunId(runId)
+                    setMessages((current) => current.map((item, index) => index === current.length - 1
+                      ? { ...item, content: error instanceof Error ? error.message : '恢复任务失败。' } : item))
+                  })
+                }}>继续任务</button>
+                <button className="btn-ghost" type="button" onClick={() => {
+                  void cancelAgentChatRun(resumableAgentRunId).then(() => {
+                    setResumableAgentRunId(null)
+                    setAgentRunTerminated(true)
+                  }).catch((error) => setMessages((current) => current.map((item, index) => index === current.length - 1
+                    ? { ...item, content: error instanceof Error ? error.message : '终止任务失败。' } : item)))
+                }}>终止任务</button>
+              </div>
+            )}
+            {isSubmitting && activeRunId && (
+              <div className="rag-composer-context">
+                <button className="btn-ghost" type="button" disabled={isStopping} onClick={() => void pauseActiveRun()}>暂停并保存进度</button>
+              </div>
+            )}
             {messages.length === 0 && (
               <div className="rag-composer-context" aria-label="当前任务资料">
                 <span className="rag-context-project" title={projectTitle ?? undefined}>{projectTitle ? `项目：${projectTitle}` : projectId ? '已关联项目' : '未关联项目'}</span>

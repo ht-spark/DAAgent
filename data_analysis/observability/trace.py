@@ -51,6 +51,7 @@ class RunTrace(BaseModel):
     run_id: str
     trace_id: str = Field(default_factory=lambda: uuid.uuid4().hex)
     spans: list[Span] = Field(default_factory=list)
+    interrupted_usage: bool = False
     _lock: threading.RLock = PrivateAttr(default_factory=threading.RLock)
     _active: list[Span] = PrivateAttr(default_factory=list)
     _starts: dict[str, float] = PrivateAttr(default_factory=dict)
@@ -60,9 +61,15 @@ class RunTrace(BaseModel):
         default_factory=lambda: ContextVar("agent_span_scope", default=()),
     )
 
-    def __init__(self, run_id: str, exporter: Callable[[Span], None] | None = None) -> None:
+    def __init__(self, run_id: str, exporter: Callable[[Span], None] | None = None, *,
+                 trace_id: str | None = None, prior_spans: list[dict] | None = None,
+                 interrupted_usage: bool = False) -> None:
         """创建根 span，并可选地在每个 span 结束时本地导出。"""
         super().__init__(run_id=run_id)
+        if trace_id is not None:
+            self.trace_id = trace_id
+        self.spans.extend(Span.model_validate(item) for item in (prior_spans or []))
+        self.interrupted_usage = interrupted_usage
         self._exporter = exporter
         self.begin("run", "agent_run")
 
@@ -190,6 +197,10 @@ class RunTrace(BaseModel):
         """汇总真实模型调用，并分别提供 Todo 与工具的归因结果。"""
         with self._lock:
             result = self._summarize([span for span in self.spans if span.kind == "llm"])
+            if self.interrupted_usage:
+                # 进程中断可能丢失未落盘的模型用量，已保存小计只能作为下界，不能冒充完整总量。
+                result.update(input_tokens=None, output_tokens=None, cost_estimate=None,
+                              usage_status="unknown", interrupted_usage=True)
             for kind in ("todo", "tool"):
                 result[f"by_{kind}"] = [
                     {"span_id": span.span_id, "name": span.name, **self._summarize(self._descendant_llms(span))}

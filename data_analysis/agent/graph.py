@@ -6,7 +6,7 @@ import json
 import logging
 from collections.abc import Generator, Iterable, Iterator
 from contextlib import nullcontext
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, ConfigDict
 
@@ -44,6 +44,8 @@ GraphEvent = Action | SkillAction | Observation | SkillObservation | Finish | Ve
 MAX_RESULT_SUMMARY_CHARS = 2_000          # 单个 Todo 结果摘要的字符上限
 MAX_PLAN_RESULTS_CHARS = 16_000           # 单次 prompt 内全部已完成结果的总预算
 LOGGER = logging.getLogger(__name__)
+if TYPE_CHECKING:
+    from ..runtime.checkpoint import CheckpointJournal
 
 
 class PlanCreated(BaseModel):
@@ -172,6 +174,7 @@ def iter_plan_graph(
     max_plan_reviews: int = 6,
     verifier: Verifier | None = None,
     max_verify_retries: int = 1,
+    checkpoint: CheckpointJournal | None = None,
 ) -> Iterator[PlanGraphEvent]:
     """按原事件语义调度计划，并可选采集规划与 Todo 片段。
 
@@ -191,9 +194,20 @@ def iter_plan_graph(
         max_plan_reviews: 默认最多 6 次复审（含继续和失败）；0 禁用，限制额外模型开销。
         verifier: 独立交付验证器；省略时保留旧库调用行为。
         max_verify_retries: 默认只允许 1 次失败修订，0 只验证不修订；不得超过 3。
+        checkpoint: 可选持久执行日志；重演已保存结果来恢复图内的预算和保护状态。
     """
     if type(max_verify_retries) is not int or not 0 <= max_verify_retries <= 3:
         raise ValueError("验证修订次数必须为 0 到 3 的整数")
+    if checkpoint is not None:
+        planner = checkpoint.wrap(planner, "planner", ("create_plan", "create_recovery_plan", "reassess"))
+        loop = checkpoint.wrap(loop, "loop", ("step", "step_batch"))
+        harness = checkpoint.wrap(harness, "harness", ("execute", "execute_many", "rejected", "can_parallel"))
+        if skill_runtime is not None:
+            skill_runtime = checkpoint.wrap(skill_runtime, "skill", ("execute",))
+        if verifier is not None:
+            verifier = checkpoint.wrap(verifier, "verifier", ("verify",))
+        if trace is not None:
+            trace = checkpoint.wrap_trace(trace)
     source = _iter_plan_graph(
         state, planner, loop, harness, skill_runtime=skill_runtime,
         failure_threshold=failure_threshold, max_replans=max_replans,

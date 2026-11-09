@@ -84,6 +84,34 @@ def _connect() -> sqlite3.Connection:
                 ON agent_spans(run_id, started_at);
             CREATE INDEX IF NOT EXISTS idx_agent_spans_trace
                 ON agent_spans(trace_id, parent_span_id);
+            CREATE TABLE IF NOT EXISTS agent_checkpoints (
+                run_id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                schema_version INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                config_json TEXT NOT NULL,
+                state_json TEXT NOT NULL,
+                trace_id TEXT NOT NULL,
+                owner TEXT NOT NULL,
+                lease_until REAL NOT NULL,
+                approval_json TEXT,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS agent_checkpoint_steps (
+                run_id TEXT NOT NULL REFERENCES agent_checkpoints(run_id) ON DELETE CASCADE,
+                seq INTEGER NOT NULL,
+                kind TEXT NOT NULL,
+                arguments_json TEXT NOT NULL,
+                payload_json TEXT,
+                completed INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY(run_id, seq)
+            );
+            CREATE TABLE IF NOT EXISTS agent_checkpoint_events (
+                run_id TEXT NOT NULL REFERENCES agent_checkpoints(run_id) ON DELETE CASCADE,
+                seq INTEGER NOT NULL,
+                payload TEXT NOT NULL,
+                PRIMARY KEY(run_id, seq)
+            );
             """
         )
         session_columns = {

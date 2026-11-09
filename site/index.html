@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>DAAgent：从数据到可复核的分析报告</title>
+    <meta name="description" content="DAAgent 是面向业务问题的数据分析智能体，上传数据、说清问题后自主完成分析并交付可复核的报告。">
+    <link rel="icon" href="./assets/logo-mark.png">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@500;600&amp;family=IBM+Plex+Mono:wght@400&amp;family=Newsreader:opsz,wght@6..72,400;6..72,500&amp;family=Noto+Sans+SC:wght@600&amp;family=Noto+Serif+SC:wght@400&amp;display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="./page.css">
+</head>
+<body id="top">
+<a class="skip" href="#main">跳到主要内容</a>
+
+<header class="site-nav">
+    <div class="nav-inner container">
+        <a class="brand" href="#top" aria-label="DAAgent 首页">
+            <img class="brand-mark" src="./assets/logo-mark.png" width="128" height="128" alt="">
+            <span class="brand-name">DAAgent</span>
+        </a>
+        <nav aria-label="页面导航">
+            <ul class="nav-links">
+                <li><a href="#stance">它是什么</a></li>
+                <li><a href="#workflow">分析流程</a></li>
+                <li><a href="#capabilities">适用场景</a></li>
+                <li><a href="#install">安装</a></li>
+            </ul>
+        </nav>
+    </div>
+</header>
+
+<main id="main">
+    <section class="hero" aria-labelledby="hero-title">
+        <div class="container hero-grid">
+            <div class="hero-copy">
+                <div class="hero-main">
+                    <h1 id="hero-title">从数据到报告，<br>每一步可复核。</h1>
+                    <p class="lead">上传数据、说清问题。DAAgent 自主规划分析路径，跑代码、做图表，把证据留在报告里。</p>
+                    <div class="hero-actions">
+                        <a class="btn-primary" href="#install">查看安装步骤</a>
+                        <a class="link-action" href="#workflow">看一次完整分析</a>
+                    </div>
+                </div>
+                <p class="hero-note">在本机运行，代码与产物留在项目目录。</p>
+            </div>
+            <figure class="hero-plate" data-kind="product">
+                <img src="./assets/chart-gmv.png" width="1200" height="675" alt="Olist 月度 GMV 趋势图，含运费与不含运费两条序列，2016-09 至 2018-09" fetchpriority="high" decoding="async">
+                <figcaption>
+                    <strong>真实会话数据。</strong>Olist 月度 GMV 趋势，2016-09 至 2018-09。
+                    <span class="plate-meta">9 个数据文件；按 order_purchase_timestamp 按月汇总，单位 BRL。图表按页面尺寸重绘。</span>
+                    <span class="chart-readout">2016-09 至 2018-08 整体上升；2018-09 为不完整月份，末端骤降。</span>
+                </figcaption>
+            </figure>
+        </div>
+    </section>
+
+    <section class="stance" id="stance" aria-labelledby="stance-title">
+        <div class="container stance-grid">
+            <div class="stance-head">
+                <h2 id="stance-title">能复核，<br>才算完成。</h2>
+                <p class="lead">它把每一步留在同一份会话里：查了哪些字段、跑了什么代码、结论依据哪张表。</p>
+            </div>
+            <div class="stance-body">
+                <table class="compare">
+                    <caption class="visually-hidden">DAAgent 会做与不会做的事</caption>
+                    <thead>
+                        <tr><th scope="col">它做</th><th scope="col">它不做</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td>先核对字段、口径与对比基准</td><td>不套固定分析模板</td></tr>
+                        <tr><td>自己写代码、跑图表、复核产物</td><td>不在没有证据时给结论</td></tr>
+                        <tr><td>留下中间表、脚本与结论</td><td>不替代数仓、指标平台与实时 BI</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </section>
+
+    <section class="workflow" id="workflow" aria-label="一次分析的三个阶段">
+        <div class="container">
+            <article class="stage">
+                <div class="stage-text">
+                    <h2>01<br>说清问题</h2>
+                    <p>描述业务问题，上传 CSV、Excel、文档或图片；也可以先选知识库，把口径带进来。</p>
+                </div>
+                <figure class="stage-media" data-kind="product">
+                    <img src="./assets/screen-home.png" width="1600" height="1220" alt="DAAgent 新建任务界面，中央是分析问题输入框" loading="lazy" decoding="async">
+                    <figcaption>新建任务：一句问题、一份数据，就能开始。</figcaption>
+                </figure>
+            </article>
+
+            <article class="stage stage--reverse">
+                <div class="stage-text">
+                    <h2>02<br>自己跑完分析</h2>
+                    <p>它先看数据长什么样，再决定用哪些工具；需要时写 Python，核对口径，复核图表。</p>
+                </div>
+                <div class="stage-media">
+                    <table class="tool-table">
+                        <caption class="visually-hidden">分析过程中的动作与对应工具</caption>
+                        <thead>
+                            <tr><th scope="col">动作</th><th scope="col">工具</th></tr>
+                        </thead>
+                        <tbody>
+                            <tr><td>看数据</td><td><code>profile_data</code><code>inspect_data_rows</code></td></tr>
+                            <tr><td>跑代码</td><td><code>execute_python</code></td></tr>
+                            <tr><td>复核图表</td><td><code>inspect_generated_image</code></td></tr>
+                            <tr><td>交付产物</td><td><code>write_artifact</code><code>inspect_artifact</code></td></tr>
+                        </tbody>
+                    </table>
+                    <p class="trace-note">本次会话里，它核对了 9 个 CSV 的字段，复算 AOV，再与既有报告对齐。</p>
+                </div>
+            </article>
+
+            <article class="stage stage--wide">
+                <div class="stage-text">
+                    <h2>03<br>可核验的交付</h2>
+                    <p>报告、图表、中间表与脚本都落在产物目录；关键数字能回到原始文件和代码。</p>
+                </div>
+                <div class="stage-media">
+                    <ul class="artifacts">
+                        <li><span class="artifact-name">olist_经营分析规划.md</span><span class="artifact-type">Markdown</span><span class="artifact-role">分析路径与结论</span></li>
+                        <li><span class="artifact-name">olist_GMV趋势图.png</span><span class="artifact-type">PNG</span><span class="artifact-role">月度 GMV 趋势图</span></li>
+                        <li><span class="artifact-name">olist_月度AOV序列.csv</span><span class="artifact-type">CSV</span><span class="artifact-role">客单价复算明细</span></li>
+                    </ul>
+                    <p class="artifact-note">产物目录保留规划、图表与中间表。</p>
+                </div>
+            </article>
+        </div>
+    </section>
+
+    <section class="capabilities" id="capabilities" aria-labelledby="cap-title">
+        <div class="container cap-grid">
+            <div class="cap-head">
+                <h2 id="cap-title">它能接住哪些活</h2>
+                <p class="lead">从一次性的临时分析，到固定节奏的周期报告。</p>
+            </div>
+            <ul class="cap-list">
+                <li><span class="cap-name">AB 测试</span><span class="cap-line">实验组与对照组指标对比，给出业务解读</span></li>
+                <li><span class="cap-name">竞品分析</span><span class="cap-line">上传资料结合公开信息，做对比研究</span></li>
+                <li><span class="cap-name">需求调研</span><span class="cap-line">把数据结论整理成可引用的依据</span></li>
+                <li><span class="cap-name">PRD 支撑</span><span class="cap-line">为产品文档补上数据结论与图表</span></li>
+                <li><span class="cap-name">周期报告</span><span class="cap-line">日报、周报、月报、季报、年报</span></li>
+                <li><span class="cap-name">日常分析</span><span class="cap-line">漏斗、DAU、GMV、归因、指标体系</span></li>
+            </ul>
+        </div>
+    </section>
+
+    <section class="platform" aria-labelledby="platform-title">
+        <div class="container platform-grid">
+            <div class="platform-head">
+                <h2 id="platform-title">下一次<br>口径还在。</h2>
+                <p class="lead">口径、角色要求与交付习惯，可以存成知识库和任务专家；下一次直接复用。</p>
+                <dl class="platform-list">
+                    <div><dt>知识库</dt><dd>上传资料后做混合检索，结论注明来源文件。</dd></div>
+                    <div><dt>任务专家</dt><dd>把角色、工作指引和技能固定下来，下次直接使用。</dd></div>
+                    <div><dt>连续追问</dt><dd>在同一会话里继续下钻，不用重新交代背景。</dd></div>
+                </dl>
+            </div>
+            <figure class="platform-media" data-kind="product">
+                <img src="./assets/screen-experts.png" width="1600" height="1290" alt="DAAgent 任务专家页面，列出电商周报专家与专家创建专家" loading="lazy" decoding="async">
+                <figcaption>任务专家：电商周报专家与专家创建专家，已发布版本可直接使用。</figcaption>
+            </figure>
+        </div>
+    </section>
+
+    <section class="install" id="install" aria-labelledby="install-title">
+        <div class="container install-grid">
+            <div>
+                <h2 id="install-title">在自己的机器上跑起来</h2>
+                <p class="lead">准备 Python、Node 和一个模型 API，三条命令启动。</p>
+                <ul class="req-list">
+                    <li><span>Python 与 uv</span><code>3.11+</code></li>
+                    <li><span>Node.js</span><code>18+</code></li>
+                    <li><span>模型 API</span><span>OpenAI 兼容</span></li>
+                    <li><span>知识库嵌入</span><code>bge-small-zh-v1.5</code></li>
+                </ul>
+                <p class="install-note">联网检索与文档转换分别需要 Tavily 和 MinerU 密钥。模型 Key 填进项目根目录的 <code>.env</code>，字段见 <code>.env.example</code>。</p>
+            </div>
+            <div class="code-panel">
+                <div class="code-actions">
+                    <button class="btn-copy" type="button" data-copy>复制命令</button>
+                    <span class="copy-status" id="copy-status" role="status" aria-live="polite"></span>
+                </div>
+                <pre><code id="install-commands">uv sync
+cd web &amp;&amp; npm install
+.\start.ps1</code></pre>
+                <p class="code-note">启动后访问 <code>http://localhost:5173</code>；生产模式用 <code>.\start.ps1 prod</code> 起在 <code>8000</code>。</p>
+            </div>
+        </div>
+    </section>
+</main>
+
+<footer class="site-footer">
+    <div class="container">
+        <p class="footer-statement">分析跑得完，<br>也要说得清。</p>
+        <ul class="footer-links">
+            <li><a href="#stance">它是什么</a></li>
+            <li><a href="#workflow">分析流程</a></li>
+            <li><a href="#capabilities">适用场景</a></li>
+            <li><a href="#install">安装</a></li>
+            <li><a href="../README.md">项目说明</a></li>
+            <li><a href="../LICENSE">许可证</a></li>
+        </ul>
+        <p class="footer-colophon">DAAgent，面向业务问题的数据分析智能体。截图来自本地运行实例，示例数据为 Olist 公开电商数据集。</p>
+    </div>
+</footer>
+
+<script>
+    // 复制安装命令：真实写入剪贴板，失败时明确提示
+    (() => {
+        const button = document.querySelector('[data-copy]');
+        const status = document.getElementById('copy-status');
+        const commands = document.getElementById('install-commands');
+        if (!button || !status || !commands) return;
+        const original = button.textContent;
+        // 直接双击打开文件时不是安全上下文，补一个 execCommand 兜底
+        async function copyText(text) {
+            if (navigator.clipboard && window.isSecureContext) {
+                await navigator.clipboard.writeText(text);
+                return;
+            }
+            const area = document.createElement('textarea');
+            area.value = text;
+            area.setAttribute('readonly', '');
+            area.style.position = 'fixed';
+            area.style.top = '-1000px';
+            document.body.appendChild(area);
+            area.select();
+            const ok = document.execCommand('copy');
+            area.remove();
+            if (!ok) throw new Error('copy failed');
+        }
+        button.addEventListener('click', async () => {
+            try {
+                await copyText(commands.textContent.trim());
+                button.textContent = '已复制';
+                status.textContent = '三条命令已复制。';
+                window.setTimeout(() => {
+                    button.textContent = original;
+                    status.textContent = '';
+                }, 2400);
+            } catch {
+                status.textContent = '复制失败，请手动选择命令。';
+            }
+        });
+    })();
+
+    // 滚动到章节时标出当前导航项，给读者一个位置提示
+    (() => {
+        const links = Array.from(document.querySelectorAll('.nav-links a[href^="#"]'));
+        if (!links.length || !('IntersectionObserver' in window)) return;
+        const byId = new Map(links.map((link) => [link.getAttribute('href').slice(1), link]));
+        const setCurrent = (id) => {
+            links.forEach((link) => {
+                if (byId.get(id) === link) link.setAttribute('aria-current', 'location');
+                else link.removeAttribute('aria-current');
+            });
+        };
+        const observer = new IntersectionObserver((entries) => {
+            entries.forEach((entry) => {
+                if (!entry.isIntersecting) return;
+                const id = entry.target.id;
+                setCurrent(byId.has(id) ? id : '');
+            });
+        }, { rootMargin: '-15% 0px -70% 0px', threshold: 0 });
+        document.querySelectorAll('main > section').forEach((section) => observer.observe(section));
+    })();
+</script>
+</body>
+</html>

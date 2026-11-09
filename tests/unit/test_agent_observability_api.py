@@ -1,6 +1,7 @@
 """Agent 流式接口的计量持久化与审批追踪回归测试。"""
 
 import json
+import asyncio
 import sys
 import threading
 from types import SimpleNamespace
@@ -67,6 +68,47 @@ async def _start(monkeypatch, decisions):
         reasoning_effort=None, knowledge_base_id=None, knowledge_base_ids=None,
         skill_ids=None, expert_id=None, project_id=None,
     )
+
+
+@pytest.mark.asyncio
+async def test_paused_approval_survives_run_reconstruction(api_context, monkeypatch):
+    from server.checkpoint_store import load_checkpoint
+
+    monkeypatch.setattr(main, "AGENT_COMMAND_APPROVAL_TIMEOUT_SECONDS", 5)
+    response = await _start(monkeypatch, [
+        {"objective": "检查", "todos": [{"id": "t", "objective": "执行", "expected_outputs": ["证据"]}]},
+        {"type": "action", "tool_name": "run_terminal_command", "arguments": {"command": "测试命令"}},
+    ])
+    run_id, approval_id = None, None
+    async for line in response.body_iterator:
+        event = json.loads(line)
+        if event["type"] == "agent_started":
+            run_id = event["run_id"]
+        if event["type"] == "agent_command_approval_required":
+            approval_id = event["approval_id"]
+            await main.pause_agent_chat_run(run_id)
+    assert load_checkpoint(run_id)["status"] == "paused"
+    session_id = load_checkpoint(run_id)["session_id"]
+    assert store.get_session(session_id)["messages"] == []
+    monkeypatch.setattr(main, "_agent_chat_runs", {})
+    monkeypatch.setattr(main, "_discussion_llm_by_id", lambda *args: ScriptedClient([
+        {"type": "finish", "answer": "操作完成"}, {"type": "finish", "answer": "最终交付"},
+    ]))
+    response = await main.resume_agent_chat_run(run_id)
+    events = []
+    async for line in response.body_iterator:
+        event = json.loads(line)
+        events.append(event)
+        if event["type"] == "agent_command_approval_required":
+            assert event["approval_id"] == approval_id
+            await main.decide_agent_command_endpoint(approval_id, main.AgentCommandDecisionBody(approved=True))
+    assert events[-1]["type"] == "done"
+    assert events[-1]["run_id"] == run_id
+    assert events[-1]["usage_summary"]["input_tokens"] == 40
+    record = load_checkpoint(run_id)
+    assert record["status"] == "completed" and not record["resumable"]
+    assert sum(step["kind"] == "harness.execute" for step in main.SqliteCheckpointStore(run_id).steps()) == 1
+    assert len(store.get_session(session_id)["messages"]) == 2
 
 
 @pytest.mark.asyncio

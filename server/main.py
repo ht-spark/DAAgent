@@ -37,12 +37,16 @@ from data_analysis.agent.graph import (
 from data_analysis.agent.loop import Action, AgentLoop, Finish
 from data_analysis.agent.planner import Planner
 from data_analysis.agent.verifier import Verification, Verifier
+from data_analysis.runtime.checkpoint import CheckpointJournal
 from data_analysis.agent.state import (
     AgentMessage,
     AgentState,
     Observation,
     collect_work_trajectory_from_session,
     discover_artifacts,
+)
+from server.checkpoint_store import (
+    HEARTBEAT_SECONDS, SqliteCheckpointStore, expire_checkpoints, list_checkpoints, load_checkpoint,
 )
 from data_analysis.experts import (
     ExpertEditableSpec,
@@ -176,6 +180,8 @@ class AgentChatRun:
     approval_id: str | None = None
     runtime_dir: Path | None = None
     run_trace: RunTrace | None = None
+    checkpoint: SqliteCheckpointStore | None = None
+    pause_requested: bool = False
 
 
 _agent_chat_runs: dict[str, AgentChatRun] = {}
@@ -204,8 +210,24 @@ async def _replay_agent_chat_run(run: AgentChatRun):
 
 async def _publish_agent_chat_run(run: AgentChatRun, stream) -> None:
     """独立于浏览器连接运行 Agent 并缓存可重放事件。"""
+    terminal = "paused"
+
+    async def heartbeat() -> None:
+        """长模型调用和审批等待期间独立续租，不依赖事件频率。"""
+        while True:
+            await asyncio.sleep(HEARTBEAT_SECONDS)
+            if run.checkpoint is not None:
+                await asyncio.to_thread(run.checkpoint.heartbeat)
+
+    heartbeat_task = asyncio.create_task(heartbeat()) if run.checkpoint else None
     try:
         async for line in stream:
+            incoming = json.loads(line)
+            if run.pause_requested and incoming.get("type") == "cancelled":
+                incoming["type"] = "paused"
+                line = json.dumps(incoming, ensure_ascii=False) + "\n"
+            if incoming.get("type") in {"done", "cancelled", "paused", "error"}:
+                terminal = {"done": "completed", "cancelled": "cancelled", "paused": "paused", "error": "failed"}[incoming["type"]]
             if run.run_trace is not None:
                 payload = json.loads(line)
                 if payload.get("type") in {"error", "cancelled"}:
@@ -220,9 +242,12 @@ async def _publish_agent_chat_run(run: AgentChatRun, stream) -> None:
                     })
                     line = json.dumps(payload, ensure_ascii=False) + "\n"
             async with run.condition:
+                if run.checkpoint is not None and incoming.get("type") != "agent_thinking":
+                    await asyncio.to_thread(run.checkpoint.event, line)
                 run.events.append(line)
                 run.condition.notify_all()
     except Exception as exc:
+        terminal = "failed"
         if run.run_trace is not None:
             run.run_trace.finish("error", type(exc).__name__)
         logger.exception("Background Agent chat run failed")
@@ -237,12 +262,17 @@ async def _publish_agent_chat_run(run: AgentChatRun, stream) -> None:
             run.events.append(json.dumps(payload, ensure_ascii=False) + "\n")
             run.condition.notify_all()
     finally:
+        if heartbeat_task is not None:
+            heartbeat_task.cancel()
+            await asyncio.gather(heartbeat_task, return_exceptions=True)
+        if run.checkpoint is not None:
+            await asyncio.to_thread(run.checkpoint.finish, terminal)
         if run.run_trace is not None:
             run.run_trace.finish(
                 "cancelled" if run.cancel_requested else "error",
                 "TaskCancelledError" if run.cancel_requested else "StreamClosed",
             )
-        if run.runtime_dir is not None:
+        if run.runtime_dir is not None and terminal != "paused":
             await asyncio.to_thread(_cleanup_agent_runtime_dir, run.runtime_dir)
         async with run.condition:
             run.done = True
@@ -1245,12 +1275,17 @@ def _cleanup_agent_runtime_dir(runtime_dir: Path) -> None:
 
 def _cleanup_stale_agent_runtime_dirs(*, now: float | None = None) -> list[Path]:
     """清理服务异常退出后遗留的过期附件目录，并返回成功删除的路径。"""
+    # 未活动的恢复窗口默认 7 天；过期后按既有临时附件保留策略清理，不影响会话产物。
+    expire_checkpoints(7 * 24 * 60 * 60)
     root = AGENT_RUNTIME_ROOT.resolve(strict=False)
     if not root.is_dir():
         return []
     cutoff = (time.time() if now is None else now) - AGENT_RUNTIME_MAX_AGE_SECONDS
+    retained = {record["run_id"] for record in list_checkpoints()}
     removed: list[Path] = []
     for candidate in root.iterdir():
+        if candidate.name in retained:
+            continue
         if not candidate.is_dir() or candidate.is_symlink():
             continue
         target = candidate.resolve(strict=False)
@@ -1833,6 +1868,13 @@ async def decide_agent_command_endpoint(
     decision = _pending_agent_commands.get(approval_id)
     if decision is None or decision.done():
         raise HTTPException(status_code=409, detail="该命令已不再等待批准")
+    for run in _agent_chat_runs.values():
+        if run.approval_id == approval_id and run.checkpoint is not None:
+            record = await asyncio.to_thread(load_checkpoint, run.checkpoint.run_id)
+            pending = record.get("approval") if record else None
+            if pending:
+                await asyncio.to_thread(run.checkpoint.approval, {**pending, "approved": body.approved})
+            break
     decision.set_result(body.approved)
     return {"accepted": True}
 
@@ -2101,6 +2143,40 @@ async def agent_profile_stream_endpoint(
     expert_id: str | None = Form(None),
     project_id: str | None = Form(None),
 ) -> StreamingResponse:
+    """启动新的数据分析任务，检查点选项由服务端配置决定。"""
+    return await _start_agent_chat_run(
+        message=message, discussion_id=discussion_id, title=title, files=files, config_id=config_id,
+        reasoning_effort=reasoning_effort, knowledge_base_id=knowledge_base_id,
+        knowledge_base_ids=knowledge_base_ids, skill_ids=skill_ids, expert_id=expert_id, project_id=project_id,
+    )
+
+
+def _checkpoint_state(state: AgentState) -> dict:
+    """不保存路径授权和客户端；恢复时由会话与项目重新解析授权。"""
+    return state.model_dump(mode="json", exclude={
+        "data_paths", "output_dir", "workspace_root", "available_artifacts", "expert_context", "skill_context",
+    })
+
+
+def _save_agent_discussion_message(*args, **kwargs) -> str:
+    """最终消息按运行标识去重，覆盖消息已提交但 done 尚未落盘的崩溃窗口。"""
+    session_id = args[0]
+    run_id = kwargs.get("assistant_metadata", {}).get("agent_run_id")
+    session = store.get_session(session_id)
+    if session and run_id and any(item.get("role") == "assistant" and
+            item.get("metadata", {}).get("agent_run_id") == run_id for item in session.get("messages", [])):
+        return session_id
+    return save_discussion_message(*args, **kwargs)
+
+
+async def _start_agent_chat_run(
+    message: str, discussion_id: str | None = None, title: str | None = None,
+    files: list[UploadFile] | None = None, config_id: str | None = None,
+    reasoning_effort: str | None = None, knowledge_base_id: str | None = None,
+    knowledge_base_ids: list[str] | None = None, skill_ids: list[str] | None = None,
+    expert_id: str | None = None, project_id: str | None = None,
+    resume_record: dict | None = None,
+) -> StreamingResponse:
     """启动自主决策 Agent，并流式返回回答及工具运行轨迹。"""
     message = message.strip() or "请对上传的数据生成基础画像"
     active_discussion_id = discussion_id or uuid.uuid4().hex
@@ -2145,13 +2221,15 @@ async def agent_profile_stream_endpoint(
         )
     except (ExpertRegistryError, SkillRegistryError) as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    run_id = uuid.uuid4().hex
+    run_id = resume_record["run_id"] if resume_record else uuid.uuid4().hex
 
     if any(
         run.discussion_id == active_discussion_id and not run.done
         for run in _agent_chat_runs.values()
     ):
         raise HTTPException(status_code=409, detail="当前对话已有运行中的 Agent 任务")
+    if not resume_record and list_checkpoints(active_discussion_id):
+        raise HTTPException(status_code=409, detail="当前对话有可恢复的任务，请先继续或终止该任务")
 
     try:
         project = await asyncio.to_thread(
@@ -2162,6 +2240,8 @@ async def agent_profile_stream_endpoint(
     except ProjectWorkspaceError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     workspace_root = Path(str(project["root_path"])) if project else None
+    if resume_record and (str(project["id"]) if project else None) != resume_record["config"].get("project_id"):
+        raise HTTPException(status_code=409, detail="项目授权已变化，无法恢复旧任务")
     if stored_session is None:
         await asyncio.to_thread(
             store.create_session,
@@ -2181,14 +2261,25 @@ async def agent_profile_stream_endpoint(
         )
     session_entries = stored_session.get("messages", []) if stored_session else []
     context_window_tokens = _agent_context_window_tokens(effective_config_id)
+    prior_spans = store.list_agent_spans(run_id) if resume_record else []
+    interrupted_usage = bool(resume_record and (
+        any(not entry["completed"] for entry in SqliteCheckpointStore(run_id).steps())
+        or any(span["name"] == "interrupted_usage_unknown" for span in prior_spans)
+    ))
     run_trace = RunTrace(
         run_id, LocalTraceExporter(AGENT_TRACE_ROOT, run_id, store.save_agent_span),
+        trace_id=resume_record["trace_id"] if resume_record else None,
+        prior_spans=prior_spans,
+        interrupted_usage=interrupted_usage,
     )
+    if interrupted_usage:
+        span = run_trace.begin("fallback", "interrupted_usage_unknown")
+        run_trace.end(span, status="error", error_type="InterruptedUsageUnknown")
     llm = TracedLlmClient(llm, run_trace, pricing=_agent_token_pricing())
     try:
         rolling_context = await asyncio.to_thread(
             compile_rolling_context,
-            session_entries,
+            [] if resume_record else session_entries,
             llm,
             context_window_tokens=context_window_tokens,
         )
@@ -2223,12 +2314,29 @@ async def agent_profile_stream_endpoint(
             )
         except (ProjectWorkspaceError, PythonEnvironmentError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        uploaded_paths = await _prepare_agent_data_files(files, active_discussion_id, run_id)
+        if resume_record:
+            input_root = (AGENT_RUNTIME_ROOT / run_id / "input").resolve()
+            uploaded_paths = []
+            for name in resume_record["config"].get("attachment_names", []):
+                path = (input_root / name).resolve()
+                if Path(name).name != name or input_root not in path.parents or not path.is_file():
+                    raise HTTPException(status_code=409, detail="恢复所需附件已丢失或授权无效")
+                uploaded_paths.append(path)
+        else:
+            uploaded_paths = await _prepare_agent_data_files(files, active_discussion_id, run_id)
         runtime_dir = uploaded_paths[0].parents[1] if uploaded_paths else None
         attachment_context = ""
         data_paths = uploaded_paths
         api_settings = _read_api_settings() or {}
         terminal_shell = _configured_terminal_shell(api_settings)
+        authorization_fingerprint = {
+            "expert_hash": expert_context.expert.bundle_hash if expert_context.expert else None,
+            "skill_hashes": {item.metadata.skill_id: item.metadata.bundle_hash for item in skill_context.active_skills},
+            "terminal_shell": terminal_shell,
+            "project_root_key": project.get("root_key") if project else None,
+        }
+        if resume_record and resume_record["config"].get("authorization_fingerprint") != authorization_fingerprint:
+            raise HTTPException(status_code=409, detail="专家、技能、终端或项目配置已变化，不能沿用原运行及审批")
         tavily_settings = api_settings.get("external_services", {}).get("tavily", {})
         tavily_api_key = (
             tavily_settings.get("apiKey")
@@ -2264,9 +2372,16 @@ async def agent_profile_stream_endpoint(
                 expert_context=expert_context,
                 skill_context=skill_context,
             )
+            if resume_record:
+                state = AgentState.model_validate({**resume_record["state"],
+                    "data_paths": state.data_paths, "output_dir": state.output_dir,
+                    "workspace_root": state.workspace_root, "project_id": state.project_id,
+                    "available_artifacts": state.available_artifacts,
+                    "expert_context": expert_context, "skill_context": skill_context,
+                })
             system_prompt = _load_agent_system_prompt(workspace_root)
         except Exception:
-            if runtime_dir is not None:
+            if runtime_dir is not None and not resume_record:
                 await asyncio.to_thread(_cleanup_agent_runtime_dir, runtime_dir)
             raise
     except BaseException as exc:
@@ -2300,13 +2415,18 @@ async def agent_profile_stream_endpoint(
     tool_mode, max_parallel_tools = _agent_tool_options()
     replan_options = _agent_replan_options()
     verifier_enabled, max_verify_retries = _agent_verify_options()
+    if resume_record:
+        options = resume_record["config"]["graph_options"]
+        tool_mode, max_parallel_tools = options["tool_mode"], options["max_parallel_tools"]
+        replan_options = options["replan_options"]
+        verifier_enabled, max_verify_retries = options["verifier_enabled"], options["max_verify_retries"]
     verifier = Verifier(llm, semantic_enabled=verifier_enabled,
                         cancel_check=_agent_cancel_check, trace=run_trace)
     loop = AgentLoop(
         llm,
         registry.specs(),
         system_prompt,
-        max_iterations=AGENT_MAX_DECISIONS,
+        max_iterations=resume_record["config"]["graph_options"]["max_decisions"] if resume_record else AGENT_MAX_DECISIONS,
         decision_retries=8,
         cancel_check=_agent_cancel_check,
         progress_callback=publish_agent_progress,
@@ -2366,7 +2486,42 @@ async def agent_profile_stream_endpoint(
         on_asset_materialized=execution_context.register_skill_asset,
         cancel_check=_agent_cancel_check,
     )
+    checkpoint_enabled = os.getenv("AGENT_CHECKPOINT_ENABLED", "true").strip().lower() not in {"false", "0", "off", "no"}
+    checkpoint_store = SqliteCheckpointStore(run_id) if checkpoint_enabled or resume_record else None
+    if checkpoint_store is not None:
+        if resume_record:
+            checkpoint_store.claim()
+            chat_run.events = [line for line in resume_record["events"]
+                if json.loads(line).get("type") not in {"paused", "agent_command_approval_required"}]
+        else:
+            checkpoint_store.create(active_discussion_id, {
+                "message": message, "title": title, "config_id": effective_config_id,
+                "reasoning_effort": effective_reasoning_effort, "knowledge_base_ids": selected_base_ids,
+                "skill_ids": list(skill_context.active_ids), "expert_id": expert_id,
+                "project_id": str(project["id"]) if project else None,
+                "attachment_names": [path.name for path in uploaded_paths],
+                "authorization_fingerprint": authorization_fingerprint,
+                "graph_options": {"tool_mode": tool_mode, "max_parallel_tools": max_parallel_tools,
+                    "replan_options": replan_options, "verifier_enabled": verifier_enabled,
+                    "max_verify_retries": max_verify_retries, "max_decisions": AGENT_MAX_DECISIONS},
+            }, _checkpoint_state(state), run_trace.trace_id)
+        chat_run.checkpoint = checkpoint_store
+    journal = CheckpointJournal(checkpoint_store) if checkpoint_store else None
     _agent_chat_runs[run_id] = chat_run
+
+    def prepare_approval(action: Action | SkillAction) -> tuple[str, bool | None]:
+        """审批意图先落盘；恢复时沿用完全相同动作的审批标识与已提交决定。"""
+        previous = resume_record.get("approval") if resume_record else None
+        data = action.model_dump(mode="json")
+        step = journal.position if journal else None
+        if previous and previous.get("action") == data and previous.get("step") == step:
+            identifier, approved = previous["approval_id"], previous.get("approved")
+        else:
+            identifier, approved = uuid.uuid4().hex, None
+        if checkpoint_store is not None:
+            checkpoint_store.approval({"approval_id": identifier, "action": data, "step": step,
+                                       **({"approved": approved} if approved is not None else {})})
+        return identifier, approved
 
     async def event_stream():
         nonlocal attachment_context
@@ -2386,13 +2541,17 @@ async def agent_profile_stream_endpoint(
             ),
             "skill_ids": list(skill_context.active_ids),
         }
-        trace: list[dict[str, object]] = [started_event]
-        yield json.dumps(started_event, ensure_ascii=False) + "\n"
+        trace: list[dict[str, object]] = [json.loads(line) for line in chat_run.events
+            if json.loads(line).get("type", "").startswith("agent_")] if resume_record else [started_event]
+        if not resume_record:
+            yield json.dumps(started_event, ensure_ascii=False) + "\n"
         answer = ""
         knowledge_sources: list[dict[str, str]] = []
 
         async def save_stopped_run(content: str) -> str:
             """保存未完成结果，使任务切换后仍能在历史对话中看到。"""
+            if chat_run.pause_requested:
+                return active_discussion_id
             attachments = _attachment_metadata(uploaded_paths)
             state.work_trajectory.absorb_completed_todos(state.analysis_plan)
             return await asyncio.to_thread(
@@ -2421,7 +2580,7 @@ async def agent_profile_stream_endpoint(
             )
 
         try:
-            if uploaded_paths:
+            if uploaded_paths and not resume_record:
                 attachment_progress = {
                     "type": "agent_thinking",
                     "stream_id": "attachment-preparation",
@@ -2450,6 +2609,8 @@ async def agent_profile_stream_endpoint(
                         ensure_ascii=False,
                     ) + "\n"
 
+            if checkpoint_store is not None and not resume_record:
+                checkpoint_store.set_state(_checkpoint_state(state))
             iterator = iter_plan_graph(
                 state,
                 planner,
@@ -2460,6 +2621,7 @@ async def agent_profile_stream_endpoint(
                 **replan_options,
                 verifier=verifier,
                 max_verify_retries=max_verify_retries,
+                checkpoint=journal,
             )
             async with asyncio.timeout(AGENT_RUN_TIMEOUT_SECONDS):
                 while True:
@@ -2501,6 +2663,8 @@ async def agent_profile_stream_endpoint(
                         return
                     if event is None:
                         break
+                    if journal is not None and journal.replaying:
+                        continue
                     if chat_run.cancel_requested:
                         await save_stopped_run("任务已终止。")
                         yield json.dumps({"type": "cancelled", "run_id": run_id}, ensure_ascii=False) + "\n"
@@ -2532,8 +2696,10 @@ async def agent_profile_stream_endpoint(
                         isinstance(event, Action)
                         and event.tool_name in TERMINAL_TOOL_NAMES
                     ):
-                        approval_id = uuid.uuid4().hex
+                        approval_id, restored_approval = prepare_approval(event)
                         decision = asyncio.get_running_loop().create_future()
+                        if restored_approval is not None:
+                            decision.set_result(restored_approval)
                         _pending_agent_commands[approval_id] = decision
                         chat_run.approval_id = approval_id
                         request_payload = {
@@ -2580,8 +2746,10 @@ async def agent_profile_stream_endpoint(
                         yield json.dumps(decision_payload, ensure_ascii=False) + "\n"
                         continue
                     if isinstance(event, SkillAction) and skill_runtime.requires_approval(event):
-                        approval_id = uuid.uuid4().hex
+                        approval_id, restored_approval = prepare_approval(event)
                         decision = asyncio.get_running_loop().create_future()
+                        if restored_approval is not None:
+                            decision.set_result(restored_approval)
                         _pending_agent_commands[approval_id] = decision
                         chat_run.approval_id = approval_id
                         request_payload = {
@@ -2693,8 +2861,10 @@ async def agent_profile_stream_endpoint(
         )
         state.work_trajectory.absorb_completed_todos(state.analysis_plan)
         usage_summary = run_trace.usage_summary()
+        if checkpoint_store is not None:
+            checkpoint_store.heartbeat()
         saved_discussion_id = await asyncio.to_thread(
-            save_discussion_message,
+            _save_agent_discussion_message,
             active_discussion_id,
             message,
             answer,
@@ -2748,11 +2918,16 @@ async def agent_profile_stream_endpoint(
 
 
 @app.get("/api/agent/discussions/{discussion_id}/active-run")
-async def get_active_agent_chat_run(discussion_id: str) -> dict[str, str] | None:
+async def get_active_agent_chat_run(discussion_id: str) -> dict | None:
     """查询某个对话当前仍在运行的 Agent 任务。"""
     for run_id, run in reversed(list(_agent_chat_runs.items())):
         if run.discussion_id == discussion_id and not run.done:
             return {"run_id": run_id, "message": run.message}
+    records = list_checkpoints(discussion_id)
+    if records:
+        record = records[0]
+        return {"run_id": record["run_id"], "message": record["config"]["message"],
+                "interrupted": True, "resumable": record["resumable"], "checkpoint_seq": record["checkpoint_seq"]}
     return None
 
 
@@ -2761,7 +2936,20 @@ async def reconnect_agent_chat_run(run_id: str) -> StreamingResponse:
     """重连 Agent 运行并回放已产生的事件。"""
     run = _agent_chat_runs.get(run_id)
     if run is None:
-        raise HTTPException(status_code=404, detail="Agent 任务不存在或服务已重启")
+        record = await asyncio.to_thread(load_checkpoint, run_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="Agent 任务不存在")
+
+        async def replay_saved():
+            """离线回放不会自动启动模型或外部工具。"""
+            for line in record["events"]:
+                if json.loads(line).get("type") not in {"agent_command_approval_required", "paused"}:
+                    yield line
+            if record["status"] not in {"completed", "cancelled", "failed", "expired"}:
+                yield json.dumps({"type": "paused", "run_id": run_id, "resumable": record["resumable"],
+                                  "checkpoint_seq": record["checkpoint_seq"]}, ensure_ascii=False) + "\n"
+
+        return StreamingResponse(replay_saved(), media_type="application/x-ndjson")
     return StreamingResponse(
         _replay_agent_chat_run(run),
         media_type="application/x-ndjson",
@@ -2774,6 +2962,10 @@ async def cancel_agent_chat_run(run_id: str) -> dict[str, bool]:
     """请求在当前工具返回后终止 Agent，不再执行下一步。"""
     run = _agent_chat_runs.get(run_id)
     if run is None or run.done:
+        record = await asyncio.to_thread(load_checkpoint, run_id)
+        if record and record["resumable"]:
+            SqliteCheckpointStore(run_id, record["owner"]).finish("cancelled")
+            return {"accepted": True}
         raise HTTPException(status_code=404, detail="Agent 任务不在运行中")
     run.cancel_requested = True
     if run.approval_id:
@@ -2781,6 +2973,50 @@ async def cancel_agent_chat_run(run_id: str) -> dict[str, bool]:
         if decision is not None and not decision.done():
             decision.set_result(False)
     return {"accepted": True}
+
+
+@app.get("/api/agent/chat/runs")
+async def list_resumable_agent_runs(discussion_id: str | None = None) -> list[dict]:
+    """枚举未完成任务及其恢复条件，不返回模型输入或附件正文。"""
+    return [{"run_id": row["run_id"], "discussion_id": row["session_id"],
+             "message": row["config"]["message"], "status": row["status"],
+             "resumable": row["resumable"], "checkpoint_seq": row["checkpoint_seq"]}
+            for row in list_checkpoints(discussion_id)]
+
+
+@app.post("/api/agent/chat/runs/{run_id}/resume")
+async def resume_agent_chat_run(run_id: str) -> StreamingResponse:
+    """重新授权会话、项目和附件后，接管检查点并继续原运行。"""
+    current = _agent_chat_runs.get(run_id)
+    if current is not None and not current.done:
+        raise HTTPException(status_code=409, detail="该任务仍在运行")
+    record = await asyncio.to_thread(load_checkpoint, run_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="找不到可恢复检查点")
+    if not record["resumable"]:
+        raise HTTPException(status_code=409, detail="检查点已结束、版本不兼容或租约尚未释放；中断后请等待最多 30 秒再试")
+    if store.get_session(record["session_id"]) is None:
+        raise HTTPException(status_code=404, detail="原会话已删除，不能恢复授权")
+    config = record["config"]
+    try:
+        return await _start_agent_chat_run(
+            message=config["message"], discussion_id=record["session_id"], title=config.get("title"),
+            config_id=config.get("config_id"), reasoning_effort=config.get("reasoning_effort"),
+            knowledge_base_ids=config.get("knowledge_base_ids"), skill_ids=config.get("skill_ids"),
+            expert_id=config.get("expert_id"), project_id=config.get("project_id"), resume_record=record,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/agent/chat/runs/{run_id}/pause")
+async def pause_agent_chat_run(run_id: str) -> dict[str, bool]:
+    """暂停前保留检查点；当前操作结果不明时恢复后先核查，禁止直接重跑。"""
+    run = _agent_chat_runs.get(run_id)
+    if run is None or run.done or run.checkpoint is None:
+        raise HTTPException(status_code=409, detail="任务不在运行中或检查点未开启")
+    run.pause_requested = True
+    return await cancel_agent_chat_run(run_id)
 
 
 @app.get(

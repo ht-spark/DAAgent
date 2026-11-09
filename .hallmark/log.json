@@ -1,0 +1,30 @@
+﻿[
+ {
+  "entry": "daagent-intro",
+  "shape": "Narrative Workflow",
+  "theme": "almanac",
+  "axes": "mid/grotesk-sans/chromatic-magenta",
+  "hero": "Banner",
+  "nav": "sticky edge-aligned bar, 1px rule",
+  "footer": "statement",
+  "imagery": "screenshots 3 (capture.mjs)",
+  "photos": [],
+  "fingerprint": "Hanging|Two-column asymmetric|Hairline|Outlined|Margin-aligned|None",
+  "sections": [
+   "Hero",
+   "Stance",
+   "Workflow 01-03",
+   "Capabilities",
+   "Platform",
+   "Install",
+   "Footer"
+  ],
+  "signature": "the real Olist GMV series and its口径 footnote",
+  "waived": [
+   "79"
+  ],
+  "prompt": "为 DAAgent 项目生成介绍网页，介绍智能体功能与安装指导",
+  "date": "2026-11-09",
+  "mode": "build"
+ }
+]

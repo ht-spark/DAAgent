@@ -1,0 +1,38 @@
+{
+  "project": "DAAgent",
+  "signals": {
+    "design_md": "absent (no design.md or DESIGN.md at root)",
+    "brand_spec": "absent (no .hallmark/brand-spec.md)",
+    "project_style": [
+      "web/src/index.css:11-75 — brand green #2f684f / #3f7d60, warm paper #f7f6f3, ice teal accent, radii 6-24px",
+      "web/package.json:12-29 — React 18 + Vite 5 + TypeScript, no Tailwind, no design system package",
+      "web/src/App.tsx:239-440 — sidebar shell + content, page-level navigation"
+    ],
+    "product": [
+      "http://localhost:5173 (dev server running) and http://localhost:8000 (API) answered 200",
+      "captured with hallmark scripts/capture.mjs and a puppeteer flow script"
+    ],
+    "assets": [
+      "web/public/logo.png — green/orange bar mark, white background",
+      "docs/image/Project/*.png — project illustrations, not product UI"
+    ],
+    "together_api_key": "absent (.env carries DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL, Tavily_API_KEY)"
+  },
+  "preserved": [
+    "product name DAAgent and its 数据分析智能体 subtitle",
+    "the project's own logo mark (white background removed for use on slate paper)",
+    "README facts: five-step loop, nine tools, six scenarios, install commands, environment requirements",
+    "real product screenshots from the running instance (home, task experts, Olist analysis session)"
+  ],
+  "introduced": [
+    "Almanac theme: cool slate paper, pale sheet, blue-black ink, one deep magenta signal",
+    "Hanken Grotesk display, Newsreader body, IBM Plex Mono figures; CJK fallbacks Microsoft YaHei / STSong",
+    "floating pill nav and statement footer",
+    "Narrative Workflow shape (swapped from the drawn Stat-Led because no real metric exists in the material)"
+  ],
+  "material": {
+    "real": "DAAgent name, five-step loop, nine built-in tools, six scenarios, install commands, Python 3.11+/Node 18+/uv, .env keys, Olist session files",
+    "pictures": "3 real product captures: chart-gmv.png, screen-home.png, screen-experts.png",
+    "absent": "no customer metrics, no testimonials, no customer logos, no price"
+  }
+}

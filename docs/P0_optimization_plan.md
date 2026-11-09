@@ -17,12 +17,12 @@
 
 ### 阶段划分速览
 
-| 阶段 | 内容 | 依赖 | 出口门禁 |
-| --- | --- | --- | --- |
-| A 度量地基 | P0-1 可观测与成本计量、P0-2 离线评测与回归门禁 | 无 | 评测集可运行，基线指标入库，后续所有改动须附 diff |
-| B 决策与执行 | P0-3 原生工具调用与并行、P0-4 动态重规划 | A | 决策轮数下降且评测集通过率不退化 |
-| C 可信闭环 | P0-5 独立验证器、P0-6 检查点与续跑 | A、B | 错误结论可拦截，进程重启可续跑 |
-| D 记忆与安全 | P0-7 分层记忆、P0-8 沙箱与工具策略 | C | 记忆不污染事实，工具出网与命令可审计 |
+| 阶段         | 内容                                           | 依赖 | 出口门禁                                          |
+| ------------ | ---------------------------------------------- | ---- | ------------------------------------------------- |
+| A 度量地基   | P0-1 可观测与成本计量、P0-2 离线评测与回归门禁 | 无   | 评测集可运行，基线指标入库，后续所有改动须附 diff |
+| B 决策与执行 | P0-3 原生工具调用与并行、P0-4 动态重规划       | A    | 决策轮数下降且评测集通过率不退化                  |
+| C 可信闭环   | P0-5 独立验证器、P0-6 检查点与续跑             | A、B | 错误结论可拦截，进程重启可续跑                    |
+| D 记忆与安全 | P0-7 分层记忆、P0-8 沙箱与工具策略             | C    | 记忆不污染事实，工具出网与命令可审计              |
 
 ---
 
@@ -32,12 +32,12 @@
 
 下列事实经源码逐项核对，后续设计与评审均以 `data_analysis/` 当前实现为准，不采用历史文档或旧日志中的口径。
 
-| 常见认知 | 源码实况 | 证据 |
-| --- | --- | --- |
-| 编排基于 LangGraph 状态图 | `pyproject.toml:8` 仍声明 `langgraph`，但全仓 `.py` 无 import；实际是手写生成器 `iter_plan_graph` 的 Plan-and-Execute + 串行 ReAct | `data_analysis/agent/graph.py:151-283` |
+| 常见认知                                                   | 源码实况                                                                                                                                                               | 证据                                                                                                                    |
+| ---------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| 编排基于 LangGraph 状态图                                  | `pyproject.toml:8` 仍声明 `langgraph`，但全仓 `.py` 无 import；实际是手写生成器 `iter_plan_graph` 的 Plan-and-Execute + 串行 ReAct                             | `data_analysis/agent/graph.py:151-283`                                                                                |
 | SEARCH / CANDIDATE / CODE_REPAIR / VALIDATION 四类阻塞预算 | 当前源码无该枚举，名称仅见于 `server/uvicorn.out` 遗留日志（指向旧 MMAgent）；实际为全局决策轮数 160、单 Todo 30 步、重规划 ≤2、失败熔断 3，以及字符/token/超时上限 | `server/main.py:151-154`、`data_analysis/agent/state.py:683-692`、`data_analysis/context/rolling_memory.py:12-24` |
-| 三道质量门 G0/GQ/GF、异步任务队列 | 旧版 PRD 文案，服务端无实现；`server/runs.py` 已删除，旧接口统一 410 | `docs/PRD.md:84,137`、`server/main.py:2707-2711` |
-| 文档与代码一致 | 存在偏差：`docs/Architecture.md:126` 称"有 Tavily 密钥才注册联网工具"，实际 `registry.py:511-536` 无条件注册；`AGENTS.md:31` 引用已删除文件 | `data_analysis/tools/registry.py:511`、`data_analysis/tools/web_search.py:44-45` |
+| 三道质量门 G0/GQ/GF、异步任务队列                          | 旧版 PRD 文案，服务端无实现；`server/runs.py` 已删除，旧接口统一 410                                                                                                 | `docs/PRD.md:84,137`、`server/main.py:2707-2711`                                                                    |
+| 文档与代码一致                                             | 存在偏差：`docs/Architecture.md:126` 称"有 Tavily 密钥才注册联网工具"，实际 `registry.py:511-536` 无条件注册；`AGENTS.md:31` 引用已删除文件                      | `data_analysis/tools/registry.py:511`、`data_analysis/tools/web_search.py:44-45`                                    |
 
 ### 1.2 设计约束
 
@@ -53,16 +53,16 @@
 
 ### 1.3 P0 缺口全景
 
-| 原清单项 | 本文档编号 | 能力 | 现状证据 | 主要影响 |
-| --- | --- | --- | --- | --- |
-| 6 | P0-1 | 可观测性与成本计量 | `server/*.py` 无 trace/metrics；`Observation` 仅 `duration_ms`（`state.py:132-159`、`harness.py:54,100`） | 无法定位死循环、无法归因成本、无法审计 |
-| 7 | P0-2 | 评测与回归门禁 | 无 eval/benchmark；无 `chat/stream` 端到端测试 | 改动无安全网，回归靠人工看 demo |
-| 1 | P0-3 | 原生 function calling 与并行工具 | 文本 JSON 协议且"仅可选择其中之一"（`loop.py:289-302`）；`Action` 单 `tool_name`（`:93-101`）；`llm.py:86-103` 无 `bind_tools` | 工具调用成功率受格式约束、长任务轮数与延迟偏高 |
-| 2 | P0-4 | 动态重规划 | 计划只生成一次（`graph.py:176`）；Planner 看不到 observations（`planner.py:203-250`）；重规划仅失败触发且 ≤2（`:243-246`） | 计划与证据脱节，中途发现数据不符时无法改道 |
-| 3 | P0-5 | 独立验证器 / 反思 | 校验散在提示词 `prompts/system.md:42,107`、退出码 `harness.py:102-112`、`Observation` 模型约束 | 错误随步数复利，交付物无代码级复核 |
-| 4 | P0-6 | checkpoint / 崩溃恢复 | 运行注册表为内存 dict（`main.py:174`）；重启重连 404（`:2581`）；取消即终止（`:2250-2272`） | 长任务不可暂停/恢复，HITL 只是进程内暂停 |
-| 5 | P0-7 | 跨会话长期记忆 | 仅会话内滚动摘要 `context/rolling_memory.py:146-211` 与轨迹 `state.py:302-515`；Memory Engine 属规划文案 | 指标口径、已验证方法每次重来 |
-| 8 | P0-8 | OS 级沙箱与工具策略 | `runtime/sandbox.py:1` 自述"演示实现"；4 个 `run_in_process` 工具（`registry.py:485,511,742,777`）；终端任意命令靠人工批准；`skills/runtime.py:139-140` 因无网络隔离禁用 network | 提示注入与数据外泄缺少结构性防线 |
+| 原清单项 | 本文档编号 | 能力                             | 现状证据                                                                                                                                                                                 | 主要影响                                       |
+| -------- | ---------- | -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------- |
+| 6        | P0-1       | 可观测性与成本计量               | `server/*.py` 无 trace/metrics；`Observation` 仅 `duration_ms`（`state.py:132-159`、`harness.py:54,100`）                                                                      | 无法定位死循环、无法归因成本、无法审计         |
+| 7        | P0-2       | 评测与回归门禁                   | 无 eval/benchmark；无 `chat/stream` 端到端测试                                                                                                                                         | 改动无安全网，回归靠人工看 demo                |
+| 1        | P0-3       | 原生 function calling 与并行工具 | 文本 JSON 协议且"仅可选择其中之一"（`loop.py:289-302`）；`Action` 单 `tool_name`（`:93-101`）；`llm.py:86-103` 无 `bind_tools`                                               | 工具调用成功率受格式约束、长任务轮数与延迟偏高 |
+| 2        | P0-4       | 动态重规划                       | 计划只生成一次（`graph.py:176`）；Planner 看不到 observations（`planner.py:203-250`）；重规划仅失败触发且 ≤2（`:243-246`）                                                        | 计划与证据脱节，中途发现数据不符时无法改道     |
+| 3        | P0-5       | 独立验证器 / 反思                | 校验散在提示词 `prompts/system.md:42,107`、退出码 `harness.py:102-112`、`Observation` 模型约束                                                                                     | 错误随步数复利，交付物无代码级复核             |
+| 4        | P0-6       | checkpoint / 崩溃恢复            | 运行注册表为内存 dict（`main.py:174`）；重启重连 404（`:2581`）；取消即终止（`:2250-2272`）                                                                                        | 长任务不可暂停/恢复，HITL 只是进程内暂停       |
+| 5        | P0-7       | 跨会话长期记忆                   | 仅会话内滚动摘要 `context/rolling_memory.py:146-211` 与轨迹 `state.py:302-515`；Memory Engine 属规划文案                                                                             | 指标口径、已验证方法每次重来                   |
+| 8        | P0-8       | OS 级沙箱与工具策略              | `runtime/sandbox.py:1` 自述"演示实现"；4 个 `run_in_process` 工具（`registry.py:485,511,742,777`）；终端任意命令靠人工批准；`skills/runtime.py:139-140` 因无网络隔离禁用 network | 提示注入与数据外泄缺少结构性防线               |
 
 ---
 
@@ -107,20 +107,20 @@ flowchart TD
 
 ### 2.2 新增模块与职责
 
-| 模块 | 建议文件 | 职责 | 阶段 |
-| --- | --- | --- | --- |
-| 可观测 | `data_analysis/observability/trace.py` | `RunTrace` / `Span` 数据模型，span 树与父子关系 | A |
-| 用量采集 | `data_analysis/observability/usage.py` | 从 LangChain `AIMessage.usage_metadata` 提取 token，兼容缺失 | A |
-| LLM 装饰器 | `data_analysis/observability/client.py` | `TracedLlmClient` 实现 `LlmClient` Protocol，包装原客户端 | A |
-| 导出 | `data_analysis/observability/exporter.py` | JSONL + SQLite 双写，不发起网络请求 | A |
-| 评测集 | `tests/evals/dataset/*.jsonl` | 20-30 条标准任务与期望轨迹 | A |
-| 评测执行器 | `tests/evals/run_eval.py` | mock LLM + 真实工具，产出指标与基线 diff | A |
-| 决策批量化 | `data_analysis/agent/decision.py` | `ActionBatch`、`step_batch()`、tool_calls 解析与 JSON 降级 | B |
-| 重规划 | `data_analysis/agent/planner.py` 扩展 | `reassess()`、`recent_observations` 上下文、通用计划合并 | B |
-| 验证器 | `data_analysis/agent/verifier.py` + `prompts/verifier.md` | 确定性检查 + 语义检查，结构化 `Verification` | C |
-| 检查点 | `data_analysis/runtime/checkpoint.py` | `CheckpointStore` 接口与 SQLite 实现、快照序列化 | C |
-| 记忆 | `data_analysis/memory/` | `models.py` / `extractor.py` / `store.py` / `retriever.py` | D |
-| 工具策略 | `data_analysis/runtime/policy.py` + `terminal_policy.yaml` | 工具风险元数据、域名白名单、命令策略、审计 | D |
+| 模块       | 建议文件                                                       | 职责                                                               | 阶段 |
+| ---------- | -------------------------------------------------------------- | ------------------------------------------------------------------ | ---- |
+| 可观测     | `data_analysis/observability/trace.py`                       | `RunTrace` / `Span` 数据模型，span 树与父子关系                | A    |
+| 用量采集   | `data_analysis/observability/usage.py`                       | 从 LangChain `AIMessage.usage_metadata` 提取 token，兼容缺失     | A    |
+| LLM 装饰器 | `data_analysis/observability/client.py`                      | `TracedLlmClient` 实现 `LlmClient` Protocol，包装原客户端      | A    |
+| 导出       | `data_analysis/observability/exporter.py`                    | JSONL + SQLite 双写，不发起网络请求                                | A    |
+| 评测集     | `tests/evals/dataset/*.jsonl`                                | 20-30 条标准任务与期望轨迹                                         | A    |
+| 评测执行器 | `tests/evals/run_eval.py`                                    | mock LLM + 真实工具，产出指标与基线 diff                           | A    |
+| 决策批量化 | `data_analysis/agent/decision.py`                            | `ActionBatch`、`step_batch()`、tool_calls 解析与 JSON 降级     | B    |
+| 重规划     | `data_analysis/agent/planner.py` 扩展                        | `reassess()`、`recent_observations` 上下文、通用计划合并       | B    |
+| 验证器     | `data_analysis/agent/verifier.py` + `prompts/verifier.md`  | 确定性检查 + 语义检查，结构化 `Verification`                     | C    |
+| 检查点     | `data_analysis/runtime/checkpoint.py`                        | `CheckpointStore` 接口与 SQLite 实现、快照序列化                 | C    |
+| 记忆       | `data_analysis/memory/`                                      | `models.py` / `extractor.py` / `store.py` / `retriever.py` | D    |
+| 工具策略   | `data_analysis/runtime/policy.py` + `terminal_policy.yaml` | 工具风险元数据、域名白名单、命令策略、审计                         | D    |
 
 ### 2.3 关键数据结构（示意，注释说明字段作用）
 
@@ -197,15 +197,15 @@ class ActionBatch(BaseModel):
 3. **执行器** `run_eval.py` 复用真实 `ToolRegistry` / `Harness` / `iter_plan_graph`，在临时目录运行；从 P0-1 的 `RunTrace` 提取轨迹。
 4. **指标定义**：
 
-| 指标 | 定义 | 采集来源 |
-| --- | --- | --- |
-| `task_success_rate` | 产出 `Finish` 且满足 `expectations` 的比例 | 事件流 |
-| `evidence_grounded_rate` | 结论中出现的数值可在 `Observation` 或产物中找到来源的比例 | 确定性比对，不调 LLM |
-| `avg_decisions` / `p95_decisions` | 决策轮数均值与 95 分位 | `RunBudget.iterations` |
-| `tool_error_rate` | `success=False` 的 `Observation` 占比 | span |
-| `replan_count` | 失败重规划 + 自适应重规划次数 | span |
-| `artifact_validity` | 声明的产物存在、可解析、大小合理 | 文件校验 |
-| `verifier_catch_rate` | 错误结论被拦截比例（P0-5 上线后启用） | `Verification` |
+| 指标                                  | 定义                                                        | 采集来源                 |
+| ------------------------------------- | ----------------------------------------------------------- | ------------------------ |
+| `task_success_rate`                 | 产出 `Finish` 且满足 `expectations` 的比例              | 事件流                   |
+| `evidence_grounded_rate`            | 结论中出现的数值可在 `Observation` 或产物中找到来源的比例 | 确定性比对，不调 LLM     |
+| `avg_decisions` / `p95_decisions` | 决策轮数均值与 95 分位                                      | `RunBudget.iterations` |
+| `tool_error_rate`                   | `success=False` 的 `Observation` 占比                   | span                     |
+| `replan_count`                      | 失败重规划 + 自适应重规划次数                               | span                     |
+| `artifact_validity`                 | 声明的产物存在、可解析、大小合理                            | 文件校验                 |
+| `verifier_catch_rate`               | 错误结论被拦截比例（P0-5 上线后启用）                       | `Verification`         |
 
 5. **门禁**：`tests/evals/baseline.json` 记录各指标基线；`run_eval.py --check` 在 `task_success_rate`、`evidence_grounded_rate` 低于阈值或 `avg_decisions` 超出上限时以非零码退出。`pyproject.toml` 增加 `markers = ["eval: ..."]`。
 
@@ -385,12 +385,12 @@ flowchart LR
 
 依赖关系说明：P0-4 与 P0-5 都需要观察投影（`loop.py:472-516`）；P0-6 必须能序列化 P0-3 新增的 `ActionBatch`，故排在阶段 C；P0-7 的记忆抽取与 P0-8 的审计都依赖 P0-1 的 trace 与 P0-6 的检查点。
 
-| 阶段 | 交付物 | 阶段门禁（全部满足才进入下一阶段） |
-| --- | --- | --- |
-| A | span 树导出、评测集 20-30 条、基线 JSON、CI marker | `pytest -m eval` 全绿；无 API key 可运行；基线指标入库 |
-| B | `ActionBatch`、`Harness.execute_many`、`reassess()` | `avg_decisions` 下降 ≥20% 且 `task_success_rate` 不退化；JSON 降级路径测试全绿 |
-| C | `Verifier`、`CheckpointStore`、resume 端点 | 错误结论拦截率 ≥80%；进程重启续跑通过；预算不重复计数 |
-| D | 记忆模块、策略与审计 | 记忆冲突用例通过；密钥不进子进程 env；`run_in_process` 清零或隔离 |
+| 阶段 | 交付物                                                    | 阶段门禁（全部满足才进入下一阶段）                                                  |
+| ---- | --------------------------------------------------------- | ----------------------------------------------------------------------------------- |
+| A    | span 树导出、评测集 20-30 条、基线 JSON、CI marker        | `pytest -m eval` 全绿；无 API key 可运行；基线指标入库                            |
+| B    | `ActionBatch`、`Harness.execute_many`、`reassess()` | `avg_decisions` 下降 ≥20% 且 `task_success_rate` 不退化；JSON 降级路径测试全绿 |
+| C    | `Verifier`、`CheckpointStore`、resume 端点            | 错误结论拦截率 ≥80%；进程重启续跑通过；预算不重复计数                              |
+| D    | 记忆模块、策略与审计                                      | 记忆冲突用例通过；密钥不进子进程 env；`run_in_process` 清零或隔离                 |
 
 每阶段内部执行顺序：写针对性测试 → 最小实现 → focused test → 相关 suite → 前端如有改动则 `npm run build` → 更新 `tests/evals/baseline.json` 与本文 §9 清单。
 
@@ -421,13 +421,13 @@ flowchart LR
 
 ### 5.2 CI 门禁阈值
 
-| 指标 | 门禁条件 | 作用 |
-| --- | --- | --- |
-| `task_success_rate` | ≥ 基线 − 0 个百分点 | 任何改动不得降低任务完成率 |
-| `evidence_grounded_rate` | ≥ 基线 | 防止"看起来对但无证据"的答案 |
-| `avg_decisions` | ≤ 基线 × 1.10 | 防止重规划/验证器引入步数膨胀 |
-| `tool_error_rate` | ≤ 基线 × 1.20 | 防止工具协议改造引入执行错误 |
-| `artifact_validity` | = 100% | 声明产物必须真实可用 |
+| 指标                       | 门禁条件              | 作用                          |
+| -------------------------- | --------------------- | ----------------------------- |
+| `task_success_rate`      | ≥ 基线 − 0 个百分点 | 任何改动不得降低任务完成率    |
+| `evidence_grounded_rate` | ≥ 基线               | 防止"看起来对但无证据"的答案  |
+| `avg_decisions`          | ≤ 基线 × 1.10       | 防止重规划/验证器引入步数膨胀 |
+| `tool_error_rate`        | ≤ 基线 × 1.20       | 防止工具协议改造引入执行错误  |
+| `artifact_validity`      | = 100%                | 声明产物必须真实可用          |
 
 阈值集中在 `tests/evals/thresholds.json`，修改需评审；每个参数在文件内以中文注释说明作用与调整影响。
 
@@ -437,47 +437,47 @@ flowchart LR
 
 所有新增配置统一在服务端设置与 `.env.example` 中登记；**每个超参数必须在代码注释与下表说明作用、默认值与调整影响**。
 
-| 参数 | 默认值 | 作用 | 调整影响 |
-| --- | --- | --- | --- |
-| `LLM_STREAM_USAGE` | `auto` | 沿用客户端兼容策略；`true` 请求流式用量，`false` 禁用请求 | 支持的自定义端点设 `true` 可补齐用量；不支持时应设 `false`，缺失计量保留未知 |
-| `AGENT_LLM_INPUT_COST_PER_MILLION` | 空 | 当前模型输入 token 的美元/百万单价；需与输出单价同时提供 | 调大提高估算，不影响决策；切换模型须同步调整，缺失或无效时成本为 `null` |
-| `AGENT_LLM_OUTPUT_COST_PER_MILLION` | 空 | 当前模型输出 token 的美元/百万单价；需与输入单价同时提供 | 调大提高估算，不影响决策；缺失用量时仍为 `null`，不代表实际账单 |
-| `AGENT_MAX_DECISIONS` | 160 | 整轮运行共享的决策轮数上限，含全部 Todo 与最终汇总（`main.py:153`） | 调大允许更复杂任务但放大成本与失控风险；调小会让长任务提前 `IterationLimitError` |
-| `max_todo_steps` | 30 | 单个 Todo 的决策轮数上限（`graph.py:160`），防止一个 Todo 吃掉整轮预算 | 调小会更频繁触发失败重规划；调大削弱隔离效果 |
-| `failure_replans` | 2 | 失败熔断触发的恢复规划次数上限（`graph.py:159`） | 与 `adaptive_replans` 独立计数，避免重规划无限循环 |
-| `AGENT_ADAPTIVE_REPLAN_ENABLED` | `true`（服务端） | 开启成功路径复审；库级调度入口默认关闭以兼容旧调用 | `false` 关闭复审，真实观察可见与失败恢复仍保留 |
-| `AGENT_MAX_ADAPTIVE_REPLANS` / `max_adaptive_replans` | 2 | 成功路径计划改变次数上限，含提前结束；范围 0～8 | 调大增加适应机会和模型开销；0 禁用，与失败恢复预算独立 |
-| `AGENT_REPLAN_CHECK_INTERVAL` / `replan_check_interval` | 0 | 0 只在 Todo 边界复审；正数按工具决策批次间隔，范围 0～160 | 调小提高中途响应速度与开销；无新证据时不重复复审 |
-| `AGENT_MAX_PLAN_REVIEWS` / `max_plan_reviews` | 6 | 复审次数上限，含继续与失败；范围 0～24 | 调大增加额外模型调用；0 禁用，每次还受 Planner 格式纠错次数限制 |
-| `MAX_RECENT_OBSERVATIONS` | 16 | 跨 Todo 传递的真实工具/技能观察窗口，覆盖一个最大工具批次 | 调大增加内存和可见历史；提示词仍经过有界投影 |
-| `AGENT_TOOL_MODE` / `tool_mode` | `auto`（服务端）；`json`（旧单步兼容构造） | `native` / `json` / `auto`，控制批量入口的协议与降级策略 | `json` 恢复单工具；`auto` 在明确不支持或解析失败后降级，`native` 保留错误 |
-| `AGENT_MAX_PARALLEL_TOOLS` / `max_parallel_tools` | 4 | 显式许可的只读工具最大并发数，1～16 | 1 禁用并行；调大增加内存与外部请求压力，任何写入/非并行工具令整批串行 |
-| `ActionBatch.actions` 数量上限 | 16 | 限制单次模型回复的执行放大 | 超出时拒绝整批并纠错/降级；调整需同步 schema 与协议提示，不改变并发上限 |
-| `verifier_enabled` | `true` | 是否启用语义验证器（P0-5 新增）；确定性检查始终开启 | 关闭后仅保留文件/引用/语法检查，成本下降但错误结论拦截率下降 |
-| `max_verify_retries` | 1 | 验证失败后允许回灌观察并修订的次数（P0-5 新增） | 调大会提高修复率但可能造成循环；超出后按 `uncertain` 显式披露 |
-| `checkpoint_enabled` | `true` | 是否按事件落盘状态快照（P0-6 新增） | 关闭后回到纯内存运行，失去崩溃恢复能力 |
-| `checkpoint_full_interval` | 10 | 每多少次观察写一次全量快照，其间写增量（P0-6 新增） | 调小提升恢复精度但增加 SQLite 写放大；调大降低写入但恢复点更粗 |
-| `pause_on_cancel` | `false` | 取消时落 `paused` 快照而非终止（P0-6 新增） | 开启后改变现有取消语义，需前端配合展示"可续跑" |
-| `memory_enabled` | `false` | 是否启用跨会话记忆抽取与召回（P0-7 新增），默认灰度关闭 | 开启后增加一次抽取 LLM 调用与向量写入；污染风险由去重与 TTL 控制 |
-| `memory_top_k` | 5 | 单次任务召回的记忆条数（P0-7 新增） | 调大提升复用率但挤压上下文预算，并增加冲突概率 |
-| `memory_char_budget` | 3000 | 注入 `session_memory` 的记忆总字符上限（P0-7 新增） | 需与 `planner.py:30-41` 的历史字符预算一并核算 |
-| `network_allowlist` | 空列表 | 允许出网的域名白名单（P0-8 新增） | 为空时默认拒绝出网；新增域名需评审，防止数据外泄 |
-| `legacy_in_process_tools` | `true` | 是否保留 4 个主进程工具的旧执行路径（P0-8 新增） | 迁移期回滚开关，最终应设为 `false` |
-| `eval_success_rate_threshold` | 基线值 | 评测门禁的任务完成率下限（P0-2 新增） | 只许调高不许调低，防止用降阈值掩盖退化 |
+| 参数                                                        | 默认值                                         | 作用                                                                     | 调整影响                                                                           |
+| ----------------------------------------------------------- | ---------------------------------------------- | ------------------------------------------------------------------------ | ---------------------------------------------------------------------------------- |
+| `LLM_STREAM_USAGE`                                        | `auto`                                       | 沿用客户端兼容策略；`true` 请求流式用量，`false` 禁用请求            | 支持的自定义端点设 `true` 可补齐用量；不支持时应设 `false`，缺失计量保留未知   |
+| `AGENT_LLM_INPUT_COST_PER_MILLION`                        | 空                                             | 当前模型输入 token 的美元/百万单价；需与输出单价同时提供                 | 调大提高估算，不影响决策；切换模型须同步调整，缺失或无效时成本为 `null`          |
+| `AGENT_LLM_OUTPUT_COST_PER_MILLION`                       | 空                                             | 当前模型输出 token 的美元/百万单价；需与输入单价同时提供                 | 调大提高估算，不影响决策；缺失用量时仍为 `null`，不代表实际账单                  |
+| `AGENT_MAX_DECISIONS`                                     | 160                                            | 整轮运行共享的决策轮数上限，含全部 Todo 与最终汇总（`main.py:153`）    | 调大允许更复杂任务但放大成本与失控风险；调小会让长任务提前 `IterationLimitError` |
+| `max_todo_steps`                                          | 30                                             | 单个 Todo 的决策轮数上限（`graph.py:160`），防止一个 Todo 吃掉整轮预算 | 调小会更频繁触发失败重规划；调大削弱隔离效果                                       |
+| `failure_replans`                                         | 2                                              | 失败熔断触发的恢复规划次数上限（`graph.py:159`）                       | 与 `adaptive_replans` 独立计数，避免重规划无限循环                               |
+| `AGENT_ADAPTIVE_REPLAN_ENABLED`                           | `true`（服务端）                             | 开启成功路径复审；库级调度入口默认关闭以兼容旧调用                       | `false` 关闭复审，真实观察可见与失败恢复仍保留                                   |
+| `AGENT_MAX_ADAPTIVE_REPLANS` / `max_adaptive_replans`   | 2                                              | 成功路径计划改变次数上限，含提前结束；范围 0～8                          | 调大增加适应机会和模型开销；0 禁用，与失败恢复预算独立                             |
+| `AGENT_REPLAN_CHECK_INTERVAL` / `replan_check_interval` | 0                                              | 0 只在 Todo 边界复审；正数按工具决策批次间隔，范围 0～160                | 调小提高中途响应速度与开销；无新证据时不重复复审                                   |
+| `AGENT_MAX_PLAN_REVIEWS` / `max_plan_reviews`           | 6                                              | 复审次数上限，含继续与失败；范围 0～24                                   | 调大增加额外模型调用；0 禁用，每次还受 Planner 格式纠错次数限制                    |
+| `MAX_RECENT_OBSERVATIONS`                                 | 16                                             | 跨 Todo 传递的真实工具/技能观察窗口，覆盖一个最大工具批次                | 调大增加内存和可见历史；提示词仍经过有界投影                                       |
+| `AGENT_TOOL_MODE` / `tool_mode`                         | `auto`（服务端）；`json`（旧单步兼容构造） | `native` / `json` / `auto`，控制批量入口的协议与降级策略           | `json` 恢复单工具；`auto` 在明确不支持或解析失败后降级，`native` 保留错误    |
+| `AGENT_MAX_PARALLEL_TOOLS` / `max_parallel_tools`       | 4                                              | 显式许可的只读工具最大并发数，1～16                                      | 1 禁用并行；调大增加内存与外部请求压力，任何写入/非并行工具令整批串行              |
+| `ActionBatch.actions` 数量上限                            | 16                                             | 限制单次模型回复的执行放大                                               | 超出时拒绝整批并纠错/降级；调整需同步 schema 与协议提示，不改变并发上限            |
+| `verifier_enabled`                                        | `true`                                       | 是否启用语义验证器（P0-5 新增）；确定性检查始终开启                      | 关闭后仅保留文件/引用/语法检查，成本下降但错误结论拦截率下降                       |
+| `max_verify_retries`                                      | 1                                              | 验证失败后允许回灌观察并修订的次数（P0-5 新增）                          | 调大会提高修复率但可能造成循环；超出后按 `uncertain` 显式披露                    |
+| `checkpoint_enabled`                                      | `true`                                       | 是否按事件落盘状态快照（P0-6 新增）                                      | 关闭后回到纯内存运行，失去崩溃恢复能力                                             |
+| `checkpoint_full_interval`                                | 10                                             | 每多少次观察写一次全量快照，其间写增量（P0-6 新增）                      | 调小提升恢复精度但增加 SQLite 写放大；调大降低写入但恢复点更粗                     |
+| `pause_on_cancel`                                         | `false`                                      | 取消时落 `paused` 快照而非终止（P0-6 新增）                            | 开启后改变现有取消语义，需前端配合展示"可续跑"                                     |
+| `memory_enabled`                                          | `false`                                      | 是否启用跨会话记忆抽取与召回（P0-7 新增），默认灰度关闭                  | 开启后增加一次抽取 LLM 调用与向量写入；污染风险由去重与 TTL 控制                   |
+| `memory_top_k`                                            | 5                                              | 单次任务召回的记忆条数（P0-7 新增）                                      | 调大提升复用率但挤压上下文预算，并增加冲突概率                                     |
+| `memory_char_budget`                                      | 3000                                           | 注入 `session_memory` 的记忆总字符上限（P0-7 新增）                    | 需与 `planner.py:30-41` 的历史字符预算一并核算                                   |
+| `network_allowlist`                                       | 空列表                                         | 允许出网的域名白名单（P0-8 新增）                                        | 为空时默认拒绝出网；新增域名需评审，防止数据外泄                                   |
+| `legacy_in_process_tools`                                 | `true`                                       | 是否保留 4 个主进程工具的旧执行路径（P0-8 新增）                         | 迁移期回滚开关，最终应设为 `false`                                               |
+| `eval_success_rate_threshold`                             | 基线值                                         | 评测门禁的任务完成率下限（P0-2 新增）                                    | 只许调高不许调低，防止用降阈值掩盖退化                                             |
 
 ---
 
 ## 7. 风险登记与回滚
 
-| 风险 | 概率 | 影响 | 缓解措施 | 回滚方式 |
-| --- | --- | --- | --- | --- |
-| 并行工具造成文件/网络竞态 | 中 | 结果不确定、产物覆盖 | `parallel_safe` 白名单、`mutating` 强制串行、顺序回写 | `tool_mode=json`、`max_parallel_tools=1` |
-| 重规划循环或步数膨胀 | 中 | 成本失控、超时 | 双上限、仅触发点调用、`avg_decisions` 门禁 | `adaptive_replan_enabled=false` |
-| 验证器误判阻断正常交付 | 中 | 任务失败率上升 | `uncertain` 不阻断、重试上限 1、确定性检查与语义检查分离 | `verifier_enabled=false` |
-| 快照反序列化失败或引用丢失 | 高 | 续跑失败、预算被放大 | `schema_version`、`RunBudget` 单一实例重建、路径引用化 | `checkpoint_enabled=false` |
-| 记忆污染结论 | 中 | 事实错误且难排查 | 默认关闭、只抽可验证事实、冲突以观察为准、按 run_id 可删 | `memory_enabled=false` |
-| 工具迁移破坏知识库/视觉链路 | 中 | 检索或图片复核不可用 | 先策略后隔离、`legacy_in_process_tools` 开关、模型单例缓存 | 开关切回旧路径 |
-| 文档与实现再次漂移 | 高 | 后续改造基于错误前提 | 每阶段同步更新 `docs/Architecture.md` 与本文 §9 | 以源码为准，文档修订不阻塞代码回滚 |
+| 风险                        | 概率 | 影响                 | 缓解措施                                                     | 回滚方式                                     |
+| --------------------------- | ---- | -------------------- | ------------------------------------------------------------ | -------------------------------------------- |
+| 并行工具造成文件/网络竞态   | 中   | 结果不确定、产物覆盖 | `parallel_safe` 白名单、`mutating` 强制串行、顺序回写    | `tool_mode=json`、`max_parallel_tools=1` |
+| 重规划循环或步数膨胀        | 中   | 成本失控、超时       | 双上限、仅触发点调用、`avg_decisions` 门禁                 | `adaptive_replan_enabled=false`            |
+| 验证器误判阻断正常交付      | 中   | 任务失败率上升       | `uncertain` 不阻断、重试上限 1、确定性检查与语义检查分离   | `verifier_enabled=false`                   |
+| 快照反序列化失败或引用丢失  | 高   | 续跑失败、预算被放大 | `schema_version`、`RunBudget` 单一实例重建、路径引用化   | `checkpoint_enabled=false`                 |
+| 记忆污染结论                | 中   | 事实错误且难排查     | 默认关闭、只抽可验证事实、冲突以观察为准、按 run_id 可删     | `memory_enabled=false`                     |
+| 工具迁移破坏知识库/视觉链路 | 中   | 检索或图片复核不可用 | 先策略后隔离、`legacy_in_process_tools` 开关、模型单例缓存 | 开关切回旧路径                               |
+| 文档与实现再次漂移          | 高   | 后续改造基于错误前提 | 每阶段同步更新 `docs/Architecture.md` 与本文 §9           | 以源码为准，文档修订不阻塞代码回滚           |
 
 ---
 
@@ -493,15 +493,15 @@ flowchart LR
 
 ## 9. 验收清单
 
-- [x] A：`TracedLlmClient` 可在不改 `AgentLoop`/`Planner` 构造的前提下采集 usage
-- [x] A（P0-1、P0-5）：span 树覆盖 run/plan/todo/llm/tool/skill/approval/verify
+- [X] A：`TracedLlmClient` 可在不改 `AgentLoop`/`Planner` 构造的前提下采集 usage
+- [X] A（P0-1、P0-5）：span 树覆盖 run/plan/todo/llm/tool/skill/approval/verify
 - [ ] A：`pytest -m eval` 无 API key、无网络可运行，含 ≥20 条用例
 - [ ] A：基线指标与阈值文件入库，退化时 CI 非零退出
-- [x] B：`tool_calls` 与 JSON 双协议可用，`auto` 降级有 span 记录
-- [x] B：`mutating` 工具零并行、批量结果顺序确定
+- [X] B：`tool_calls` 与 JSON 双协议可用，`auto` 降级有 span 记录
+- [X] B：`mutating` 工具零并行、批量结果顺序确定
 - [ ] B：`avg_decisions` 下降 ≥20% 且完成率不退化
-- [x] B：`reassess` revise 后依赖无环、已完成 Todo 与产物保留
-- [x] C（P0-5）：独立复核、有限修订与 `uncertain` 在 `done` 中显式披露
+- [X] B：`reassess` revise 后依赖无环、已完成 Todo 与产物保留
+- [X] C（P0-5）：独立复核、有限修订与 `uncertain` 在 `done` 中显式披露
 - [ ] C：真实模型评测集错误结论拦截率 ≥80%
 - [ ] C：进程重启可从检查点续跑，`RunBudget` 不重复计数
 - [ ] C：审批等待中重启可继续批准
@@ -514,21 +514,21 @@ flowchart LR
 
 ## 附录 A：源码锚点索引
 
-| 主题 | 位置 |
-| --- | --- |
-| 主循环与事件 | `data_analysis/agent/graph.py:42-73, 151-283, 285-337, 375-415, 418-519` |
-| 决策与工具协议 | `data_analysis/agent/loop.py:83-101, 149-259, 279-302, 472-516, 575` |
-| 规划器 | `data_analysis/agent/planner.py:73-183, 185-256` |
-| 状态与预算 | `data_analysis/agent/state.py:24-112, 132-159, 302-515, 683-717, 772-809` |
-| 执行框架 | `data_analysis/runtime/harness.py:19-128`；`runtime/sandbox.py:52-216` |
-| 工具注册 | `data_analysis/tools/registry.py:79-137, 313-842` |
-| LLM 客户端 | `data_analysis/llm.py:14-103` |
-| 上下文压缩 | `data_analysis/context/rolling_memory.py:12-24, 146-211` |
-| 提示词 | `data_analysis/prompts/system.md`、`planner.md` |
-| 服务装配与流式 | `server/main.py:148-215, 2056-2224, 2304-2457, 2505-2600` |
-| 持久化 | `server/store.py:16-89` |
-| 知识库检索 | `KnowledgeBase/main.py:55-126`；`data_analysis/tools/knowledge_tools.py:16-70` |
-| 测试配置 | `pyproject.toml:44-47`；`tests/unit/test_data_agent_api.py` |
+| 主题           | 位置                                                                               |
+| -------------- | ---------------------------------------------------------------------------------- |
+| 主循环与事件   | `data_analysis/agent/graph.py:42-73, 151-283, 285-337, 375-415, 418-519`         |
+| 决策与工具协议 | `data_analysis/agent/loop.py:83-101, 149-259, 279-302, 472-516, 575`             |
+| 规划器         | `data_analysis/agent/planner.py:73-183, 185-256`                                 |
+| 状态与预算     | `data_analysis/agent/state.py:24-112, 132-159, 302-515, 683-717, 772-809`        |
+| 执行框架       | `data_analysis/runtime/harness.py:19-128`；`runtime/sandbox.py:52-216`         |
+| 工具注册       | `data_analysis/tools/registry.py:79-137, 313-842`                                |
+| LLM 客户端     | `data_analysis/llm.py:14-103`                                                    |
+| 上下文压缩     | `data_analysis/context/rolling_memory.py:12-24, 146-211`                         |
+| 提示词         | `data_analysis/prompts/system.md`、`planner.md`                                |
+| 服务装配与流式 | `server/main.py:148-215, 2056-2224, 2304-2457, 2505-2600`                        |
+| 持久化         | `server/store.py:16-89`                                                          |
+| 知识库检索     | `KnowledgeBase/main.py:55-126`；`data_analysis/tools/knowledge_tools.py:16-70` |
+| 测试配置       | `pyproject.toml:44-47`；`tests/unit/test_data_agent_api.py`                    |
 
 ## 附录 B：主流能力基线参考
 
