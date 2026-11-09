@@ -4,6 +4,7 @@ import json
 import asyncio
 import sys
 import threading
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -75,8 +76,22 @@ async def test_paused_approval_survives_run_reconstruction(api_context, monkeypa
     from server.checkpoint_store import load_checkpoint
 
     monkeypatch.setattr(main, "AGENT_COMMAND_APPROVAL_TIMEOUT_SECONDS", 5)
+    writes = []
+    def registry_factory(data_paths, output_dir, **kwargs):
+        registry = ToolRegistry()
+        def write(arguments, context):
+            writes.append("write")
+            target = Path(output_dir) / "before_pause.txt"
+            target.write_text("已完成的交付", encoding="utf-8")
+            return {"path": str(target)}
+        registry.register_in_process(ToolSpec("write", "写交付文件"), write)
+        registry.register_in_process(ToolSpec("run_terminal_command", "执行命令"),
+                                     lambda arguments, context: {"exit_code": 0})
+        return registry
+    monkeypatch.setattr(main, "create_agent_tool_registry", registry_factory)
     response = await _start(monkeypatch, [
         {"objective": "检查", "todos": [{"id": "t", "objective": "执行", "expected_outputs": ["证据"]}]},
+        {"type": "action", "tool_name": "write", "arguments": {}},
         {"type": "action", "tool_name": "run_terminal_command", "arguments": {"command": "测试命令"}},
     ])
     run_id, approval_id = None, None
@@ -88,6 +103,7 @@ async def test_paused_approval_survives_run_reconstruction(api_context, monkeypa
             approval_id = event["approval_id"]
             await main.pause_agent_chat_run(run_id)
     assert load_checkpoint(run_id)["status"] == "paused"
+    assert event["type"] == "paused" and event["usage_summary"]["input_tokens"] == 30
     session_id = load_checkpoint(run_id)["session_id"]
     assert store.get_session(session_id)["messages"] == []
     monkeypatch.setattr(main, "_agent_chat_runs", {})
@@ -104,11 +120,23 @@ async def test_paused_approval_survives_run_reconstruction(api_context, monkeypa
             await main.decide_agent_command_endpoint(approval_id, main.AgentCommandDecisionBody(approved=True))
     assert events[-1]["type"] == "done"
     assert events[-1]["run_id"] == run_id
-    assert events[-1]["usage_summary"]["input_tokens"] == 40
+    assert events[-1]["usage_summary"]["input_tokens"] == 50
+    assert writes == ["write"]
+    assert [item["name"] for item in events[-1]["artifacts"]] == ["before_pause.txt"]
     record = load_checkpoint(run_id)
     assert record["status"] == "completed" and not record["resumable"]
-    assert sum(step["kind"] == "harness.execute" for step in main.SqliteCheckpointStore(run_id).steps()) == 1
+    assert sum(step["kind"] == "harness.execute" for step in main.SqliteCheckpointStore(run_id).steps()) == 2
     assert len(store.get_session(session_id)["messages"]) == 2
+    # 模拟最终消息已提交、done 事件未保存的中断窗口，离线重连仍能从历史消息补全交付。
+    with store._lock:
+        conn = store._connect()
+        conn.execute("DELETE FROM agent_checkpoint_events WHERE run_id=? AND json_extract(payload,'$.type')='done'", (run_id,))
+        conn.commit()
+    monkeypatch.setattr(main, "_agent_chat_runs", {})
+    offline = await main.reconnect_agent_chat_run(run_id)
+    replay = [json.loads(line) async for line in offline.body_iterator]
+    assert replay[-1]["type"] == "done"
+    assert "".join(item["content"] for item in replay if item["type"] == "token") == "最终交付"
 
 
 @pytest.mark.asyncio

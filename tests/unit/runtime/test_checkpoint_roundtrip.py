@@ -8,6 +8,7 @@ from data_analysis.agent.graph import iter_plan_graph
 from data_analysis.agent.loop import Action, Finish
 from data_analysis.agent.state import AgentState, AnalysisPlan, Observation
 from data_analysis.runtime.checkpoint import CheckpointJournal
+from data_analysis.observability.trace import RunTrace
 from server import store
 from server.checkpoint_store import SqliteCheckpointStore, load_checkpoint
 
@@ -77,9 +78,21 @@ def test_lease_claim_and_schema_version_prevent_duplicate_resume(checkpoint):
     SqliteCheckpointStore("run", "winner").claim()
     with pytest.raises(ValueError):
         SqliteCheckpointStore("run", "second").claim()
+    with pytest.raises(RuntimeError):
+        checkpoint.begin("harness.execute", {})
     SqliteCheckpointStore("run", "winner").finish("paused")
     with store._lock:
         conn = store._connect()
         conn.execute("UPDATE agent_checkpoints SET schema_version=99")
         conn.commit()
     assert not load_checkpoint("run")["resumable"]
+
+
+def test_interrupted_usage_preserves_known_subtotal_without_claiming_complete_total():
+    trace = RunTrace("run", trace_id="stable", interrupted_usage=True)
+    span = trace.begin("llm", "after_resume")
+    trace.end(span, input_tokens=10, output_tokens=2)
+    summary = trace.usage_summary()
+    assert summary["known_input_tokens"] == 10
+    assert summary["input_tokens"] is None and summary["output_tokens"] is None
+    assert summary["interrupted_usage"]

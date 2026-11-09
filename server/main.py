@@ -230,10 +230,10 @@ async def _publish_agent_chat_run(run: AgentChatRun, stream) -> None:
                 terminal = {"done": "completed", "cancelled": "cancelled", "paused": "paused", "error": "failed"}[incoming["type"]]
             if run.run_trace is not None:
                 payload = json.loads(line)
-                if payload.get("type") in {"error", "cancelled"}:
+                if payload.get("type") in {"error", "cancelled", "paused"}:
                     run.run_trace.finish(
-                        "cancelled" if payload["type"] == "cancelled" else "error",
-                        "TaskCancelledError" if payload["type"] == "cancelled" else "RunFailed",
+                        "cancelled" if payload["type"] in {"cancelled", "paused"} else "error",
+                        "TaskCancelledError" if payload["type"] in {"cancelled", "paused"} else "RunFailed",
                     )
                     payload.update({
                         "run_id": run.run_trace.run_id,
@@ -266,7 +266,10 @@ async def _publish_agent_chat_run(run: AgentChatRun, stream) -> None:
             heartbeat_task.cancel()
             await asyncio.gather(heartbeat_task, return_exceptions=True)
         if run.checkpoint is not None:
-            await asyncio.to_thread(run.checkpoint.finish, terminal)
+            try:
+                await asyncio.to_thread(run.checkpoint.finish, terminal)
+            except Exception:
+                logger.exception("保存运行终态失败，保留已有执行日志用于排查")
         if run.run_trace is not None:
             run.run_trace.finish(
                 "cancelled" if run.cancel_requested else "error",
@@ -2306,6 +2309,9 @@ async def _start_agent_chat_run(
             active_discussion_id,
             workspace_root,
         )
+        if resume_record:
+            artifacts_before_run = {key: tuple(value) for key, value in
+                                    resume_record["config"].get("artifacts_before_run", {}).items()}
         try:
             python_environment = (
                 resolve_project_python(project)
@@ -2492,7 +2498,7 @@ async def _start_agent_chat_run(
         if resume_record:
             checkpoint_store.claim()
             chat_run.events = [line for line in resume_record["events"]
-                if json.loads(line).get("type") not in {"paused", "agent_command_approval_required"}]
+                if json.loads(line).get("type") not in {"paused", "agent_command_approval_required", "token", "agent_thinking"}]
         else:
             checkpoint_store.create(active_discussion_id, {
                 "message": message, "title": title, "config_id": effective_config_id,
@@ -2500,6 +2506,7 @@ async def _start_agent_chat_run(
                 "skill_ids": list(skill_context.active_ids), "expert_id": expert_id,
                 "project_id": str(project["id"]) if project else None,
                 "attachment_names": [path.name for path in uploaded_paths],
+                "artifacts_before_run": artifacts_before_run,
                 "authorization_fingerprint": authorization_fingerprint,
                 "graph_options": {"tool_mode": tool_mode, "max_parallel_tools": max_parallel_tools,
                     "replan_options": replan_options, "verifier_enabled": verifier_enabled,
@@ -2547,6 +2554,8 @@ async def _start_agent_chat_run(
             yield json.dumps(started_event, ensure_ascii=False) + "\n"
         answer = ""
         knowledge_sources: list[dict[str, str]] = []
+        for saved_event in trace:
+            knowledge_sources = _merge_knowledge_sources(knowledge_sources, saved_event.get("sources", []))
 
         async def save_stopped_run(content: str) -> str:
             """保存未完成结果，使任务切换后仍能在历史对话中看到。"""
@@ -2691,7 +2700,9 @@ async def _start_agent_chat_run(
                             await asyncio.sleep(FINAL_ANSWER_CHUNK_DELAY_SECONDS)
                         break
                     payload = _agent_event_payload(event)
-                    trace.append(payload)
+                    replayed_payload = bool(resume_record and journal and not journal.live and payload in trace)
+                    if not replayed_payload:
+                        trace.append(payload)
                     if (
                         isinstance(event, Action)
                         and event.tool_name in TERMINAL_TOOL_NAMES
@@ -2710,12 +2721,15 @@ async def _start_agent_chat_run(
                             "timeout_seconds": event.arguments.get("timeout_seconds"),
                             "workspace_root": str(workspace_root),
                         }
-                        trace.append(request_payload)
+                        if restored_approval is None:
+                            trace.append(request_payload)
                         approval_span = run_trace.begin("approval", "terminal_command")
                         approved = False
                         approval_error = "ApprovalDenied"
-                        yield json.dumps(payload, ensure_ascii=False) + "\n"
-                        yield json.dumps(request_payload, ensure_ascii=False) + "\n"
+                        if not replayed_payload:
+                            yield json.dumps(payload, ensure_ascii=False) + "\n"
+                        if restored_approval is None:
+                            yield json.dumps(request_payload, ensure_ascii=False) + "\n"
                         try:
                             approved = await asyncio.wait_for(
                                 decision, AGENT_COMMAND_APPROVAL_TIMEOUT_SECONDS,
@@ -2763,12 +2777,15 @@ async def _start_agent_chat_run(
                             "timeout_seconds": None,
                             "workspace_root": str(workspace_root or PROJECT_ROOT),
                         }
-                        trace.append(request_payload)
+                        if restored_approval is None:
+                            trace.append(request_payload)
                         approval_span = run_trace.begin("approval", "skill_script")
                         approved = False
                         approval_error = "ApprovalDenied"
-                        yield json.dumps(payload, ensure_ascii=False) + "\n"
-                        yield json.dumps(request_payload, ensure_ascii=False) + "\n"
+                        if not replayed_payload:
+                            yield json.dumps(payload, ensure_ascii=False) + "\n"
+                        if restored_approval is None:
+                            yield json.dumps(request_payload, ensure_ascii=False) + "\n"
                         try:
                             approved = await asyncio.wait_for(
                                 decision, AGENT_COMMAND_APPROVAL_TIMEOUT_SECONDS,
@@ -2817,7 +2834,8 @@ async def _start_agent_chat_run(
                             ensure_ascii=False,
                         ) + "\n"
                         return
-                    yield json.dumps(payload, ensure_ascii=False) + "\n"
+                    if not replayed_payload:
+                        yield json.dumps(payload, ensure_ascii=False) + "\n"
         except TimeoutError:
             detail = "Agent 运行超时，请稍后重试。"
             failure_payload = {"type": "agent_failed", "error": detail}
@@ -2853,8 +2871,8 @@ async def _start_agent_chat_run(
             artifacts = []
         attachments = _attachment_metadata(uploaded_paths)
         context_usage = estimate_context_usage_after_turn(
-            rolling_context.memory_summary,
-            rolling_context.recent_messages,
+            state.memory_summary,
+            resume_record["state"].get("messages", []) if resume_record else rolling_context.recent_messages,
             state.user_query,
             answer,
             context_window_tokens=context_window_tokens,
@@ -2942,12 +2960,27 @@ async def reconnect_agent_chat_run(run_id: str) -> StreamingResponse:
 
         async def replay_saved():
             """离线回放不会自动启动模型或外部工具。"""
+            has_done = any(json.loads(line).get("type") == "done" for line in record["events"])
+            session = store.get_session(record["session_id"]) if record["status"] == "completed" and not has_done else None
+            delivered = next((item for item in (session or {}).get("messages", [])
+                if item.get("role") == "assistant" and item.get("metadata", {}).get("agent_run_id") == run_id), None)
             for line in record["events"]:
-                if json.loads(line).get("type") not in {"agent_command_approval_required", "paused"}:
+                kind = json.loads(line).get("type")
+                if kind not in {"agent_command_approval_required", "paused"} and not (delivered and kind == "token"):
                     yield line
+            if delivered:
+                metadata = delivered["metadata"]
+                yield json.dumps({"type": "token", "content": delivered["content"]}, ensure_ascii=False) + "\n"
+                yield json.dumps({"type": "done", "run_id": run_id, "discussion_id": record["session_id"],
+                    "trace_id": record["trace_id"], "usage_summary": metadata.get("usage_summary"),
+                    "artifacts": metadata.get("agent_artifacts", []), "sources": metadata.get("sources", []),
+                    "verification_summary": metadata.get("verification_summary"),
+                    "context_usage": metadata.get("context_usage")}, ensure_ascii=False) + "\n"
             if record["status"] not in {"completed", "cancelled", "failed", "expired"}:
                 yield json.dumps({"type": "paused", "run_id": run_id, "resumable": record["resumable"],
                                   "checkpoint_seq": record["checkpoint_seq"]}, ensure_ascii=False) + "\n"
+            elif record["status"] == "cancelled" and not any(json.loads(line).get("type") == "cancelled" for line in record["events"]):
+                yield json.dumps({"type": "cancelled", "run_id": run_id}) + "\n"
 
         return StreamingResponse(replay_saved(), media_type="application/x-ndjson")
     return StreamingResponse(

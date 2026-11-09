@@ -294,29 +294,25 @@ class ActionBatch(BaseModel):
 
 ---
 
-### P0-6 持久化执行与检查点
+### P0-6 持久化执行与检查点（已实施，2026-11-09）
 
-**现状**：`AgentChatRun` 与 `_agent_chat_runs` 纯内存（`main.py:160-174`）；事件可回放但服务重启后 `reconnect_agent_chat_run`（`:2576-2586`）返回 404；`AgentState` 只在请求内存；`_pending_agent_commands`（`:155`）亦为内存；取消后保存"任务已终止"并结束（`:2250-2272`）。
+**实施前**：运行、审批 future 和流事件只在内存中，服务重启后无法重连续跑。
 
-**目标**：状态按事件落盘；进程崩溃/重启后可从最近检查点续跑；审批等待可恢复；取消可选择"暂停"而非终止。
+**实际实现与规划调整**：
 
-**设计**：
+1. **持久日志检查点**：同库新增 `agent_checkpoints`、`agent_checkpoint_steps`、`agent_checkpoint_events` 三张表。运行时的 `CheckpointStore` 协议与 `CheckpointJournal` 不接触数据库或授权目录，SQLite 适配放在 `server/checkpoint_store.py`。保存一份初始状态，后续按序提交决策、观察与公开事件，替代重复序列化完整子状态的定期全量快照，减少大观察的写放大。流式思考片段仍为瞬态，不逐 token 写库。
+2. **恢复机制**：`iter_plan_graph(checkpoint=journal)` 用已保存的返回值重演纯图状态转换，不重新请求已完成的 LLM 或执行已完成工具。原生批量动作、计划复审、失败恢复、Skill 和独立验证均进入日志；重新构造同一个运行级 `RunBudget`，所有 Todo 和最终修订继续共享它，观察只计数一次。重复保护、失败计数、计划状态及修订次数随重演恢复；执行顺序不兼容时停止，不执行新工具。
+3. **不明副作用**：先提交工具执行意图，后保存实际结果。若进程在两者之间中断，恢复时返回“外部影响未知、先核查真实状态”的失败观察，不直接重跑原操作。实际是否需要补查或重新执行仍由 LLM 决定。无法保证外部操作与 SQLite 跨系统的恰好一次提交，不把缺失结果误当成操作没有发生。
+4. **重新授权**：初始状态排除路径授权、完整专家/技能上下文和客户端。只保存附件名称、项目/会话及模型配置 ID；服务端恢复时重新解析输出目录、附件、项目环境、当前模型和服务凭据，不序列化服务配置中的密钥。核对专家及 Skill 包 hash、项目标识/根目录标识和终端 Shell；变化时拒绝沿用旧运行及审批。保存原图选项和总决策上限，附件缺失、会话删除、版本不兼容均明确拒绝恢复。
+5. **审批与并发**：审批请求在展示前落盘，决定在 future 放行前落盘；恢复后仅对“动作内容＋执行日志位置”完全相同的请求沿用原审批 ID 和已提交决定。每次恢复有独立所有者令牌，5 秒续租、30 秒租约，SQL 原子接管防止双重恢复，旧所有者不能继续提交。硬崩溃后最多等待 30 秒才可接管。
+6. **入口与界面**：新增 `POST /api/agent/chat/runs/{run_id}/pause`、`POST .../resume` 和 `GET /api/agent/chat/runs`。既有 stream 在内存未命中时回放数据库事件，未结束任务返回 paused、resumable、checkpoint_seq；GET 不自动启动工具。会话可发现未完成任务，前端提供“暂停并保存进度”“继续任务”“终止任务”。原取消入口仍表示终止；暂停独立保存，不向历史插入伪终止回答。恢复后保留断点前生成产物的交付清单，最终历史消息按 run_id 去重；消息已提交但 done 未保存时可从消息补全离线回放。
+7. **保留与计量**：未完成检查点保护其临时附件，默认 7 天未活动后失效，再按原临时目录策略清理；会话产物不受影响。复用原 run_id/trace_id 和已结束 span，重演不产生新的历史耗时或 token；中断可能丢失用量时，仅显示已知小计，总量标为未知。终态事件保存后结束租约，已完成任务仍可离线重放。
 
-1. **存储**：`server/store.py` 的同库新增 `agent_checkpoints` 表（`run_id, seq, kind, state_json, created_at`，索引 `(run_id, seq)`）；`CheckpointStore` 接口放 `data_analysis/runtime/checkpoint.py`，SQLite 实现放 `server/` 侧适配，决策层不持有文件系统权限（符合 `docs/Architecture.md:78-85` 依赖规则）。
-2. **快照内容**：`AgentState.model_dump(mode="json")` + `AnalysisPlan` + `current_todo_id` + 两类 replan 计数 + `trace_id` + 当前 `RepeatGuard` / `FailureTracker` 指纹摘要。**安全约束**：不写入明文密钥；`authorized_paths`、`output_dir` 用相对化或引用 ID 保存，恢复时由服务端按会话重新授权。
-3. **共享引用修正**：`RunBudget` 当前按引用在 Todo 间共享（`state.py:683-692`、`graph.py:488`）。序列化后恢复必须重建**单一实例**并重新绑定到所有子状态，否则总预算被放大到「Todo 数 × 上限」。这是本项最易出错处，需专门测试。
-4. **落盘时机**：`PlanCreated`、`TodoStarted/Completed/Failed`、每个 `Observation`、**审批事件下发前**（`main.py:2386-2419`，先落盘再暂停）、`Finish`。采用「每 `checkpoint_full_interval` 步全量 + 其间增量 observation」以控制写放大。
-5. **恢复入口**：`iter_plan_graph(..., resume_from=Checkpoint)` 重建 state/plan 并从 `current_todo_id` 继续；`_todo_state`（`graph.py:463-492`）改为可从快照中的 todo observations 恢复。服务端新增 `POST /api/agent/chat/runs/{run_id}/resume`；`reconnect_agent_chat_run` 在内存未命中时查库并返回 `resumable: true` 与 `checkpoint_seq`。
-6. **审批恢复**：待审批的 `approval_id` 落盘，恢复时重建 `_pending_agent_commands` future；重放时沿用 `_replay_agent_chat_run`（`main.py:177-195`）已有的 `approval_id` 过滤逻辑。
-7. **取消语义**：默认保持现行为；开关 `pause_on_cancel=true` 时落 `paused` 快照而不是终止。`AGENT_RUNTIME_MAX_AGE_SECONDS`（`main.py:148`）的清理策略需同步覆盖过期检查点。
+**开关**：`AGENT_CHECKPOINT_ENABLED=true` 默认开启；false 只关闭新任务的持久化，不删除旧检查点，也不阻止显式恢复旧任务。已经在升级前启动且没有检查点的任务不能追溯恢复。
 
-**改动文件**：新增 `data_analysis/runtime/checkpoint.py`、`server/checkpoint_store.py`；修改 `data_analysis/agent/graph.py`、`server/store.py`、`server/main.py`（启动装配、审批、重连、取消、done）。
+**本次验收**：聚焦测试覆盖从工具观察边界恢复、工具只执行一次、共享预算不放大、不明副作用不重跑、租约互斥与旧所有者失效、不兼容版本、用量下界；服务集成模拟清空内存后重建运行，覆盖待审批 ID 延续、断点前产物不重写且仍交付、用量累计、历史消息去重和最终事件补全。相关 Python 回归与前端构建通过；未开展真实模型、多进程强杀压力或任意版本迁移测试。
 
-**验收标准**：运行中途终止进程并重启，可从最近检查点续跑，已生成产物不重复生成；审批等待中重启可继续批准；`RunBudget.iterations` 恢复后既不重置也不重复计数；未完成 run 在重启后可枚举。
-
-**回归测试**：`tests/unit/runtime/test_checkpoint_roundtrip.py`（含 `RunBudget` 共享引用）；`tests/unit/test_resume_from_approval.py`（mock LLM 与审批）。
-
-**风险与回滚**：快照含绝对路径或过期授权导致越权，`extra="forbid"` 下模型字段新增引发旧快照反序列化失败。缓解：快照带 `schema_version`，不兼容时降级为"不可续跑"并明确提示；开关 `checkpoint_enabled=false` 回到纯内存行为。
+**主要文件**：`data_analysis/runtime/checkpoint.py`、`server/checkpoint_store.py`、`data_analysis/agent/graph.py`、`server/main.py`、`server/store.py`、`web/src/api.ts`、`web/src/pages/NewChat.tsx`。核心回归位于 `tests/unit/runtime/test_checkpoint_roundtrip.py` 与 `tests/unit/test_agent_observability_api.py`。
 
 ---
 
@@ -503,8 +499,8 @@ flowchart LR
 - [X] B：`reassess` revise 后依赖无环、已完成 Todo 与产物保留
 - [X] C（P0-5）：独立复核、有限修订与 `uncertain` 在 `done` 中显式披露
 - [ ] C：真实模型评测集错误结论拦截率 ≥80%
-- [ ] C：进程重启可从检查点续跑，`RunBudget` 不重复计数
-- [ ] C：审批等待中重启可继续批准
+- [X] C（P0-6）：检查点恢复可续跑，`RunBudget` 不重复计数（模拟重建验收）
+- [X] C（P0-6）：审批等待可在重建运行后继续批准
 - [ ] D：记忆冲突用例以本次观察为准，关闭记忆时行为不变
 - [ ] D：`network_allowlist` 生效、子进程 env 无密钥、终端操作可审计
 - [ ] 全程：`tests/` 新增测试均 mock LLM 与网络；前端改动后 `npm run build` 通过

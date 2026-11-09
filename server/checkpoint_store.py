@@ -14,7 +14,6 @@ SCHEMA_VERSION = 1
 # 每 5 秒由独立心跳续租 30 秒；崩溃后最多等待 30 秒即可安全接管，防止两个进程同时恢复。
 LEASE_SECONDS = 30
 HEARTBEAT_SECONDS = 5
-PROCESS_OWNER = uuid.uuid4().hex
 TERMINAL = {"completed", "cancelled", "failed", "expired"}
 
 
@@ -82,9 +81,9 @@ def list_checkpoints(session_id: str | None = None) -> list[dict[str, Any]]:
 class SqliteCheckpointStore:
     """带所有权校验的单次运行存储适配器。"""
 
-    def __init__(self, run_id: str, owner: str = PROCESS_OWNER) -> None:
+    def __init__(self, run_id: str, owner: str | None = None) -> None:
         self.run_id = run_id
-        self.owner = owner
+        self.owner = owner or uuid.uuid4().hex
 
     def create(self, session_id: str, config: dict, state: dict, trace_id: str) -> None:
         """保存不含客户端和凭据的初始状态与恢复配置。"""
